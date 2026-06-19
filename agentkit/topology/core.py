@@ -126,16 +126,10 @@ def select_topology(spec: TaskSpec) -> TopologyChoice:
 # DAG generation — emit the agentkit.runtime {"nodes","edges"} shape.
 # ---------------------------------------------------------------------------
 
-def _llm_node(prompt: str, model: str) -> dict:
-    return {"type": "llm", "payload": {"prompt": prompt, "model": model}}
-
-
-def _tool_node(sleep_s: float) -> dict:
-    return {"type": "tool", "payload": {"sleep_s": sleep_s}}
-
-
 def _node(prompt: str, *, llm: bool, model: str, sleep_s: float) -> dict:
-    return _llm_node(prompt, model) if llm else _tool_node(sleep_s)
+    if llm:
+        return {"type": "llm", "payload": {"prompt": prompt, "model": model}}
+    return {"type": "tool", "payload": {"sleep_s": sleep_s}}
 
 
 def generate_dag(
