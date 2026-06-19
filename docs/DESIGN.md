@@ -658,6 +658,47 @@ synthesizes):
 > Surfaced + fixed here: `tree` originally had **no join** (leaves un-synthesized);
 > it now emits `orchestrator→leaves→gather`, matching the lab's hierarchical.
 
+**Worked example (verbatim, live oMLX + SearXNG).** The real per-node trace for
+each topology on the task above. Sub-tasks: (1) *identify three candidate
+open-source vector DBs*, (2) *compare them on Apple-Silicon support / memory /
+speed*, (3) *recommend the best with justification*. Each `[node]` line is the
+node's real grounded answer (trimmed):
+
+```text
+single / gateway / durable_board  (1 node, peak 1)
+  [agent|entry] I recommend ChromaDB … lightweight, easy to install via Python,
+                designed for developer-friendly local workflows.
+
+pipeline  (3 nodes, peak 1 — each stage reads the previous)
+  [stage1] Candidates: OpenSearch, Apache Cassandra, pgvector.
+  [stage2] All run on Apple Silicon, but pgvector is most efficient — it operates
+           within PostgreSQL and leverages the unified-memory architecture.
+  [stage3] Best = pgvector: its PostgreSQL integration leverages Apple Silicon's
+           unified memory more efficiently than distributed alternatives.
+
+star / mesh  (5 nodes, peak 3 — dispatch → 3 parallel workers → reduce)
+  [dispatch] (frames the task) … ChromaDB …
+  [worker1]  Candidates: ChromaDB, pgvector, OpenSearch.
+  [worker2]  ChromaDB better suited to Apple Silicon (lightweight vs Milvus).
+  [worker3]  Best = ChromaDB (minimal footprint, ideal for local-first RAG).
+  [reduce]   Best = ChromaDB: lightweight, runs efficiently alongside large models.
+
+tree  (5 nodes, peak 3 — orchestrator → 3 leaves → gather)
+  [orchestrator] (frames the task) … ChromaDB …
+  [leaf1]  Candidates: ChromaDB, pgvector, OpenSearch.
+  [leaf2]  ChromaDB superior — minimal footprint on Apple Silicon.
+  [leaf3]  Best = ChromaDB.
+  [gather] Best = ChromaDB: lightweight, efficient within constrained shared memory.
+```
+
+> **Topology changed the conclusion.** The chained **pipeline** recommended
+> **pgvector** (stage 2 reasoned about Apple-Silicon efficiency → the
+> unified-memory angle → pgvector-in-PostgreSQL), while the fan-out shapes
+> (**star/tree/single**) recommended **ChromaDB** from independent per-node picks.
+> Same task, same model, same web backend — *different topology, different
+> answer*. That is the point of making topology a first-class, rule-selected
+> choice rather than a hidden default.
+
 **API.** `TaskSpec`, `TopologyChoice`, `select_topology`, `generate_dag`,
 topology/trigger constants, `TopologyConfig`, `build_config`, `to_json`/`from_json`,
 `write_config`/`load_config`, `emit_topologies_py`/`write_topologies_py`,
