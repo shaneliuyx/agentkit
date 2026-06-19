@@ -156,9 +156,8 @@ def generate_dag(
         edges = [[f"stage{i}", f"stage{i + 1}"] for i in range(1, len(subs))]
         return {"nodes": nodes, "edges": edges}, 1
 
-    if top in (STAR, MESH):
-        # 1 dispatch → N leaves → 1 reduce. (Mesh is approximated as fan-out +
-        # reduce; true peer-to-peer needs a message bus, out of DAG scope.)
+    if top == STAR:
+        # 1 dispatch → N independent workers (no cross-talk) → 1 reduce.
         nodes = {"dispatch": nd(spec.task)}
         for i, s in enumerate(subs, 1):
             nodes[f"worker{i}"] = nd(s)
@@ -166,6 +165,25 @@ def generate_dag(
         edges = [["dispatch", f"worker{i}"] for i in range(1, len(subs) + 1)]
         edges += [[f"worker{i}", "reduce"] for i in range(1, len(subs) + 1)]
         return {"nodes": nodes, "edges": edges}, len(subs)
+
+    if top == MESH:
+        # Peer-to-peer, approximated in a DAG as TWO ROUNDS with full cross-talk
+        # (a true A↔B↔C mesh is cyclic — impossible in a DAG): round-1 each peer
+        # drafts a hypothesis (parallel); round-2 each peer REVISES after reading
+        # EVERY peer's round-1 (the cross-read a star/tree never has); then
+        # reduce. True cyclic peer chat needs a message bus, out of DAG scope.
+        n = len(subs)
+        nodes = {"dispatch": nd(spec.task)}
+        for i, s in enumerate(subs, 1):
+            nodes[f"peer{i}_r1"] = nd(s)
+        for i, s in enumerate(subs, 1):
+            nodes[f"peer{i}_r2"] = nd(f"Reconsider given your peers' findings: {s}")
+        nodes["reduce"] = nd("Synthesize the debated peer results into a final answer.")
+        edges = [["dispatch", f"peer{i}_r1"] for i in range(1, n + 1)]
+        edges += [[f"peer{j}_r1", f"peer{i}_r2"]          # full peer cross-talk
+                  for i in range(1, n + 1) for j in range(1, n + 1)]
+        edges += [[f"peer{i}_r2", "reduce"] for i in range(1, n + 1)]
+        return {"nodes": nodes, "edges": edges}, n
 
     if top == TREE:
         # orchestrator → leaves → gather: the leaves are synthesized by a join
@@ -219,6 +237,13 @@ def _demo() -> None:
     assert sum(1 for e in dag["edges"] if e[1] == "reduce") == 3
     dag2, conc2 = generate_dag(select_topology(fix), fix, llm=False)
     assert conc2 == 1 and dag2["edges"] == [["stage1", "stage2"], ["stage2", "stage3"]]
+
+    # mesh: each round-2 peer must read EVERY round-1 peer (cross-talk), which a
+    # star never has — that is what makes mesh different from a fan-out.
+    md, mc = generate_dag(select_topology(dbg), dbg, llm=False)
+    assert mc == 3 and "peer1_r2" in md["nodes"]
+    r2_deps = {e[0] for e in md["edges"] if e[1] == "peer1_r2"}
+    assert r2_deps == {"peer1_r1", "peer2_r1", "peer3_r1"}, r2_deps
     print("topology.core._demo OK")
 
 

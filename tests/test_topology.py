@@ -78,6 +78,21 @@ def test_generate_dag_tree_has_gather_join():
 
 
 @pytest.mark.unit
+def test_generate_dag_mesh_has_peer_cross_talk():
+    spec = TaskSpec("debug", subtasks=("a", "b", "c"), subtasks_independent=True,
+                    workers_challenge=True)
+    dag, conc = generate_dag(select_topology(spec), spec, llm=False)
+    assert conc == 3
+    # two rounds of peers + dispatch + reduce
+    assert {"peer1_r1", "peer2_r1", "peer3_r1",
+            "peer1_r2", "peer2_r2", "peer3_r2"} <= set(dag["nodes"])
+    # each round-2 peer reads EVERY round-1 peer (the cross-talk, vs star's none)
+    for i in (1, 2, 3):
+        deps = {e[0] for e in dag["edges"] if e[1] == f"peer{i}_r2"}
+        assert deps == {"peer1_r1", "peer2_r1", "peer3_r1"}, (i, deps)
+
+
+@pytest.mark.unit
 def test_generate_dag_pipeline_is_linear():
     spec = TaskSpec("fix", subtasks=("locate", "fix", "test"))
     dag, conc = generate_dag(select_topology(spec), spec, llm=False)
@@ -96,6 +111,22 @@ def test_config_json_round_trip_is_type_faithful():
     assert rt.spec.subtasks == ("sec", "test")          # tuple, not list
     assert isinstance(rt.spec.subtasks, tuple)
     assert rt.choice.questions_fired == cfg.choice.questions_fired
+
+
+@pytest.mark.unit
+def test_a2a_message_bus_cross_talk_and_addressing():
+    from agentkit.topology import MessageBus
+    bus = MessageBus()
+    bus.post("p1", "schema mismatch", round=1)
+    bus.post("p2", "token overflow", round=1)
+    # p1 reads what OTHERS said, never its own (this is communication, not echo)
+    heard = bus.read(reader="p1", round=1)
+    assert {m.sender for m in heard} == {"p2"}
+    assert "p1" not in bus.context(reader="p1") and "p2" in bus.context(reader="p1")
+    # addressed message is private to its recipient
+    bus.post("p2", "p1 confirm?", round=2, recipient="p1")
+    assert any("confirm" in m.content for m in bus.read(reader="p1"))
+    assert not any("confirm" in m.content for m in bus.read(reader="p3"))
 
 
 @pytest.mark.unit

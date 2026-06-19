@@ -581,7 +581,8 @@ routing (Q7) is resolved *before* per-task topology (the doc's key re-ordering):
 |---|---|---|
 | single | one `agent` node | 1 |
 | pipeline | `stage1→stage2→…` linear | 1 |
-| star / mesh | `dispatch→{worker_i}→reduce` (mesh ≈ fan-out+reduce) | N |
+| star | `dispatch→{worker_i}→reduce` (independent workers, no cross-talk) | N |
+| mesh | `dispatch→{peer_i_r1}→(full cross-talk)→{peer_i_r2}→reduce` + A2A bus | N |
 | tree | `orchestrator→{leaf_i}→gather` (join synthesizes leaves), bounded by `max_tree_breadth` | min(N, breadth) |
 | gateway / durable_board | minimal single-node (trigger/state-level) | 1 |
 
@@ -648,7 +649,8 @@ synthesizes):
 |---|---|---|---|---|
 | single / gateway / durable_board | 1 | 1 | done | the single research node |
 | pipeline | 3 | 1 | done | `stage3` (chained stage1→2→3) |
-| star / mesh | 5 | 3 | done | `reduce` (synthesizes 3 parallel workers) |
+| star | 5 | 3 | done | `reduce` (synthesizes 3 independent workers) |
+| mesh | 8 | 3 | done | `reduce` (synthesizes a 2-round peer debate over the A2A bus) |
 | tree | 5 | 3 | done | `gather` (synthesizes 3 leaves) |
 
 > **Table 14.** All 7 topologies run end-to-end on a live web task. With a task
@@ -710,9 +712,14 @@ flowchart LR
   subgraph PIPE["pipeline (ordered)"]
     p1[stage1] --> p2[stage2] --> p3[stage3]
   end
-  subgraph STAR["star / mesh (fan-out + reduce)"]
+  subgraph STAR["star (independent workers, no cross-talk)"]
     s0[dispatch] --> s1[worker1] & s2[worker2] & s3[worker3]
     s1 & s2 & s3 --> sr[reduce]
+  end
+  subgraph MESH["mesh (peers debate: round1 → full cross-talk → round2)"]
+    m0[dispatch] --> m1[peer1_r1] & m2[peer2_r1]
+    m1 & m2 --> n1[peer1_r2] & n2[peer2_r2]
+    n1 & n2 --> mr[reduce]
   end
   subgraph TREE["tree (decompose + gather)"]
     t0[orchestrator] --> t1[leaf1] & t2[leaf2] & t3[leaf3]
@@ -744,10 +751,39 @@ SearXNG-search-per-node handler:
 > and never set `workers_challenge`. The *rules* cover all seven (unit tests +
 > Table 14's forced run); the *LLM front-end* naturally hits 5/7 here.
 
+**Mesh = genuine peer communication, not a fan-out (`a2a.MessageBus`).** A star's
+workers never see each other; a mesh's peers do. The DAG round-shape (round-1 →
+full cross-talk → round-2) is the *acyclic* scaffold, but the actual
+communication runs over an in-process **A2A message bus**: each peer BROADCASTS
+its round-1 hypothesis, then READS its peers' messages (shared context, excluding
+its own) and challenges/refines in round 2; `reduce` synthesizes the transcript.
+One bus serves both needs the design calls for — directed messages (A2A) *and* a
+shared-context/output blackboard (broadcast + `transcript()`). It is the
+dependency-light analog of the networked Agent2Agent protocol (true A2A is
+HTTP/JSON-RPC between agent servers; this is the same message shape over a shared
+object). Live (`examples/mesh_a2a_demo.py`, *"why does a local LLM server return
+HTTP 422?"*):
+
+```text
+[peer1 r1] … payload schema mismatch …
+[peer2 r1] … context-window / token limits …
+[peer3 r1] … concurrent-request handling …
+[peer1 r2] While I initially attributed it to a schema mismatch, the peers' findings suggest …
+[peer2 r2] While the peers identify structural and concurrency issues, they do not address …
+[peer3 r2] While my initial focus was concurrency, [the peers' causes] …
+[reduce]   Consensus: a token-limit / context-window violation that mimics schema errors.
+```
+
+> Each round-2 peer explicitly references what the *others* said — real
+> cross-talk — and the synthesis **emerges from the debate**, not from any single
+> peer's first guess. That is what distinguishes mesh from star/tree: workers
+> that *communicate and share context*, not just run in parallel.
+
 **API.** `TaskSpec`, `TopologyChoice`, `select_topology`, `generate_dag`,
 topology/trigger constants, `TopologyConfig`, `build_config`, `to_json`/`from_json`,
 `write_config`/`load_config`, `to_mermaid`, `emit_topologies_py`/`write_topologies_py`,
-`infer_spec`, `run_task`, `PipelineResult` — all from `agentkit.topology`.
+`infer_spec`, `run_task`, `PipelineResult`, `MessageBus`/`Message` (A2A) — all
+from `agentkit.topology`.
 
 ---
 

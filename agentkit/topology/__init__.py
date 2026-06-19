@@ -32,6 +32,7 @@ from agentkit.topology.core import (
     generate_dag,
     select_topology,
 )
+from agentkit.topology.a2a import Message, MessageBus
 from agentkit.topology.infer import infer_spec
 from agentkit.topology.pipeline import PipelineResult, run_task
 
@@ -47,4 +48,5 @@ __all__ = [
     "emit_topologies_py", "write_topologies_py",
     "infer_spec",
     "run_task", "PipelineResult",
+    "MessageBus", "Message",
 ]
