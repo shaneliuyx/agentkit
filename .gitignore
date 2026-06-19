@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenv
+.venv/
+venv/
+
+# Local caches / state (not part of the library)
+.web_cache.json
+.tokensave/
+.omc/
+tasks/
+.cache/
+*.db
+
+# OS / editor
+.DS_Store

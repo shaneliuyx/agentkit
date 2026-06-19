@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentkit"
+version = "0.1.0"
+description = "A lean, reusable agent-systems library: context, memory, runtime, agent."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+]
+
+[project.optional-dependencies]
+openai = ["openai"]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = [
+    "agentkit",
+    "agentkit.context",
+    "agentkit.memory",
+    "agentkit.runtime",
+    "agentkit.agent",
+    "agentkit.orchestrator",
+    "agentkit.backends",
+    "agentkit.quality",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "unit: fast, isolated unit test (no network, no real backend)",
+    "integration: requires a live backend (oMLX / CLI)",
+]
