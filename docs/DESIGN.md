@@ -535,6 +535,112 @@ and two marker-less framing non-claims).**
 never a shell string; `shell=True` is not used, so there is no shell-injection
 surface.
 
+### 5.9 `topology` — rule-driven topology selection + DAG generation + pipeline
+
+**Purpose.** Turn *a task* into *the right process topology* and *a runnable
+durable DAG*, driven by the Week 4.6 rules (the 4-trigger × 7-topology design
+space §2.5, and the 8-question decision order §2.7). It sits *above* `runtime`:
+the generated DAG is exactly the `{"nodes","edges"}` shape `GraphStore` consumes.
+
+```mermaid
+flowchart LR
+    T["task (free text)"] -->|infer_spec, optional LLM| SP["TaskSpec<br/>(§2.7 answers)"]
+    SP -->|select_topology, PURE| CH["TopologyChoice<br/>topology+trigger+concurrency"]
+    CH -->|generate_dag| DAG["DAG {nodes,edges}"]
+    DAG --> CFG["TopologyConfig<br/>(JSON — Tool 1)"]
+    CFG -->|emit_topologies_py| PY["topologies.py<br/>(codegen — Tool 2)"]
+    CFG -->|run_task| RUN["GraphStore run<br/>(durable — Tool 3)"]
+    RUN --> R["results"]
+    style SP fill:#e0f2fe,stroke:#0284c7
+    style CH fill:#dcfce7,stroke:#16a34a
+```
+
+> **Figure 10.** The toolchain. Only `infer_spec` (free-text → answers) touches an
+> LLM, and it is optional; selection, generation, codegen, and the driver are
+> deterministic. `select_topology` is pure — the rules are arithmetic.
+
+**The rule core (`core.py`, pure, 0 LLM).** `select_topology(spec)` walks the
+§2.7 questions in priority order, first match wins. The order is load-bearing —
+routing (Q7) is resolved *before* per-task topology (the doc's key re-ordering):
+
+| order | question (§2.7) | when it fires | → topology (trigger) |
+|---|---|---|---|
+| 1 | Q7 multiple entry points | distinct identities/permissions | **gateway** (routing) |
+| 2 | Q1 single agent suffices | small / strong-order / fuzzy, or no sub-tasks | **single** (explicit) |
+| 3 | Q4/Q8 cross-session / human-loop / recovery | must survive restart or pause | **durable_board** (queue) |
+| 4 | Q5 workers challenge each other | multi-hypothesis | **mesh** (explicit) |
+| 5 | Q3 independent + needs decomposition | bounded-depth sub-trees | **tree** (explicit) |
+| 6 | Q3 independent, flat | run side-by-side, reduce | **star** (explicit) |
+| 7 | Q3 ordered (output N feeds N+1) | pipeline-shaped | **pipeline** (explicit) |
+
+> **Table 12.** The §2.7 decision order encoded as a first-match cascade. Each
+> verdict carries the rule that fired (rationale + question), so a choice is
+> always explainable. `generate_dag` then emits the matching shape:
+
+| topology | DAG shape | concurrency |
+|---|---|---|
+| single | one `agent` node | 1 |
+| pipeline | `stage1→stage2→…` linear | 1 |
+| star / mesh | `dispatch→{worker_i}→reduce` (mesh ≈ fan-out+reduce) | N |
+| tree | `orchestrator→{leaf_i}`, bounded by `max_tree_breadth` | min(N, breadth) |
+| gateway / durable_board | minimal single-node (trigger/state-level) | 1 |
+
+**The three tools.**
+1. **`config.py` (Tool 1)** — `build_config(spec)` runs select+generate into a
+   `TopologyConfig` that serialises to JSON (stdlib, no YAML dep). Round-trip is
+   type-faithful (`from_json` re-coerces JSON lists back to the tuple fields).
+2. **`emit_topologies_py` (Tool 2)** — config → a Python module mirroring
+   `lab-04-6-durable-runtime/src/topologies.py`: a `build()` returning
+   `(dag, concurrency)`. The DAG is `str/list/dict` only — valid Python *and*
+   JSON — so `json.dumps` is a safe code literal. The emitted module executes and
+   reproduces the same `(dag, concurrency)` (tested).
+3. **`pipeline.py` (Tool 3)** — `run_task(task, client)`: task → (optional infer)
+   → select → generate → **durable parallel run on `GraphStore`** via
+   `runtime.run_graph` (N worker threads, `mark_failed` on exception) → per-node
+   results, with the *measured* `peak_concurrency` and `wall_s`.
+
+**Optional LLM front-end (`infer.py`).** `infer_spec(task, client)` spends one
+LLM call to infer the §2.7 booleans from free text — the same "rules-core,
+LLM-front-end" pattern as the ClaimClassifier seam. Conservative on parse failure
+(no sub-tasks → `single`).
+
+**Measured (live, real `gemma` on oMLX).** On *"Review this PR for security, test
+coverage, performance, and summarize"*: `infer_spec` decomposed it into 4
+sub-tasks; `select_topology` chose **tree** (concurrency 4); `run_task` executed
+the orchestrator→4-leaf DAG durably to `run_status=done` with a real per-leaf
+agent output. The live run **surfaced a real LLM-layer bug**: the model returned
+`single_agent_sufficient=true` *while* listing 4 independent sub-tasks — a
+self-contradiction that short-circuited Q1 to `single` and ignored the fan-out.
+Fix kept the architecture honest: the **pure rule tree is correct and untouched**;
+the contradiction is resolved in the *inference adapter* (≥2 independent
+sub-tasks ⇒ one agent is not sufficient). 100 tests pass (17 topology).
+
+**Parallel execution (built + measured).** `runtime.pool.run_graph` runs N worker
+threads that genuinely overlap independent nodes (star/tree leaves). Threads, not
+asyncio: the handlers are synchronous blocking I/O (`client.chat`), and Python
+releases the GIL during blocking I/O, so a `ThreadPoolExecutor` overlaps them
+without an async rewrite. An in-process `claim_lock` serialises entry into the one
+shared `FileLock` (the lab's single-use-fd bug, BCJ-1); `mark_done` opens its own
+WAL connection and stays concurrent. Measured (live `gemma`, a star with 6 nodes):
+
+| run | wall | peak_concurrency |
+|---|---|---|
+| sequential (`concurrency=1`) | 7.5 s | 1 |
+| **parallel (`concurrency=4`)** | **5.6 s** | **4** |
+
+> **Table 13.** The pool overlaps for real — `peak_concurrency` rises 1→4 — and
+> wall drops 7.5→5.6 s (**1.35×**). The speedup is *backend-bound*, not pool-bound:
+> all four workers hit **one local oMLX engine** (a single GPU), so concurrent
+> requests get limited true-parallel inference. The honest reading: the topology
+> machinery overlaps correctly (peak=4); realising the full star/tree speedup
+> needs a backend that serves concurrent requests (multiple model workers, request
+> batching, or remote endpoints) — the pool is ready for it.
+
+**API.** `TaskSpec`, `TopologyChoice`, `select_topology`, `generate_dag`,
+topology/trigger constants, `TopologyConfig`, `build_config`, `to_json`/`from_json`,
+`write_config`/`load_config`, `emit_topologies_py`/`write_topologies_py`,
+`infer_spec`, `run_task`, `PipelineResult` — all from `agentkit.topology`.
+
 ---
 
 ## 6. Tiered Memory: The LLM on the Cold Path

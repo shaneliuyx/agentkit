@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agentkit.runtime.graph_store import GraphStore, Node
+from agentkit.runtime.pool import run_graph
 from agentkit.topology.config import TopologyConfig, build_config
 from agentkit.topology.core import TaskSpec
 from agentkit.topology.infer import infer_spec
@@ -33,10 +34,12 @@ NodeHandler = Callable[[Node], dict[str, Any]]
 class PipelineResult:
     topology: str
     trigger: str
-    concurrency: int
+    concurrency: int                 # the shape's available parallelism (target)
     rationale: str
     run_status: str
     results: dict[str, str]          # node name → text output
+    peak_concurrency: int            # MEASURED overlap (workers running at once)
+    wall_s: float                    # measured wall-clock of the run
     config: TopologyConfig
 
 
@@ -63,6 +66,7 @@ def run_task(
     db_path: str | Path | None = None,
     llm: bool = True,
     model: str = "gemma-4-26B-A4B-it-heretic-4bit",
+    concurrency: int | None = None,
 ) -> PipelineResult:
     """Run a task end-to-end through the rule-selected topology.
 
@@ -88,28 +92,22 @@ def run_task(
         gid = store.create_graph(spec.task[:48] or "task", config.dag)
         run_id = store.start_run(gid, config.choice.trigger)
 
-        results: dict[str, str] = {}
-        # Synchronous durable driver: claim a READY node, run it, mark_done
-        # (which promotes downstream). Stops when nothing is claimable.
-        while True:
-            node = store.claim_ready_node(run_id, "driver")
-            if node is None:
-                break
-            try:
-                out = handle(node)
-                store.mark_done(run_id, node.name, out)
-                results[node.name] = out.get("text", "")
-            except Exception as exc:  # durable retry/fail path
-                store.mark_failed(run_id, node.name, repr(exc))
-                results[node.name] = f"[error: {exc}]"
-
+        # Parallel durable execution: N worker threads overlap independent nodes
+        # (star/tree leaves). Concurrency defaults to the shape's available
+        # parallelism (override via `concurrency`); the pool reports the MEASURED
+        # peak overlap so a star/tree's parallelism is observed, not just claimed.
+        conc = concurrency if concurrency is not None else config.concurrency
+        out = run_graph(store, run_id, handle, concurrency=conc)
+        results = {name: r.get("text", "") for name, r in out["results"].items()}
         return PipelineResult(
             topology=config.choice.topology,
             trigger=config.choice.trigger,
-            concurrency=config.concurrency,
+            concurrency=conc,
             rationale=config.choice.rationale,
             run_status=store.run_status(run_id),
             results=results,
+            peak_concurrency=out["peak_concurrency"],
+            wall_s=out["wall_s"],
             config=config,
         )
     finally:
