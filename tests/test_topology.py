@@ -99,6 +99,20 @@ def test_config_json_round_trip_is_type_faithful():
 
 
 @pytest.mark.unit
+def test_to_mermaid_renders_edges_and_isolated_nodes():
+    from agentkit.topology import to_mermaid
+    # star: edges rendered
+    star = TaskSpec("pr", subtasks=("a", "b"), subtasks_independent=True)
+    dag, _ = generate_dag(select_topology(star), star, llm=False)
+    m = to_mermaid(dag)
+    assert m.startswith("flowchart LR")
+    assert "dispatch --> worker1" in m and "worker1 --> reduce" in m
+    # single: the lone node still shows (no edges)
+    one, _ = generate_dag(select_topology(TaskSpec("x")), TaskSpec("x"), llm=False)
+    assert "agent" in to_mermaid(one)
+
+
+@pytest.mark.unit
 def test_emitted_topologies_py_executes_and_matches():
     import types
     spec = TaskSpec("pr", subtasks=("sec", "test", "perf"), subtasks_independent=True)

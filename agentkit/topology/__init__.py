@@ -15,6 +15,7 @@ from agentkit.topology.config import (
     from_json,
     load_config,
     to_json,
+    to_mermaid,
     write_config,
     write_topologies_py,
 )
@@ -42,7 +43,7 @@ __all__ = [
     "SINGLE", "PIPELINE", "STAR", "TREE", "MESH", "GATEWAY", "DURABLE_BOARD",
     "TopologyConfig",
     "build_config",
-    "to_json", "from_json", "write_config", "load_config",
+    "to_json", "from_json", "write_config", "load_config", "to_mermaid",
     "emit_topologies_py", "write_topologies_py",
     "infer_spec",
     "run_task", "PipelineResult",

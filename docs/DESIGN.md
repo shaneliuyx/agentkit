@@ -699,9 +699,54 @@ tree  (5 nodes, peak 3 — orchestrator → 3 leaves → gather)
 > answer*. That is the point of making topology a first-class, rule-selected
 > choice rather than a hidden default.
 
+**Per-topology node relationships (`to_mermaid`).** Each shape, rendered from its
+generated DAG (`single`/`gateway`/`durable_board` are one node; `star` ≈ `mesh`):
+
+```mermaid
+flowchart LR
+  subgraph SINGLE["single / gateway / durable_board"]
+    a1[agent]
+  end
+  subgraph PIPE["pipeline (ordered)"]
+    p1[stage1] --> p2[stage2] --> p3[stage3]
+  end
+  subgraph STAR["star / mesh (fan-out + reduce)"]
+    s0[dispatch] --> s1[worker1] & s2[worker2] & s3[worker3]
+    s1 & s2 & s3 --> sr[reduce]
+  end
+  subgraph TREE["tree (decompose + gather)"]
+    t0[orchestrator] --> t1[leaf1] & t2[leaf2] & t3[leaf3]
+    t1 & t2 & t3 --> tg[gather]
+  end
+```
+
+> **Figure 11.** The node relationships per topology, the same shapes
+> `generate_dag` emits and `to_mermaid` renders.
+
+**Routing illustration — different tasks → different topologies (live,
+`examples/topology_routing_demo.py`).** Each free-text task is inferred
+(`infer_spec`), routed by the pure rule tree, and run with a real
+SearXNG-search-per-node handler:
+
+| free-text task | inferred | → topology (rule) | result |
+|---|---|---|---|
+| "What does RAG stand for?" | 2 indep | **star** (Q3) | reduce: "Retrieval-Augmented Generation…" |
+| "locate bug → write fix → add test" | 3 ordered | **pipeline** (Q3) | stage3: regression test targeting the failure |
+| "review PR: security/perf/tests in parallel" | 3 indep+decomp | **tree** (Q3+) | gather: tooling + findings synthesis |
+| "why does the LLM server return HTTP 422?" | 6 indep+decomp | **tree** (Q3+) | gather: payload/hardware/log causes weighed |
+| "3-week DB migration, checkpoints + sign-off" | cross-session | **durable_board** (Q4/Q8) | entry: phased plan w/ weekly checkpoints |
+| "route Slack/Telegram/email to assistants" | 5 indep, entry-pts | **gateway** (Q7) | entry: router-agent architecture |
+
+> **Table 15.** The rules discriminate across realistic tasks — ordered work →
+> pipeline, cross-session → durable_board, multi-entry → gateway (Q7, upstream),
+> decomposable → tree. Honest gap: the `infer` front-end never produced `single`
+> or `mesh` on these tasks — it over-decomposes (even "define RAG" → 2 sub-tasks)
+> and never set `workers_challenge`. The *rules* cover all seven (unit tests +
+> Table 14's forced run); the *LLM front-end* naturally hits 5/7 here.
+
 **API.** `TaskSpec`, `TopologyChoice`, `select_topology`, `generate_dag`,
 topology/trigger constants, `TopologyConfig`, `build_config`, `to_json`/`from_json`,
-`write_config`/`load_config`, `emit_topologies_py`/`write_topologies_py`,
+`write_config`/`load_config`, `to_mermaid`, `emit_topologies_py`/`write_topologies_py`,
 `infer_spec`, `run_task`, `PipelineResult` — all from `agentkit.topology`.
 
 ---

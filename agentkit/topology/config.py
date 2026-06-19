@@ -121,6 +121,19 @@ def write_topologies_py(path: str | Path, config: TopologyConfig) -> None:
     Path(path).write_text(emit_topologies_py(config), encoding="utf-8")
 
 
+def to_mermaid(dag: dict, direction: str = "LR") -> str:
+    """Render a DAG's node relationships as a Mermaid flowchart. Isolated nodes
+    (no edges, e.g. `single`) are still emitted so every node is shown."""
+    lines = [f"flowchart {direction}"]
+    linked = {n for edge in dag.get("edges", []) for n in edge}
+    for name in dag["nodes"]:
+        if name not in linked:
+            lines.append(f"    {name}")
+    for src, dst in dag.get("edges", []):
+        lines.append(f"    {src} --> {dst}")
+    return "\n".join(lines)
+
+
 def _demo() -> None:
     """Self-check: round-trip JSON, and the emitted code is importable + matches."""
     import tempfile
