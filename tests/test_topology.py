@@ -67,6 +67,17 @@ def test_generate_dag_star_shape():
 
 
 @pytest.mark.unit
+def test_generate_dag_tree_has_gather_join():
+    spec = TaskSpec("big", subtasks=("a", "b", "c"), subtasks_independent=True,
+                    needs_subdecomposition=True)
+    dag, conc = generate_dag(select_topology(spec), spec, llm=False)
+    assert "gather" in dag["nodes"]                          # leaves are synthesized
+    assert {"orchestrator", "leaf1", "leaf2", "leaf3", "gather"} == set(dag["nodes"])
+    assert sum(1 for e in dag["edges"] if e[1] == "gather") == 3
+    assert conc == 3
+
+
+@pytest.mark.unit
 def test_generate_dag_pipeline_is_linear():
     spec = TaskSpec("fix", subtasks=("locate", "fix", "test"))
     dag, conc = generate_dag(select_topology(spec), spec, llm=False)

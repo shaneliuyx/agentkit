@@ -168,11 +168,16 @@ def generate_dag(
         return {"nodes": nodes, "edges": edges}, len(subs)
 
     if top == TREE:
+        # orchestrator → leaves → gather: the leaves are synthesized by a join
+        # node (matches the lab's hierarchical manager→workers→gather), so a
+        # decomposing tree still produces one composed answer.
         breadth = min(len(subs), spec.max_tree_breadth)
         nodes = {"orchestrator": nd(spec.task)}
         for i, s in enumerate(subs[:breadth], 1):
             nodes[f"leaf{i}"] = nd(s)
+        nodes["gather"] = nd("Synthesize the leaf findings into a final answer.")
         edges = [["orchestrator", f"leaf{i}"] for i in range(1, breadth + 1)]
+        edges += [[f"leaf{i}", "gather"] for i in range(1, breadth + 1)]
         return {"nodes": nodes, "edges": edges}, breadth
 
     # GATEWAY / DURABLE_BOARD — trigger/state-level; minimal single-node DAG.

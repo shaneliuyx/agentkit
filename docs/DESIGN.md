@@ -582,7 +582,7 @@ routing (Q7) is resolved *before* per-task topology (the doc's key re-ordering):
 | single | one `agent` node | 1 |
 | pipeline | `stage1→stage2→…` linear | 1 |
 | star / mesh | `dispatch→{worker_i}→reduce` (mesh ≈ fan-out+reduce) | N |
-| tree | `orchestrator→{leaf_i}`, bounded by `max_tree_breadth` | min(N, breadth) |
+| tree | `orchestrator→{leaf_i}→gather` (join synthesizes leaves), bounded by `max_tree_breadth` | min(N, breadth) |
 | gateway / durable_board | minimal single-node (trigger/state-level) | 1 |
 
 **The three tools.**
@@ -635,6 +635,28 @@ WAL connection and stays concurrent. Measured (live `gemma`, a star with 6 nodes
 > machinery overlaps correctly (peak=4); realising the full star/tree speedup
 > needs a backend that serves concurrent requests (multiple model workers, request
 > batching, or remote endpoints) — the pool is ready for it.
+
+**All seven topologies, one real web task (`examples/topology_all_demo.py`).**
+Each topology was forced (via the §2.7 answers) and run on a *composing*
+research task — *"recommend an open-source vector DB for local-first RAG on
+Apple Silicon"* — where every node does a real **SearXNG** search + grounded
+`gemma` answer, and a context-threading handler feeds each node its upstream
+dependencies' findings (so a pipeline chains and a reduce/gather truly
+synthesizes):
+
+| topology | nodes | peak | run | answer composed by |
+|---|---|---|---|---|
+| single / gateway / durable_board | 1 | 1 | done | the single research node |
+| pipeline | 3 | 1 | done | `stage3` (chained stage1→2→3) |
+| star / mesh | 5 | 3 | done | `reduce` (synthesizes 3 parallel workers) |
+| tree | 5 | 3 | done | `gather` (synthesizes 3 leaves) |
+
+> **Table 14.** All 7 topologies run end-to-end on a live web task. With a task
+> that genuinely composes + upstream→downstream threading, the shapes behave
+> distinctly: star/mesh/tree reach a coherent "LanceDB" recommendation via their
+> join node (peak=3 real overlap), pipeline chains the ordered stages (peak=1).
+> Surfaced + fixed here: `tree` originally had **no join** (leaves un-synthesized);
+> it now emits `orchestrator→leaves→gather`, matching the lab's hierarchical.
 
 **API.** `TaskSpec`, `TopologyChoice`, `select_topology`, `generate_dag`,
 topology/trigger constants, `TopologyConfig`, `build_config`, `to_json`/`from_json`,
