@@ -15,7 +15,7 @@ config-driven **self-improving layer** — seventeen small modules, one philosop
 | `agentkit.runtime` | Durable DAG execution: graph store, cross-process file lock, scheduler (demand-driven, survives `kill -9`). |
 | `agentkit.agent` | DI ReAct loop + difficulty router + **role presets** (Researcher/Reviewer/Writer/Verifier) + a resilient batch runner. |
 | `agentkit.orchestrator` | Long-horizon autonomy: pure stall/diversity/select control + file-state loop wiring `compact()` as the inter-iteration handoff. |
-| `agentkit.topology` | Rule-driven multi-agent topology: pick shape by task (STAR/MESH/PIPELINE/…), generate the DAG, round-trip config ↔ JSON ↔ emitted code — the **config-as-policy reference pattern**. |
+| `agentkit.topology` | Rule-driven multi-agent topology: pick shape by task (STAR/MESH/PIPELINE/…), generate the DAG, round-trip config ↔ JSON ↔ emitted code, **+ dynamic per-step topology assigned from a plan** (`assign_topologies`/`run_plan`). |
 | `agentkit.quality` | Source-grounding `verify`: deterministic citation/link checks + optional LLM claim-support, severity-graded. |
 | `agentkit.backends` | `CliLLMClient` — use a CLI (`codex exec`, `claude -p`) as the model, no API key, no shell-injection surface. |
 | `agentkit.types` | The Protocol seams: `Embedder`, `LLMClient`, `ChatResult`, `Message`. |
@@ -152,6 +152,12 @@ from agentkit.topology import infer_spec, select_topology, generate_dag
 spec = infer_spec("compare A and B then summarize", client=MyClient())  # -> TaskSpec
 choice = select_topology(spec)                      # rule-driven -> TopologyChoice (STAR/MESH/...)
 dag, n_calls = generate_dag(choice, spec, llm=False)   # config-as-policy: the DAG as data
+
+# dynamic per-step topology (Phase 8): each plan step gets its own shape
+from agentkit import plan, assign_topologies, run_plan
+p = assign_topologies(plan("compare X and Y, then write a brief"), mode="auto")
+#   -> 'compare' step = MESH, 'write' step = single (deterministic keyword cues, 0 LLM)
+result = run_plan(p, client=MyClient())             # runs each step under its own topology
 ```
 
 ### `config` — roles as declarative files (re-plan Phase 1)
@@ -360,4 +366,4 @@ pip install -e ".[config]"      # + pyyaml, for YAML role config files
 pip install -e ".[dev]"         # + pytest, pyyaml
 ```
 
-Python 3.11+. **302 tests** pass (`pytest`).
+Python 3.11+. **342 tests** pass (`pytest`).

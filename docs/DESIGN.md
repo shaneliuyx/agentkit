@@ -1261,8 +1261,15 @@ failure-shapes a library *can* guard against are avoided: silent-success (gates
 check a real sandbox `exit_code`, not a script's own summary), hung/stuck
 subagents (sandbox timeout + polling safety-net), `FileLock`-under-async-pool
 corruption, and the oMLX tool-call-leak (text-fallback parser). Every fix is
-deterministic-first and additive — the 235-test baseline grew to 302 with no
-regression.
+deterministic-first and additive — the 235-test baseline grew to 342 with no
+regression. A later addition (Phase 8) makes topology **dynamic per step**:
+`assign_topologies` derives each plan step's shape from its description
+(deterministic keyword cues — compare→MESH, gather→STAR, else→single), and
+`run_plan` executes each step under its own topology, threading upstream outputs
+downstream. The token-cost ceiling stays optional and off by default — a
+cloud-only concern, since local rate-limited backends are not per-token-billed.
+Verified end-to-end on a real local oMLX model (a "compare" step ran as a
+5-agent MESH, a "write" step as a single agent).
 
 ---
 
