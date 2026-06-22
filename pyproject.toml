@@ -14,7 +14,8 @@ dependencies = [
 
 [project.optional-dependencies]
 openai = ["openai"]
-dev = ["pytest"]
+config = ["pyyaml"]
+dev = ["pytest", "pyyaml"]
 
 [tool.setuptools]
 packages = [
@@ -26,7 +27,12 @@ packages = [
     "agentkit.orchestrator",
     "agentkit.backends",
     "agentkit.quality",
+    "agentkit.topology",
+    "agentkit.config",
 ]
+
+[tool.setuptools.package-data]
+"agentkit.config" = ["roles/*.json", "roles/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
