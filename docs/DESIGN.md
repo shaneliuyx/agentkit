@@ -1202,16 +1202,19 @@ two integration defects (§7.6). Each sharpened a design decision.
   domain; defaults bias toward never dropping a real claim. Future option:
   ship domain exemplar packs or a small fitted classifier adapter.
 
-### 9.6 The self-improving direction *(planned — see [`REPLAN-agentkit.md`](./REPLAN-agentkit.md))*
+### 9.6 The self-improving layer *(shipped — see [`REPLAN-agentkit.md`](./REPLAN-agentkit.md))*
 
-The architecture so far is *static*: a human writes the roles, tools, and
-topology; the deterministic-first axiom governs execution. The next step keeps
-that axiom but makes the **policy surface itself a set of config files the agent
-can edit**. The thesis: *config files are the agent's policy surface; the agent
+The original architecture is *static*: a human writes the roles, tools, and
+topology; the deterministic-first axiom governs execution. The self-improving
+layer keeps that axiom but makes the **policy surface itself a set of config
+files the agent can edit**. It shipped in seven phases (235 tests, including an
+end-to-end loop test that drives `from_config` → `run` → gated `improve`
+rewriting a role file on disk → `skills` → `forge_tool` → a planned DAG on the
+durable runtime). The thesis: *config files are the agent's policy surface; the agent
 edits them; a deterministic, non-overridable gate plus a sandbox are the only
 things it cannot edit.*
 
-Seven planned modules, ordered safety-before-capability:
+Seven modules, ordered safety-before-capability (all shipped, gate-admitted, tested):
 
 1. `config/` — roles, tools, routing, topology as declarative YAML/JSON.
    Generalizes the `topology/config.py` round-trip (§5.9) that already proves
