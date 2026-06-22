@@ -176,3 +176,23 @@ try:
     ]
 except ImportError:  # pragma: no cover - defensive optional-dep guard
     pass
+
+# Optional: newer public surfaces from the EDP-compliance pass — streaming /
+# TTFT (P43), the fan-out cost ceiling (P39), group-relative distillation (P45).
+try:
+    from agentkit.agent.loop import run_agent_stream
+    from agentkit.evolve import distill_group
+    from agentkit.orchestrator import BudgetExceeded, FanoutBudget
+    from agentkit.types import ChatChunk, stream_chat, supports_streaming
+
+    __all__ += [
+        "run_agent_stream",
+        "stream_chat",
+        "ChatChunk",
+        "supports_streaming",
+        "FanoutBudget",
+        "BudgetExceeded",
+        "distill_group",
+    ]
+except ImportError:  # pragma: no cover - defensive optional-dep guard
+    pass

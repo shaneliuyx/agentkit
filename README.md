@@ -114,7 +114,8 @@ gs.mark_done(rid, "fetch", {"ok": True})            # unlocks dependents
 
 ### `agent` — ReAct loop + router + roles + batch
 ```python
-from agentkit import run_agent, route, run_role, dispatch, RESEARCHER, run_batch, BatchConfig
+from agentkit import (run_agent, run_agent_stream, route, run_role, dispatch,
+                      RESEARCHER, run_batch, BatchConfig)
 res = run_agent("What is 2+2?", client=MyClient(),
                 tools={"add": lambda a: {"sum": a["a"] + a["b"]}})
 print(res.answer)
@@ -123,6 +124,8 @@ role = dispatch("review this draft")                # keyword heuristic -> Agent
 run_role(RESEARCHER, "survey vector DBs", client=MyClient())   # a role is config over run_agent
 run_batch(items, lambda x: run_agent(x, client=MyClient()),
           output_path="out.jsonl", failures_path="fail.jsonl", config=BatchConfig())
+for chunk in run_agent_stream("research X", client=MyClient()):
+    ...                                             # streaming: partial ChatChunks then AgentResult (TTFT)
 ```
 
 ### `orchestrator` — long-horizon autonomy (pure, model-free control)
@@ -321,7 +324,7 @@ seams). The `context` / `orchestrator` / `quality` / `roles` / `batch` /
 `backends` modules **port studied patterns** natively. Full mapping in
 [`docs/DESIGN.md`](docs/DESIGN.md) §5.
 
-## The self-improving layer — *shipped*
+## The self-improving layer
 
 The core modules are *static*: a human writes the roles, tools, and topology. The
 self-improving layer makes the **policy surface a folder of config files the agent
@@ -334,12 +337,27 @@ end-to-end test drives the whole loop — `from_config` → `run` → gated `imp
 durable runtime. Full design, build order, and security model:
 [`docs/REPLAN-agentkit.md`](docs/REPLAN-agentkit.md).
 
+## Engineering-pattern compliance
+
+Audited against the curriculum's **Engineering Decision Patterns** + **Bad-Case
+Journal**. The auditable safety / optimizer / read-side gaps are closed:
+
+- **P39 — fan-out cost ceiling** (`orchestrator/fanout.py`: sums child tokens, aborts a runaway fan-out).
+- **P43 — streaming / TTFT** (`run_agent_stream` + the `stream_chat` seam).
+- **P42 — atomic writes** (temp + `os.replace` for state artifacts; no torn `progress.json`).
+- **P45 — group-relative distillation** (`evolve.distill_group`: keep above-group-mean lessons, weight-free).
+- **memory/quality read-side** — provenance tags, earned read-retention, topic-presence abstention, a cheap-first keyword→vector ladder, a union-vs-single guard, and eval-saturation detection.
+
+Patterns specific to RAG-corpus tuning, multi-tenant isolation, or proxy
+deployment are out of scope for a single-tenant, local-first library.
+
 ## Install
 
 ```bash
 pip install -e .                # core (numpy only)
 pip install -e ".[openai]"      # + the openai SDK, if you build an OpenAI adapter
-pip install -e ".[dev]"         # + pytest
+pip install -e ".[config]"      # + pyyaml, for YAML role config files
+pip install -e ".[dev]"         # + pytest, pyyaml
 ```
 
-Python 3.11+. **235 tests** pass (`pytest`).
+Python 3.11+. **302 tests** pass (`pytest`).

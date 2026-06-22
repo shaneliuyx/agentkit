@@ -1207,7 +1207,7 @@ two integration defects (§7.6). Each sharpened a design decision.
 The original architecture is *static*: a human writes the roles, tools, and
 topology; the deterministic-first axiom governs execution. The self-improving
 layer keeps that axiom but makes the **policy surface itself a set of config
-files the agent can edit**. It shipped in seven phases (235 tests, including an
+files the agent can edit**. It shipped in seven phases (302 tests, including an
 end-to-end loop test that drives `from_config` → `run` → gated `improve`
 rewriting a role file on disk → `skills` → `forge_tool` → a planned DAG on the
 durable runtime). The thesis: *config files are the agent's policy surface; the agent
@@ -1239,6 +1239,30 @@ carries over too — the many-call evolve/skill loops are ~free on the
 rate-limited oMLX/VibeProxy backends agentkit targets, so self-improvement is
 opt-in and backend-aware, not always-on. Full module-by-module plan, build
 order, and security model: [`REPLAN-agentkit.md`](./REPLAN-agentkit.md).
+
+### 9.7 Engineering-pattern compliance audit
+
+The library was audited against the curriculum's Engineering Decision Patterns
+and Bad-Case Journal — the same documents that motivated its design. Of the 28
+auditable patterns, the two that were **VIOLATED** are now fixed: **P39 fan-out
+cost ceiling** (`orchestrator/fanout.py` sums child-token cost across a fan-out
+and aborts when it crosses a configurable ceiling — the AutoGPT blow-up the
+pattern warns about) and **P43 streaming / TTFT** (`run_agent_stream` + a
+back-compatible `stream_chat` seam yield partial output before the final
+`AgentResult`). The **PARTIAL** patterns are closed: **P42** atomic artifact
+writes (temp + `os.replace`), **P45** group-relative experience distillation
+(`evolve.distill_group` — keep above-group-mean lessons, weight-free), and the
+memory/quality read side (provenance tags, read-earned retention, topic-presence
+abstention, a cheap-first keyword→vector ladder, a union-vs-single guard, and
+eval-saturation detection). The remaining patterns are genuinely **N/A** —
+RAG-corpus tuning, multi-tenant isolation, or proxy deployment — for a
+single-tenant, local-first library. On the Bad-Case Journal side, the structural
+failure-shapes a library *can* guard against are avoided: silent-success (gates
+check a real sandbox `exit_code`, not a script's own summary), hung/stuck
+subagents (sandbox timeout + polling safety-net), `FileLock`-under-async-pool
+corruption, and the oMLX tool-call-leak (text-fallback parser). Every fix is
+deterministic-first and additive — the 235-test baseline grew to 302 with no
+regression.
 
 ---
 
