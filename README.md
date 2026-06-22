@@ -65,6 +65,115 @@ summary = compact(long_message_history, keep=1)   # zero-LLM compaction
 print(summary.text, summary.est_tokens_after)
 ```
 
+## Usage by module
+
+One short example per module. They use the injected `MyClient` / `MyEmbedder`
+fakes from the Quickstart where a real backend would go — copy a block, swap in
+your adapter, run it.
+
+### `context` — deterministic, zero-LLM compaction
+```python
+from agentkit import compact, merge
+r = compact(messages, keep=1)              # keep the last turn verbatim; summarize the rest
+print(r.text, r.est_tokens_after)
+r = merge(r, compact(later_messages))      # fold a newer compaction into an older one
+```
+
+### `memory` — tiered episodic/semantic store
+```python
+from agentkit import MemoryStore
+mem = MemoryStore("mem.db", embedder=MyEmbedder())
+mem.add("semantic", "Always validate inputs before parsing.")
+hits = mem.search("input handling", top_k=4)        # vector recall -> list[MemoryEntry]
+prompt_block = mem.inject_context("input handling", k=4)   # ready-to-prompt context string
+```
+
+### `runtime` — durable DAG (survives `kill -9`)
+```python
+from agentkit import GraphStore
+gs = GraphStore("runs.db")
+gid = gs.create_graph("pipeline", {"fetch": [], "parse": ["fetch"]})   # node -> deps
+rid = gs.start_run(gid, trigger="manual")
+node = gs.claim_ready_node(rid, worker_id="w1")     # demand-driven; recoverable
+gs.mark_done(rid, "fetch", {"ok": True})            # unlocks dependents
+```
+
+### `agent` — ReAct loop + router + roles + batch
+```python
+from agentkit import run_agent, route, run_role, dispatch, RESEARCHER, run_batch, BatchConfig
+res = run_agent("What is 2+2?", client=MyClient(),
+                tools={"add": lambda a: {"sum": a["a"] + a["b"]}})
+print(res.answer)
+route("hard")                                       # -> RouteDecision (which reasoning tier)
+role = dispatch("review this draft")                # keyword heuristic -> AgentRole (no LLM)
+run_role(RESEARCHER, "survey vector DBs", client=MyClient())   # a role is config over run_agent
+run_batch(items, lambda x: run_agent(x, client=MyClient()),
+          output_path="out.jsonl", failures_path="fail.jsonl", config=BatchConfig())
+```
+
+### `orchestrator` — long-horizon autonomy (pure, model-free control)
+```python
+from agentkit import assess, is_novel, similarity, cascade, Rubric, Dimension
+a = assess(new_findings=0, stale_count=3)           # -> StallAssessment (pivot/escalate/stop)
+is_novel("try GraphRAG", tried=["try vector RAG"], threshold=0.6)   # diversity gate
+rubric = Rubric([Dimension("relevance", weight=1.0)])
+cascade(items, predicate=lambda x: True, rubric=rubric,
+        scorer=lambda x, r: {"relevance": 0.9})     # prefilter -> rank (cheap before LLM)
+```
+
+### `quality` — source-grounding verification
+```python
+from agentkit import verify
+findings = verify(text, sources={"[1]": "the cited source text"}, client=MyClient())
+for f in findings:                                  # uncited claims, dead links, unsupported claims
+    print(f)                                        # each VerifyFinding is severity-graded
+```
+
+### `topology` — pick a multi-agent shape, generate its DAG
+```python
+from agentkit.topology import infer_spec, select_topology, generate_dag
+spec = infer_spec("compare A and B then summarize", client=MyClient())  # -> TaskSpec
+choice = select_topology(spec)                      # rule-driven -> TopologyChoice (STAR/MESH/...)
+dag, n_calls = generate_dag(choice, spec, llm=False)   # config-as-policy: the DAG as data
+```
+
+### `config` — roles as declarative files (re-plan Phase 1)
+```python
+from agentkit.config import load_default_roles, load_roles, dump_role, load_role
+roles = load_default_roles()                        # the shipped feynman ensemble, from files
+my = load_roles("./agent_config/roles")             # your YAML/JSON role folder -> {name: AgentRole}
+dump_role(roles["Researcher"], "researcher.yaml")   # round-trips load_role (YAML needs [config] extra)
+```
+
+### `sandbox` — contained execution (re-plan Phase 2)
+```python
+from agentkit.sandbox import SubprocessSandbox
+sb = SubprocessSandbox()                            # argv-not-shell, cwd-jailed, timeout, output-capped
+r = sb.run("print('hi')", timeout=5, cwd=".")       # -> ExecResult(stdout, stderr, exit_code, duration)
+print(r.exit_code, r.stdout)                         # "; rm -rf" in code is inert — no shell
+```
+
+### `gates` — the LEARN admission gate (re-plan Phase 3)
+```python
+from agentkit.gates import run_gate, Outcome
+from agentkit.sandbox import SubprocessSandbox
+v = run_gate({"type": "skill", "code": "print('ok')"}, baseline_score=0.5,
+             sandbox=SubprocessSandbox(), evaluator=lambda p: 0.9)
+print(v.status, v.stage)                            # syntax->containment->execute->regression->safety->delta
+assert v.status in (Outcome.ACCEPT, Outcome.REJECT, Outcome.ESCALATE)
+```
+
+### `backends` — a CLI as the model (no API key)
+```python
+from agentkit import CliLLMClient
+client = CliLLMClient(...)        # wraps `claude -p` / `codex exec`; argv, no shell-injection surface
+# pass `client` anywhere an LLMClient is expected (run_agent, run_role, verify, gates safety...)
+```
+
+> The self-improving layer (`evolve`, `skills`, `planner`, and the
+> `SelfImprovingAgent` facade) is on the [Roadmap](#roadmap--the-self-improving-direction-planned-not-shipped)
+> below; usage examples land with each module.
+
 ## The reference agent — the whole stack composed
 
 `examples/research_agent.py` is a long-horizon RAG/memory research agent that
