@@ -115,6 +115,13 @@ adapter — the same pattern as `Embedder`/`LLMClient`. Nothing forces a heavy d
   message's identity → an agent/skill, *upstream* of any per-task topology (the
   §2.7 Q7 rule). The `scheduler`'s webhook trigger already models the entry edge.
 
+> **Note — P4 cost discipline (the backend economics).** The many-call loops
+> here — reflection + skill curation (Phases 2–3), and the broader evolve/skills
+> self-improvement loops — are **free on rate-limited oMLX/VibeProxy** (the
+> self-improving curriculum's founding premise: calls are rate-limited, not
+> per-token-billed), **expensive on a metered API**. Make them **opt-in +
+> backend-aware**; the deterministic-first axiom is unchanged.
+
 ## 5. Architecture (where the new modules sit)
 
 ```mermaid
