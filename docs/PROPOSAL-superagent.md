@@ -63,6 +63,11 @@ adapter — the same pattern as `Embedder`/`LLMClient`. Nothing forces a heavy d
   (argv-not-shell, like `CliLLMClient`; cwd-jailed, timeout, output-capped);
   optional `DockerSandbox` for isolation. **Security is the design point** —
   reuse the `CliLLMClient` argv discipline; never `shell=True`.
+  Convergent prior art: youtu-agent's `_BaseEnv` abc puts E2B / SWE-ReX /
+  browser / local behind one interface, swapped by config — a second production
+  system independently arriving at this Protocol-seam design, which validates
+  the `Sandbox`-Protocol choice here and names the concrete backends a
+  `DockerSandbox` sibling could grow into (E2B/SWE-ReX for hosted isolation).
 - **`agentkit/tools/`** — a small **tool catalog** implementing the existing
   `ToolRegistry` seam: `web_search` (wrap `web_toolkit`), `read_url` (stdlib
   urllib, already in `research_live`), `read_file` (local files: txt/md/csv/pdf →
