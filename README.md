@@ -1,6 +1,7 @@
 # agentkit
 
-A lean, reusable agent-systems library. Nine small modules, one philosophy.
+A lean, reusable agent-systems library. A deterministic-first **core** plus a
+config-driven **self-improving layer** — seventeen small modules, one philosophy.
 
 > **The design axiom: a cheap deterministic stage gates the expensive LLM stage.**
 > The model is the last resort, not the default — which is why most work never
@@ -18,6 +19,19 @@ A lean, reusable agent-systems library. Nine small modules, one philosophy.
 | `agentkit.quality` | Source-grounding `verify`: deterministic citation/link checks + optional LLM claim-support, severity-graded. |
 | `agentkit.backends` | `CliLLMClient` — use a CLI (`codex exec`, `claude -p`) as the model, no API key, no shell-injection surface. |
 | `agentkit.types` | The Protocol seams: `Embedder`, `LLMClient`, `ChatResult`, `Message`. |
+
+**The self-improving layer** — config is the agent's policy surface; a gate + sandbox are the guard it can't edit (see [`docs/REPLAN-agentkit.md`](docs/REPLAN-agentkit.md)):
+
+| Module | What it gives you |
+| --- | --- |
+| `agentkit.config` | Roles as declarative YAML/JSON files, round-tripped to objects (generalizes `topology/config.py`). |
+| `agentkit.sandbox` | `Sandbox` Protocol + `SubprocessSandbox`: argv-not-shell, cwd-jailed, timed, output-capped containment. |
+| `agentkit.gates` | The LEARN admission gate: syntax→containment→execute→regression→safety→delta → `ACCEPT/REJECT/ESCALATE`. The LLM is a veto, never a vote. |
+| `agentkit.evolve` | One text-space optimizer (keep/discard, gate-admitted): DGM prompt evolution + an RHO label-free mode. |
+| `agentkit.skills` | Skill library (propose→gate→save, semantic retrieve) + `optimize_skill` — the SkillOpt loop; deploys a best artifact + a baseline→optimized delta. |
+| `agentkit.planner` | Task → subtask DAG → emitted runtime graph **config** (self-plan as a file, not code). |
+| `agentkit.codegen` | Agent-authored tools: query→schema→code→sandbox-validate→debugger-repair→gate→register. |
+| `agentkit.selfimproving` | `SelfImprovingAgent` — the facade wiring it all: `.run` / `.improve` (gated self-edit; writes the better role back to its config file) / `.skills` / `.forge_tool`. |
 
 ## The deterministic-first thesis
 
@@ -170,9 +184,44 @@ client = CliLLMClient(...)        # wraps `claude -p` / `codex exec`; argv, no s
 # pass `client` anywhere an LLMClient is expected (run_agent, run_role, verify, gates safety...)
 ```
 
-> The self-improving layer (`evolve`, `skills`, `planner`, and the
-> `SelfImprovingAgent` facade) is on the [Roadmap](#roadmap--the-self-improving-direction-planned-not-shipped)
-> below; usage examples land with each module.
+### `evolve` + `skills` — text-space optimization against the gate
+```python
+from agentkit.evolve import evolve_prompt
+from agentkit.skills import SkillLibrary
+res = evolve_prompt("You are an agent.", propose=my_proposer, evaluate=my_scorer,
+                    gate=my_gate, baseline_score=0.5, epochs=5)
+print(res.best, res.delta)                          # best variant kept only if it passed the gate
+lib = SkillLibrary(embedder=MyEmbedder(), skills_dir="skills/")
+lib.retrieve("summarize a PDF", k=3)                # semantic recall of curated, gate-passed skills
+```
+
+### `planner` — self-plan a task into a runtime config
+```python
+from agentkit.planner import plan, plan_to_graph_config
+p = plan("fetch the data and then parse it")        # -> Plan (validated subtask DAG)
+cfg = plan_to_graph_config(p)                       # -> {nodes, edges} for GraphStore.create_graph
+```
+
+### `codegen` — agent-authored, sandbox-validated tools
+```python
+from agentkit.codegen import ToolForge
+from agentkit.sandbox import SubprocessSandbox
+from agentkit.gates import Gate
+forge = ToolForge(client=MyClient(), sandbox=SubprocessSandbox(),
+                  gate=Gate(sandbox=SubprocessSandbox(), evaluator=lambda p: 1.0))
+tool = forge.forge("a tool that adds two numbers")  # query->schema->code->validate->repair->gate
+forge.register(tool, registry)                       # registers ONLY if the gate returned ACCEPT
+```
+
+### `selfimproving` — the facade (the whole loop, one object)
+```python
+from agentkit import SelfImprovingAgent
+agent = SelfImprovingAgent.from_config("./agent_config", backend=MyClient(), embedder=MyEmbedder())
+agent.run("research X and write a brief")           # config-driven role dispatch + memory
+agent.improve(eval_set, role="Researcher", epochs=10)   # gated prompt evolution -> rewrites the role FILE
+agent.skills.retrieve("how to cite sources")        # the curated skill library
+agent.forge_tool("compute IRR")                     # forge a new tool, sandboxed + gated
+```
 
 ## The reference agent — the whole stack composed
 
@@ -272,16 +321,18 @@ seams). The `context` / `orchestrator` / `quality` / `roles` / `batch` /
 `backends` modules **port studied patterns** natively. Full mapping in
 [`docs/DESIGN.md`](docs/DESIGN.md) §5.
 
-## Roadmap — the self-improving direction *(planned, not shipped)*
+## The self-improving layer — *shipped*
 
-The nine modules above are *static*: a human writes the roles, tools, and
-topology. The planned next step keeps the deterministic-first axiom but makes the
-**policy surface a folder of config files the agent can improve on its own** —
-behind a sandbox it can't escape and a gate it can't override. Seven planned
-modules — `config/`, `sandbox/`, `gates/`, `evolve/` + `skills/`, `planner/`,
-`evolve/codegen`, and a `SelfImprovingAgent` facade — ordered safety-before-
-capability. **None of these are shipped yet.** Full plan, build order, and
-security model: [`docs/REPLAN-agentkit.md`](docs/REPLAN-agentkit.md).
+The core modules are *static*: a human writes the roles, tools, and topology. The
+self-improving layer makes the **policy surface a folder of config files the agent
+can improve on its own** — behind a sandbox it can't escape and a gate it can't
+override. Built in seven phases (`config` → `sandbox` + `gates` → `evolve` +
+`skills` → `planner` → `codegen` → the `SelfImprovingAgent` facade), each
+self-modification admitted by the deterministic LEARN gate and reversible. An
+end-to-end test drives the whole loop — `from_config` → `run` → gated `improve`
+(rewrites the role file on disk) → `skills` → `forge_tool` → planned DAG on the
+durable runtime. Full design, build order, and security model:
+[`docs/REPLAN-agentkit.md`](docs/REPLAN-agentkit.md).
 
 ## Install
 
@@ -291,4 +342,4 @@ pip install -e ".[openai]"      # + the openai SDK, if you build an OpenAI adapt
 pip install -e ".[dev]"         # + pytest
 ```
 
-Python 3.11+. **75 tests** pass (`pytest`).
+Python 3.11+. **235 tests** pass (`pytest`).
