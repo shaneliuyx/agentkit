@@ -6,6 +6,12 @@ auditable orchestration loop.
 """
 
 from agentkit.orchestrator.diversity import is_novel, most_similar, similarity
+from agentkit.orchestrator.fanout import (
+    BudgetExceeded,
+    FanoutBudget,
+    cost_of,
+    exceeds_fanout_budget,
+)
 from agentkit.orchestrator.loop import OrchestratorConfig, Spawn, run
 from agentkit.orchestrator.select import (
     Dimension,
@@ -42,6 +48,11 @@ __all__ = [
     "assess",
     "StallAssessment",
     "exceeds_budget",
+    # fanout (P39 — fan-out cost aggregation + parent ceiling)
+    "FanoutBudget",
+    "BudgetExceeded",
+    "cost_of",
+    "exceeds_fanout_budget",
     # diversity
     "is_novel",
     "similarity",

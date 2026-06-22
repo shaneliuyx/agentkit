@@ -29,6 +29,7 @@ from typing import Callable, Protocol, runtime_checkable
 
 from agentkit.context import compact
 from agentkit.orchestrator.diversity import is_novel
+from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
 from agentkit.orchestrator.stall import (
     ESCALATE,
     PIVOT,
@@ -78,6 +79,10 @@ class OrchestratorConfig:
     escalate_at: int = 4
     diversity_threshold: float = 0.6
     transcript_lines: int = 120
+    # P39: aggregate per-round (fan-out) token spend and ABORT when the running
+    # sum crosses this ceiling. None (default) = no token ceiling, so existing
+    # callers are unaffected — rounds/wall-seconds remain the only bounds.
+    max_fanout_tokens: float | None = None
 
 
 def _render_findings_as_messages(findings: list[Finding]) -> list[Message]:
@@ -114,11 +119,12 @@ def run(
     candidate_directions: Callable[[ProgressState, list[str]], list[str]],
     config: OrchestratorConfig = OrchestratorConfig(),
     clock: Callable[[], float] = time.perf_counter,
+    cost_of_round: Callable[[list[Finding], float], int] = lambda findings, metric: 0,
 ) -> ProgressState:
     """Drive the autonomous orchestration loop until it stops.
 
-    The loop stops when: status leaves "running" (escalated), the round or
-    wall-clock budget is exceeded, or no novel direction remains.
+    The loop stops when: status leaves "running" (escalated / aborted), the
+    round or wall-clock budget is exceeded, or no novel direction remains.
 
     Args:
         state_dir:            Durable state directory (already init_task'd).
@@ -127,8 +133,14 @@ def run(
                               current progress + the directions already tried. On a
                               pivot it is expected to offer a structurally different
                               option.
-        config:               Budgets + thresholds.
+        config:               Budgets + thresholds (incl. ``max_fanout_tokens``).
         clock:                Injected monotonic clock (default time.perf_counter).
+        cost_of_round:        Maps a round's ``(findings, metric)`` to its token
+                              cost. The default (0) means "no token accounting".
+                              When ``config.max_fanout_tokens`` is set, these
+                              per-round costs are SUMMED into a parent-level
+                              ``FanoutBudget`` and the loop aborts the instant
+                              the running sum crosses the ceiling (P39).
 
     Returns:
         The final ProgressState.
@@ -137,6 +149,13 @@ def run(
     start = clock()
     rounds = 0
     prev_metric: float | None = None
+
+    # P39: parent-level running token sum. Only enforced when a ceiling is set.
+    budget: FanoutBudget | None = (
+        FanoutBudget(ceiling=config.max_fanout_tokens)
+        if config.max_fanout_tokens is not None
+        else None
+    )
 
     progress = load_progress(state_dir)
 
@@ -220,6 +239,24 @@ def run(
 
         save_progress(state_dir, progress)
         prev_metric = metric
+
+        # P39: aggregate this round's fan-out token cost to the parent budget and
+        # ABORT the whole loop the instant the running sum crosses the ceiling —
+        # per-round caps never bound the total.
+        if budget is not None:
+            try:
+                budget.add(cost_of_round(new_findings, metric))
+            except BudgetExceeded as exc:
+                progress.status = "aborted"
+                log_event(
+                    log_file, source="orchestrator", level=DECISION,
+                    event="fanout_budget_exceeded",
+                    detail=(f"summed fan-out tokens {exc.spent} exceeded ceiling "
+                            f"{exc.ceiling}; aborting"),
+                    clock=clock,
+                )
+                save_progress(state_dir, progress)
+                break
 
         if exceeds_budget(rounds, clock() - start,
                           config.max_rounds, config.max_seconds):
@@ -319,5 +356,32 @@ if __name__ == "__main__":
         clock=_clock,
     )
     assert final2.iteration == 3, final2  # stopped exactly at max_rounds
+
+    # P39: a fan-out token ceiling aborts the loop on the running SUM. Each round
+    # "costs" 100 tokens; ceiling 350 → aborts on round 4 (sum 400 > 350).
+    tmp3 = tempfile.mkdtemp(prefix="agentkit_orch3_")
+    init_task(tmp3, task_spec="Runaway fan-out.")
+    _c3 = [0]
+
+    def _cand3(progress: ProgressState, tried: list[str]) -> list[str]:
+        phrase = _words[_c3[0] % len(_words)]
+        _c3[0] += 1
+        return [phrase]
+
+    def _spawn3(direction: str, injected_context: str,
+                state_dir: str) -> tuple[list[Finding], float]:
+        return ([Finding(direction=direction, summary="ok")], 1.0)
+
+    final3 = run(
+        tmp3, spawn=_spawn3, candidate_directions=_cand3,
+        config=OrchestratorConfig(max_rounds=999, max_seconds=1e9,
+                                  max_fanout_tokens=350.0),
+        clock=_clock,
+        cost_of_round=lambda findings, metric: 100,
+    )
+    assert final3.status == "aborted", final3
+    assert final3.iteration == 4, final3  # 100+200+300+400 trips on round 4
+    log3 = open(f"{tmp3}/logs/orchestrator.jsonl", encoding="utf-8").read()
+    assert "fanout_budget_exceeded" in log3 and "400" in log3, log3
 
     print("loop self-check OK")

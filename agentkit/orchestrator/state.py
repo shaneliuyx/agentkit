@@ -22,6 +22,8 @@ decision logic lives in stall.py / diversity.py / select.py, never here.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -53,6 +55,41 @@ class ProgressState:
     total_findings: int = 0
     status: str = "running"
     stale_count: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Atomic-publish helper (P42 — corruption-safe full-file writes)
+# ---------------------------------------------------------------------------
+
+def _atomic_write(
+    path: str | Path, text: str, *, encoding: str = "utf-8"
+) -> None:
+    """Publish ``text`` to ``path`` atomically: temp file → ``os.replace``.
+
+    A plain ``write_text`` truncates the live file the instant it opens and
+    re-streams the bytes, so a crash mid-write leaves a half-written (corrupt)
+    artifact. Instead we write the full payload to a UNIQUE temp file on the
+    *target's own directory* (same filesystem, so the rename is a true atomic
+    rename, not a cross-device copy) and ``os.replace`` it into place. A reader
+    therefore always observes the whole old file or the whole new one — never a
+    partial. On any failure the temp is unlinked so no junk is left behind.
+
+    Append-only ``.jsonl`` line writes do NOT use this — a per-line append is
+    already atomic enough; this is for the full-REWRITE artifacts only.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as fh:
+            fh.write(text)
+        os.replace(tmp, p)  # atomic publish
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -95,15 +132,15 @@ def init_task(state_dir: str | Path, task_spec: str) -> None:
     """Create the state/ + logs/ dirs, write the task spec, seed empty progress."""
     _state_dir(state_dir).mkdir(parents=True, exist_ok=True)
     _logs_dir(state_dir).mkdir(parents=True, exist_ok=True)
-    _task_spec_path(state_dir).write_text(task_spec, encoding="utf-8")
+    _atomic_write(_task_spec_path(state_dir), task_spec)
     save_progress(state_dir, ProgressState())
 
 
 def save_progress(state_dir: str | Path, progress: ProgressState) -> None:
     """Write ProgressState to progress.json (full rewrite)."""
     _state_dir(state_dir).mkdir(parents=True, exist_ok=True)
-    _progress_path(state_dir).write_text(
-        json.dumps(asdict(progress), indent=2), encoding="utf-8"
+    _atomic_write(
+        _progress_path(state_dir), json.dumps(asdict(progress), indent=2)
     )
 
 
@@ -172,8 +209,8 @@ def append_direction(state_dir: str | Path, d: str) -> None:
     _state_dir(state_dir).mkdir(parents=True, exist_ok=True)
     directions = read_directions(state_dir)
     directions.append(d)
-    _directions_path(state_dir).write_text(
-        json.dumps(directions, indent=2), encoding="utf-8"
+    _atomic_write(
+        _directions_path(state_dir), json.dumps(directions, indent=2)
     )
 
 
