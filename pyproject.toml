@@ -32,6 +32,8 @@ packages = [
     "agentkit.sandbox",
     "agentkit.gates",
     "agentkit.planner",
+    "agentkit.evolve",
+    "agentkit.skills",
 ]
 
 [tool.setuptools.package-data]
