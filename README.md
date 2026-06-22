@@ -124,7 +124,7 @@ print(res.answer)
 route("hard")                                       # -> RouteDecision (which reasoning tier)
 role = dispatch("review this draft")                # keyword heuristic -> AgentRole (no LLM)
 run_role(RESEARCHER, "survey vector DBs", client=MyClient())   # a role is config over run_agent
-run_batch(items, lambda x: run_agent(x, client=MyClient()),
+run_batch(items, lambda x: run_agent(x, client=MyClient()).answer,   # return JSON-serializable
           output_path="out.jsonl", failures_path="fail.jsonl", config=BatchConfig())
 for chunk in run_agent_stream("research X", client=MyClient()):
     ...                                             # streaming: partial ChatChunks then AgentResult (TTFT)
