@@ -34,6 +34,7 @@ packages = [
     "agentkit.planner",
     "agentkit.evolve",
     "agentkit.skills",
+    "agentkit.codegen",
 ]
 
 [tool.setuptools.package-data]
