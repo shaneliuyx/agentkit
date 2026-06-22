@@ -13,9 +13,13 @@ epochs/validation-gate/deployable-best-artifact framing follows SkillOpt
 
 from agentkit.evolve.core import (
     Evaluator,
+    GroupDistillation,
     OptimizeResult,
     Proposer,
+    Rollout,
     Variant,
+    Verifier,
+    distill_group,
     evolve_prompt,
     evolve_prompt_rho,
     make_llm_proposer,
@@ -33,4 +37,8 @@ __all__ = [
     "evolve_prompt_rho",
     "make_llm_proposer",
     "self_preference",
+    "distill_group",
+    "GroupDistillation",
+    "Rollout",
+    "Verifier",
 ]

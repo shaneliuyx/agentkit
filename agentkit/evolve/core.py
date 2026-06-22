@@ -31,6 +31,7 @@ ONLY to prompts/config text, never weights, so it stays safe + reversible.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -399,6 +400,129 @@ def evolve_prompt_rho(
     )
 
 
+# ---------------------------------------------------------------------------
+# Group-Relative Experience Distillation (P45, Training-Free GRPO).
+# ---------------------------------------------------------------------------
+
+# A Verifier scores one rollout. Injected, deterministic from the function's
+# point of view (its number is the lever that ranks the group — Pattern 29: a
+# convenient verifier distills convenient lessons).
+Verifier = Callable[["Rollout"], float]
+
+
+@dataclass(frozen=True)
+class Rollout:
+    """One immutable rollout in a group sampled for the same task.
+
+    Attributes:
+        lesson: the natural-language lesson/trajectory text this rollout yields.
+        reward: an optional pre-computed reward; ignored when a ``verifier`` is
+                injected (the verifier is the canonical scorer). Defaults to 0.0
+                so a verifier that reads ``r.reward`` has a stable field to read.
+    """
+
+    lesson: str
+    reward: float = 0.0
+
+
+@dataclass(frozen=True)
+class GroupDistillation:
+    """The immutable outcome of distilling one group of rollouts (P45).
+
+    GRPO's group-relative advantage applied to TEXT, weight-free: keep the
+    natural-language lesson ONLY from rollouts whose reward strictly beats the
+    group mean; below-mean rollouts become "what NOT to do" counter-lessons.
+    No gradients, no optimizer — the experience buffer is the policy.
+
+    Attributes:
+        lessons:         lessons from STRICTLY-above-mean rollouts (the keepers).
+        counter_lessons: lessons from STRICTLY-below-mean rollouts (negatives).
+        advantages:      per-rollout group-relative advantage ``(r_i - mean)/std``
+                         (mean-centered; 0.0 for every rollout when ``std == 0``),
+                         in the input order of the scored group.
+        mean:            the group mean reward.
+        std:             the group's population standard deviation of rewards.
+        group_size:      how many rollouts were successfully scored.
+    """
+
+    lessons: tuple[str, ...]
+    counter_lessons: tuple[str, ...]
+    advantages: tuple[float, ...]
+    mean: float
+    std: float
+    group_size: int
+
+
+def distill_group(
+    rollouts: "list[Rollout] | tuple[Rollout, ...]",
+    *,
+    verifier: Verifier,
+) -> GroupDistillation:
+    """Group-relative textual distillation of N rollouts (P45).
+
+    Score each rollout with the injected ``verifier``, compute the group mean,
+    and retain the natural-language lesson ONLY from rollouts whose reward
+    *strictly* beats the mean — GRPO's group-relative advantage
+    ``A_i = (r_i - mean) / std`` consumed by the prompt layer instead of an
+    optimizer. Strictly-below-mean rollouts become "what NOT to do"
+    counter-lessons, giving every kept lesson a comparison class (the sub-rule:
+    a lesson needs a baseline, not just a post-mortem). This is text-space and
+    weight-free — the model stays frozen, the experience buffer is the policy.
+
+    The control is fully deterministic and unit-testable: the keep/discard
+    decision is the mean comparison alone; the only injected seam is the
+    ``verifier``. A rollout whose verifier raises is dropped (never a crash),
+    so a broken scorer shrinks the group rather than failing the distillation.
+
+    Reference: Youtu-agent Training-Free GRPO (arXiv:2510.08191) — the same
+    variance-reduction statistic that stabilizes RL, applied to text.
+
+    Args:
+        rollouts: the group of ``Rollout`` candidates for one task.
+        verifier: injected ``Rollout -> float`` scorer (the ranking lever).
+
+    Returns:
+        A ``GroupDistillation`` with the above-mean lessons, below-mean
+        counter-lessons, and the per-rollout group-relative advantages.
+    """
+    scored: list[tuple[Rollout, float]] = []
+    for rollout in rollouts:
+        try:
+            scored.append((rollout, float(verifier(rollout))))
+        except Exception:  # noqa: BLE001 - a broken verifier drops that rollout
+            continue
+
+    if not scored:
+        return GroupDistillation(
+            lessons=(),
+            counter_lessons=(),
+            advantages=(),
+            mean=0.0,
+            std=0.0,
+            group_size=0,
+        )
+
+    rewards = [score for _, score in scored]
+    mean = sum(rewards) / len(rewards)
+    variance = sum((r - mean) ** 2 for r in rewards) / len(rewards)
+    std = math.sqrt(variance)
+
+    lessons = tuple(r.lesson for r, score in scored if score > mean)
+    counter_lessons = tuple(r.lesson for r, score in scored if score < mean)
+    advantages = tuple(
+        (score - mean) / std if std > 0.0 else 0.0 for score in rewards
+    )
+
+    return GroupDistillation(
+        lessons=lessons,
+        counter_lessons=counter_lessons,
+        advantages=advantages,
+        mean=mean,
+        std=std,
+        group_size=len(scored),
+    )
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -452,5 +576,24 @@ if __name__ == "__main__":
             epochs=2,
         )
         assert ev.best_score >= ev.baseline_score, ev
+
+    # distill_group (P45): group of 4 with known scores [0,2,4,6] -> mean 3.0.
+    # Above-mean lessons kept, below-mean become counter-lessons, advantages
+    # mean-centered (sum to 0). Weight-free, deterministic, no network.
+    group = [Rollout(lesson=f"L{i}", reward=s) for i, s in enumerate((0.0, 2.0, 4.0, 6.0))]
+    dist = distill_group(group, verifier=lambda r: r.reward)
+    assert dist.mean == 3.0 and dist.group_size == 4, dist
+    assert dist.lessons == ("L2", "L3"), dist
+    assert dist.counter_lessons == ("L0", "L1"), dist
+    assert abs(sum(dist.advantages)) < 1e-9, dist  # mean-centered
+    assert dist.std == math.sqrt(5.0), dist
+
+    # Uniform scores -> nobody beats the mean; zero std -> no divide blowup.
+    flat_group = distill_group(
+        [Rollout(lesson="a", reward=1.0), Rollout(lesson="b", reward=1.0)],
+        verifier=lambda r: r.reward,
+    )
+    assert flat_group.lessons == () and flat_group.std == 0.0, flat_group
+    assert flat_group.advantages == (0.0, 0.0), flat_group
 
     print("evolve.core self-check OK")

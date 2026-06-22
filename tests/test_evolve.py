@@ -19,8 +19,11 @@ from typing import Any
 import pytest
 
 from agentkit.evolve import (
+    GroupDistillation,
     OptimizeResult,
+    Rollout,
     Variant,
+    distill_group,
     evolve_prompt,
     evolve_prompt_rho,
     make_llm_proposer,
@@ -316,3 +319,131 @@ def test_evolve_prompt_rho_keeps_on_self_preference(tmp_path: Path):
     assert result.best == "improved artifact"
     assert result.accepted == 1
     assert result.delta > 0
+
+
+# ---------------------------------------------------------------------------
+# Group-Relative Experience Distillation (P45 / Training-Free GRPO)
+# ---------------------------------------------------------------------------
+
+def _make_rollouts(scores: list[float]) -> list[Rollout]:
+    """A group of N rollouts, each carrying a distinct lesson + its known score."""
+    return [
+        Rollout(lesson=f"lesson {i} (score {s})", reward=s)
+        for i, s in enumerate(scores)
+    ]
+
+
+@pytest.mark.unit
+def test_group_distillation_is_frozen():
+    d = GroupDistillation(
+        lessons=(),
+        counter_lessons=(),
+        advantages=(),
+        mean=0.0,
+        std=0.0,
+        group_size=0,
+    )
+    with pytest.raises(FrozenInstanceError):
+        d.mean = 1.0  # type: ignore[misc]
+
+
+@pytest.mark.unit
+def test_rollout_is_frozen():
+    r = Rollout(lesson="x", reward=0.5)
+    with pytest.raises(FrozenInstanceError):
+        r.reward = 0.9  # type: ignore[misc]
+
+
+@pytest.mark.unit
+def test_distill_group_keeps_only_above_mean_lessons():
+    """The load-bearing P45 property: ONLY strictly-above-mean lessons survive."""
+    # scores: [0, 2, 4, 6] -> mean 3.0; above-mean = {4, 6}, below = {0, 2}.
+    rollouts = _make_rollouts([0.0, 2.0, 4.0, 6.0])
+    result = distill_group(rollouts, verifier=lambda r: r.reward)
+
+    assert result.mean == pytest.approx(3.0)
+    # Above-mean lessons retained (indices 2 and 3).
+    assert result.lessons == ("lesson 2 (score 4.0)", "lesson 3 (score 6.0)")
+    # Below-mean become counter-lessons (indices 0 and 1).
+    assert result.counter_lessons == ("lesson 0 (score 0.0)", "lesson 1 (score 2.0)")
+
+
+@pytest.mark.unit
+def test_distill_group_advantages_are_mean_centered():
+    """Group-relative advantage A_i = (r_i - mean)/std, mean-centered (sums to 0)."""
+    rollouts = _make_rollouts([0.0, 2.0, 4.0, 6.0])
+    result = distill_group(rollouts, verifier=lambda r: r.reward)
+
+    # population std of [0,2,4,6] = sqrt(5) ~= 2.2360679...
+    import math
+    std = math.sqrt(5.0)
+    expected = [(s - 3.0) / std for s in (0.0, 2.0, 4.0, 6.0)]
+    assert result.advantages == pytest.approx(tuple(expected))
+    # Mean-centered: advantages sum to (approximately) zero.
+    assert sum(result.advantages) == pytest.approx(0.0)
+    assert result.std == pytest.approx(std)
+    assert result.group_size == 4
+
+
+@pytest.mark.unit
+def test_distill_group_verifier_scores_rollouts():
+    """The verifier (not a pre-baked field) is the lever that ranks the group."""
+    # Rollouts carry no reward; the injected verifier scores by lesson length.
+    rollouts = [
+        Rollout(lesson="short"),
+        Rollout(lesson="a much longer lesson body"),
+        Rollout(lesson="mid length"),
+    ]
+    result = distill_group(rollouts, verifier=lambda r: float(len(r.lesson)))
+    # Longest lesson is the only strictly-above-mean one.
+    assert result.lessons == ("a much longer lesson body",)
+    assert "short" in result.counter_lessons
+
+
+@pytest.mark.unit
+def test_distill_group_uniform_scores_keep_nothing():
+    """No rollout strictly beats the mean when all scores are equal."""
+    rollouts = _make_rollouts([1.0, 1.0, 1.0])
+    result = distill_group(rollouts, verifier=lambda r: r.reward)
+    assert result.lessons == ()
+    assert result.counter_lessons == ()  # none strictly below either
+    assert result.std == 0.0
+    # Zero std -> advantages are all 0 (no divide-by-zero blowup).
+    assert result.advantages == pytest.approx((0.0, 0.0, 0.0))
+
+
+@pytest.mark.unit
+def test_distill_group_empty_is_safe():
+    result = distill_group([], verifier=lambda r: r.reward)
+    assert result.lessons == ()
+    assert result.counter_lessons == ()
+    assert result.advantages == ()
+    assert result.group_size == 0
+
+
+@pytest.mark.unit
+def test_distill_group_verifier_exception_is_safe():
+    """A rollout whose verifier raises is dropped, not a crash."""
+    def _verifier(r: Rollout) -> float:
+        if "boom" in r.lesson:
+            raise ValueError("verifier blew up")
+        return r.reward
+
+    rollouts = [
+        Rollout(lesson="good", reward=10.0),
+        Rollout(lesson="boom", reward=99.0),
+        Rollout(lesson="bad", reward=0.0),
+    ]
+    result = distill_group(rollouts, verifier=_verifier)
+    # Only the two scorable rollouts form the group; mean = 5.0.
+    assert result.group_size == 2
+    assert result.mean == pytest.approx(5.0)
+    assert result.lessons == ("good",)
+
+
+@pytest.mark.unit
+def test_distill_group_result_is_optimize_result_independent():
+    """distill_group is additive: it does not return an OptimizeResult."""
+    result = distill_group(_make_rollouts([1.0, 5.0]), verifier=lambda r: r.reward)
+    assert isinstance(result, GroupDistillation)
+    assert not isinstance(result, OptimizeResult)
