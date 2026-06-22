@@ -25,9 +25,9 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Iterator, Protocol, runtime_checkable
 
-from agentkit.types import LLMClient, Message
+from agentkit.types import ChatChunk, ChatResult, LLMClient, Message, stream_chat
 
 # A tool handler: takes parsed args, returns a JSON-serialisable result dict.
 ToolFn = Callable[[dict[str, Any]], dict[str, Any]]
@@ -314,9 +314,142 @@ def run_agent(
     )
 
 
-if __name__ == "__main__":
-    from agentkit.types import ChatResult
+def run_agent_stream(
+    task: str,
+    client: LLMClient,
+    tools: ToolRegistry | dict[str, ToolFn] | None = None,
+    system_prompt: str = "You are a helpful agent. Use tools when needed; "
+                         "when you have a final answer, respond with plain text.",
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
+    memory: Any | None = None,
+) -> Iterator[ChatChunk | AgentResult]:
+    """Streaming variant of :func:`run_agent` (P43 — optimize TTFT).
 
+    Same control flow and same final ``AgentResult`` as ``run_agent`` — the only
+    difference is the model call goes through ``agentkit.types.stream_chat``, so
+    partial output is yielded as ``ChatChunk`` objects the moment it is produced
+    instead of blocking until the round completes. The iterator yields zero or
+    more ``ChatChunk`` partials, then finally the assembled ``AgentResult`` as
+    its last item.
+
+    The control flow stays deterministic and model-free: only the injected
+    client streams; tool dispatch, quarantining, and the ReAct branching are
+    identical to ``run_agent``. A non-streaming client flows through unchanged
+    (``stream_chat`` wraps its single ``.chat()`` result as one terminal chunk).
+    """
+    registry = _as_registry(tools)
+    tool_schemas = registry.schemas if registry is not None else None
+
+    sys_prompt = system_prompt
+    if memory is not None:
+        mem_ctx = memory.inject_context(task)
+        if mem_ctx:
+            sys_prompt = f"{sys_prompt}\n\n{mem_ctx}"
+
+    messages: list[Message] = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": task},
+    ]
+
+    trajectory: list[TrajectoryStep] = []
+    answer = ""
+    stop_reason = "max_rounds"
+    total_tokens = 0
+
+    try:
+        for round_num in range(1, max_rounds + 1):
+            # Consume the streamed chunks: yield each partial through to the
+            # caller for TTFT, while assembling the round's full response.
+            chunk_text_parts: list[str] = []
+            round_tokens = 0
+            stream_tool_calls: list[tuple[str, dict[str, Any]]] = []
+            try:
+                for chunk in stream_chat(client, messages, tools=tool_schemas):
+                    if chunk.text:
+                        chunk_text_parts.append(chunk.text)
+                        # Emit partial output immediately (the P43 point).
+                        yield ChatChunk(text=chunk.text, done=False)
+                    if chunk.tool_calls:
+                        stream_tool_calls.extend(chunk.tool_calls)
+                    if chunk.done:
+                        round_tokens = chunk.total_tokens
+            except Exception as exc:
+                trajectory.append(TrajectoryStep(
+                    round_num=round_num, role="error", content=str(exc),
+                ))
+                stop_reason = "error"
+                answer = f"[Error in round {round_num}: {exc}]"
+                break
+
+            total_tokens += round_tokens or 0
+            text = "".join(chunk_text_parts)
+            tool_calls = list(stream_tool_calls)
+
+            # --- Case 1: structured tool calls ---
+            if tool_calls:
+                call_note = ", ".join(f"{n}({json.dumps(a)})" for n, a in tool_calls)
+                messages.append({"role": "assistant",
+                                 "content": text or f"[calling tools: {call_note}]"})
+                for name, args in tool_calls:
+                    tool_result = (registry.dispatch(name, args)
+                                   if registry is not None
+                                   else {"error": "no tool registry configured"})
+                    result_text = json.dumps(tool_result)
+                    trajectory.append(TrajectoryStep(
+                        round_num=round_num, role="tool", content=result_text,
+                        tool_name=name, tool_args=args, tool_result=tool_result,
+                    ))
+                    messages.append({
+                        "role": "user",
+                        "content": (f"Tool {name} returned:\n"
+                                    f"{quarantine(result_text, source=name)}"),
+                    })
+
+            # --- Case 1b: text-based tool calls (local models) ---
+            elif (text_calls := _parse_text_tool_calls(text)):
+                messages.append({"role": "assistant", "content": text})
+                for name, args in text_calls:
+                    tool_result = (registry.dispatch(name, args)
+                                   if registry is not None
+                                   else {"error": "no tool registry configured"})
+                    result_text = json.dumps(tool_result)
+                    trajectory.append(TrajectoryStep(
+                        round_num=round_num, role="tool", content=result_text,
+                        tool_name=name, tool_args=args, tool_result=tool_result,
+                    ))
+                    messages.append({
+                        "role": "user",
+                        "content": (f"Tool {name} returned:\n"
+                                    f"{quarantine(result_text, source=name)}\n"
+                                    "Use it to give the final answer."),
+                    })
+
+            # --- Case 2: final answer (no tool call) ---
+            else:
+                answer = text
+                trajectory.append(TrajectoryStep(
+                    round_num=round_num, role="assistant", content=answer,
+                ))
+                stop_reason = "answer"
+                break
+    except KeyboardInterrupt:
+        stop_reason = "interrupted"
+        answer = answer or "[interrupted by user]"
+
+    success = (stop_reason == "answer" and bool(answer))
+
+    yield AgentResult(
+        task=task,
+        answer=answer,
+        trajectory=trajectory,
+        success=success,
+        rounds_used=len(trajectory),
+        stop_reason=stop_reason,
+        total_tokens=total_tokens,
+    )
+
+
+if __name__ == "__main__":
     # A scripted fake client: round 1 calls a tool, round 2 answers.
     class _ScriptedClient:
         def __init__(self) -> None:
@@ -350,4 +483,23 @@ if __name__ == "__main__":
     # Text-fallback parse.
     parsed = _parse_text_tool_calls('<tool_call>{"name": "add", "arguments": {"a": 1}}</tool_call>')
     assert parsed == [("add", {"a": 1})], parsed
+
+    # P43 streaming: a streaming client yields partials, then the AgentResult.
+    class _StreamClient:
+        def chat(self, messages, tools=None):
+            return ChatResult(text="streamed answer", total_tokens=3)
+
+        def stream_chat(self, messages, tools=None):
+            yield ChatChunk(text="streamed ")
+            yield ChatChunk(text="answer", done=True, total_tokens=3)
+
+    events = list(run_agent_stream("q", client=_StreamClient()))
+    final = events[-1]
+    assert isinstance(final, AgentResult) and final.answer == "streamed answer", final
+    assert "".join(e.text for e in events[:-1]) == "streamed answer"
+
+    # Back-compat: a non-streaming client still streams (single wrapped chunk).
+    bc = list(run_agent_stream("q", client=_ScriptedClient(), tools={"add": _add}))
+    assert isinstance(bc[-1], AgentResult) and bc[-1].answer == "The answer is 4.", bc[-1]
+
     print("loop self-check OK")

@@ -17,11 +17,11 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 # REUSE the loop's text tool-call parser — do not duplicate it.
 from agentkit.agent.loop import _parse_text_tool_calls
-from agentkit.types import ChatResult, Message
+from agentkit.types import ChatChunk, ChatResult, Message
 
 _STDERR_TAIL = 2000
 
@@ -104,6 +104,29 @@ class CliLLMClient:
         # A CLI does not report token usage.
         return ChatResult(text=stdout, tool_calls=tool_calls, total_tokens=0)
 
+    def stream_chat(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Iterator[ChatChunk]:
+        """P43 streaming seam: yield the CLI's output as one terminal chunk.
+
+        # ponytail: CEILING — ``subprocess.run`` buffers the whole CLI output
+        # before returning, so there is no incremental token-by-token stream to
+        # forward; we emit a single ``done=True`` chunk with the full text. This
+        # keeps the streaming interface UNIFORM across HTTP and CLI backends
+        # (callers can always use ``stream_chat``) but does NOT improve TTFT for
+        # a CLI. A true incremental CLI stream would need ``subprocess.Popen``
+        # with line-buffered ``stdout`` readahead — out of scope for this seam.
+        """
+        result = self.chat(messages, tools=tools)
+        yield ChatChunk(
+            text=result.text,
+            done=True,
+            total_tokens=result.total_tokens,
+            tool_calls=tuple(result.tool_calls),
+        )
+
 
 if __name__ == "__main__":
     from agentkit.types import LLMClient
@@ -138,5 +161,12 @@ if __name__ == "__main__":
         res = echo_client.chat([{"role": "user", "content": "hello world"}])
         assert "hello world" in res.text, res
         assert res.total_tokens == 0
+
+        # P43 streaming seam: single terminal chunk carrying the full output.
+        from agentkit.types import supports_streaming
+        assert supports_streaming(echo_client)
+        chunks = list(echo_client.stream_chat([{"role": "user", "content": "hi there"}]))
+        assert len(chunks) == 1 and chunks[0].done
+        assert "hi there" in chunks[0].text, chunks
 
     print("backends.cli self-check OK")
