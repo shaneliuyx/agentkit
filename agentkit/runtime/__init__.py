@@ -4,6 +4,11 @@ from agentkit.runtime.file_lock import FileLock, LockTimeout
 from agentkit.runtime.graph_store import GraphStore, Node
 from agentkit.runtime.pool import run_graph
 from agentkit.runtime.scheduler import CronRegistration, Scheduler
+from agentkit.runtime.subagent import (
+    SubagentResult,
+    parse_status,
+    poll_until_terminal,
+)
 
 __all__ = [
     "GraphStore",
@@ -13,4 +18,5 @@ __all__ = [
     "FileLock",
     "LockTimeout",
     "run_graph",
+    "poll_until_terminal", "parse_status", "SubagentResult",
 ]
