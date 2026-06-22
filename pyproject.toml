@@ -29,6 +29,8 @@ packages = [
     "agentkit.quality",
     "agentkit.topology",
     "agentkit.config",
+    "agentkit.sandbox",
+    "agentkit.gates",
 ]
 
 [tool.setuptools.package-data]
