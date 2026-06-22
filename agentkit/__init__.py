@@ -152,3 +152,27 @@ try:
     __all__ += ["CliLLMClient"]
 except ImportError:  # pragma: no cover - defensive optional-dep guard
     pass
+
+# Optional: the self-improving layer (re-plan) — config-driven roles, the
+# sandbox/gates security spine, the evolve/skills optimizer, planner, codegen,
+# and the SelfImprovingAgent facade. See docs/REPLAN-agentkit.md. Submodule
+# imports (agentkit.config, agentkit.gates, ...) always work; these are the
+# top-level conveniences. Dep-guarded like the blocks above.
+try:
+    from agentkit.config import load_default_roles, load_roles
+    from agentkit.gates import Outcome, run_gate
+    from agentkit.planner import plan
+    from agentkit.sandbox import SubprocessSandbox
+    from agentkit.selfimproving import SelfImprovingAgent
+
+    __all__ += [
+        "SelfImprovingAgent",
+        "load_default_roles",
+        "load_roles",
+        "SubprocessSandbox",
+        "run_gate",
+        "Outcome",
+        "plan",
+    ]
+except ImportError:  # pragma: no cover - defensive optional-dep guard
+    pass
