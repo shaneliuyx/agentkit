@@ -33,6 +33,13 @@ from agentkit.topology.core import (
     select_topology,
 )
 from agentkit.topology.a2a import Message, MessageBus
+from agentkit.topology.dynamic import (
+    DynamicPlanResult,
+    StepRun,
+    assign_topologies,
+    classify_step_topology,
+    run_plan,
+)
 from agentkit.topology.infer import infer_spec
 from agentkit.topology.pipeline import PipelineResult, run_task
 
@@ -49,4 +56,7 @@ __all__ = [
     "infer_spec",
     "run_task", "PipelineResult",
     "MessageBus", "Message",
+    # Phase 8 — dynamic per-step topology
+    "classify_step_topology", "assign_topologies", "run_plan",
+    "StepRun", "DynamicPlanResult",
 ]

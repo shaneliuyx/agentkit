@@ -183,6 +183,7 @@ try:
     from agentkit.agent.loop import run_agent_stream
     from agentkit.evolve import distill_group
     from agentkit.orchestrator import BudgetExceeded, FanoutBudget
+    from agentkit.topology import assign_topologies, classify_step_topology, run_plan
     from agentkit.types import ChatChunk, stream_chat, supports_streaming
 
     __all__ += [
@@ -193,6 +194,9 @@ try:
         "FanoutBudget",
         "BudgetExceeded",
         "distill_group",
+        "assign_topologies",
+        "classify_step_topology",
+        "run_plan",
     ]
 except ImportError:  # pragma: no cover - defensive optional-dep guard
     pass

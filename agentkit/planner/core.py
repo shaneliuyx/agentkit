@@ -37,6 +37,11 @@ class PlanStep:
         depends_on:  Tuple of step ids that must complete before this one.
         role:        Optional agent role hint (e.g. "researcher", "writer").
         difficulty:  Optional difficulty hint (e.g. "low", "medium", "high").
+        topology:    Optional per-step execution topology (Phase 8). ``None``
+                     (the default) means unassigned — back-compatible; set by
+                     ``agentkit.topology.dynamic.assign_topologies`` to one of
+                     SINGLE / STAR / MESH / PIPELINE so each step can run under
+                     its own internal shape.
     """
 
     id: str
@@ -44,6 +49,7 @@ class PlanStep:
     depends_on: tuple[str, ...] = ()
     role: str | None = None
     difficulty: str | None = None
+    topology: str | None = None
 
 
 @dataclass(frozen=True)
