@@ -63,6 +63,32 @@ class Claim:
 
 
 @dataclass(frozen=True)
+class SaturationReport:
+    """P29 eval-integrity: a verdict on whether an eval INSTRUMENT is degenerate.
+
+    A benchmark number is only as trustworthy as the spread of the scores behind
+    it. When every item passes, every item fails, or the scores have ~zero
+    variance, the metric is *uninformative* — it cannot rank two systems no
+    matter how different they are. ``saturated=True`` tells the caller the metric
+    earned no signal; ``reason`` says which degeneracy fired.
+
+    Attributes:
+        saturated: True when the score set is degenerate (uninformative).
+        reason:    one of ``"all_pass" | "all_fail" | "zero_variance" |
+                   "too_few" | ""`` ("" when not saturated).
+        n:         number of scores considered.
+        mean:      mean of the scores.
+        variance:  population variance of the scores.
+    """
+
+    saturated: bool
+    reason: str
+    n: int
+    mean: float
+    variance: float
+
+
+@dataclass(frozen=True)
 class VerifyFinding:
     """An immutable verification finding.
 
@@ -217,6 +243,51 @@ def find_uncited(claims: list[Claim]) -> list[VerifyFinding]:
         for c in claims
         if not c.citation
     ]
+
+
+# ---------------------------------------------------------------------------
+# PURE tier: eval-integrity (P29) — flag a saturated/degenerate grader.
+# ---------------------------------------------------------------------------
+
+def grader_saturated(
+    scores: list[float],
+    *,
+    min_n: int = 2,
+    pass_threshold: float = 0.5,
+    variance_floor: float = 1e-9,
+) -> SaturationReport:
+    """P29 eval-integrity: detect when an eval INSTRUMENT is saturated/degenerate
+    so the caller knows the metric is uninformative (it cannot separate two
+    systems regardless of how different they are).
+
+    Cheap, pure, model-free. Degeneracies, in order of specificity:
+      - ``too_few``      — fewer than ``min_n`` scores (can't judge spread).
+      - ``zero_variance``— scores vary trivially (variance ≤ ``variance_floor``),
+                           e.g. a grader emitting one constant value — the truest
+                           "the instrument emits one number" signal.
+      - ``all_pass``     — scores DO vary but all land on the pass side of
+                           ``pass_threshold`` (the metric can't fail anything).
+      - ``all_fail``     — scores vary but all land on the fail side.
+
+    ``scores`` may be booleans (pass/fail) or continuous (e.g. judge scores in
+    [0, 1]); booleans are read as 1.0/0.0. A non-saturated set returns
+    ``saturated=False, reason=""``.
+    """
+    vals = [float(s) for s in scores]
+    n = len(vals)
+    if n == 0:
+        return SaturationReport(True, "too_few", 0, 0.0, 0.0)
+    mean = sum(vals) / n
+    variance = sum((v - mean) ** 2 for v in vals) / n
+    if n < min_n:
+        return SaturationReport(True, "too_few", n, mean, variance)
+    if variance <= variance_floor:
+        return SaturationReport(True, "zero_variance", n, mean, variance)
+    if all(v >= pass_threshold for v in vals):
+        return SaturationReport(True, "all_pass", n, mean, variance)
+    if all(v < pass_threshold for v in vals):
+        return SaturationReport(True, "all_fail", n, mean, variance)
+    return SaturationReport(False, "", n, mean, variance)
 
 
 # ---------------------------------------------------------------------------
@@ -387,5 +458,16 @@ if __name__ == "__main__":
     severities = [f.severity for f in findings]
     assert severities == sorted(severities, key=lambda s: _SEVERITY_ORDER[s]), severities
     assert severities[0] == "critical", severities
+
+    # P29 eval-integrity: degenerate score sets are flagged saturated.
+    assert grader_saturated([1.0, 1.0, 1.0]).reason == "zero_variance"
+    assert grader_saturated([0.0, 0.0, 0.0]).reason == "zero_variance"
+    assert grader_saturated([0.9, 0.8, 0.7]).reason == "all_pass"
+    assert grader_saturated([0.1, 0.2, 0.3]).reason == "all_fail"
+    assert grader_saturated([1.0]).reason == "too_few"
+    assert grader_saturated([]).reason == "too_few"
+    # A score set with real spread across the threshold is informative.
+    healthy = grader_saturated([1.0, 0.0, 1.0, 0.0])
+    assert healthy.saturated is False and healthy.reason == ""
 
     print("verify self-check OK")

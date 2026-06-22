@@ -12,6 +12,7 @@ from agentkit.quality.verify import (
     check_support,
     extract_claims,
     find_uncited,
+    grader_saturated,
     verify,
 )
 from agentkit.types import ChatResult, Message
@@ -134,6 +135,60 @@ def test_findings_are_frozen():
     f = VerifyFinding(severity="low", claim="c", issue="i")
     with pytest.raises(Exception):
         f.severity = "high"  # type: ignore[misc]
+
+
+# --- P29 eval-integrity: saturated/degenerate grader guard ---
+
+@pytest.mark.unit
+def test_grader_saturated_all_pass():
+    rep = grader_saturated([0.9, 0.8, 0.7, 1.0])
+    assert rep.saturated is True
+    assert rep.reason == "all_pass"
+
+
+@pytest.mark.unit
+def test_grader_saturated_all_fail():
+    rep = grader_saturated([0.1, 0.2, 0.0, 0.3])
+    assert rep.saturated is True
+    assert rep.reason == "all_fail"
+
+
+@pytest.mark.unit
+def test_grader_saturated_zero_variance_constant_grader():
+    # A grader emitting one constant value is uninformative.
+    rep = grader_saturated([0.5, 0.5, 0.5, 0.5])
+    assert rep.saturated is True
+    assert rep.reason == "zero_variance"
+
+
+@pytest.mark.unit
+def test_grader_saturated_too_few():
+    assert grader_saturated([]).reason == "too_few"
+    assert grader_saturated([1.0]).reason == "too_few"
+
+
+@pytest.mark.unit
+def test_grader_not_saturated_when_scores_spread_across_threshold():
+    rep = grader_saturated([1.0, 0.0, 1.0, 0.0])
+    assert rep.saturated is False
+    assert rep.reason == ""
+    assert rep.n == 4
+    assert rep.variance > 0.0
+
+
+@pytest.mark.unit
+def test_grader_saturated_accepts_boolean_scores():
+    # Booleans read as 1.0/0.0; all-True is all_pass.
+    rep = grader_saturated([True, True, True])
+    assert rep.saturated is True
+    assert rep.reason in ("all_pass", "zero_variance")
+
+
+@pytest.mark.unit
+def test_grader_saturation_report_is_frozen():
+    rep = grader_saturated([1.0, 0.0])
+    with pytest.raises(Exception):
+        rep.saturated = True  # type: ignore[misc]
 
 
 # --- ClaimClassifier seam + embedding-prototype adapter (non-LLM) ---

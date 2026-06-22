@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from agentkit.memory.store import MemoryEntry, MemoryStore
@@ -52,6 +53,59 @@ HEDGE_SYSTEM = (
     "Answer the question using ONLY the context. If the answer is not in the "
     "context, say 'I don't know'. Answer in one short phrase."
 )
+
+# P33 — route the READ assembly by question type. Each shape needs a different
+# read-time assembly operator, not one universal reader. These are the minimal
+# deterministic operators a library can ship; a host can extend the table.
+QTYPE_FACTOID = "factoid"        # "what is X" → terse latest-wins lookup
+QTYPE_COMPARISON = "comparison"  # "compare X and Y" / "X vs Y" → enumerate both
+QTYPE_SUMMARY = "summary"        # "summarise / overview" → wider context, synthesise
+
+# Per-operator reader prompts (the assembly the router selects). Commit-biased
+# (the measured accuracy lever) but shaped to the question's answer structure.
+_FACTOID_SYSTEM = (
+    "You are answering a FACTOID question from retrieved memory. Assume the "
+    "answer IS in the context. Commit to ONE specific value; do not hedge. "
+    "Answer in one short phrase."
+)
+_COMPARISON_SYSTEM = (
+    "You are answering a COMPARISON from retrieved memory. Address EACH subject "
+    "the question names, then state the difference. Use only the context; commit "
+    "to specifics for every subject mentioned."
+)
+_SUMMARY_SYSTEM = (
+    "You are SUMMARISING from retrieved memory. Synthesise the context into a "
+    "concise overview that preserves the concrete facts (names, values, dates). "
+    "Use only the context."
+)
+
+_QTYPE_SYSTEM = {
+    QTYPE_FACTOID: _FACTOID_SYSTEM,
+    QTYPE_COMPARISON: _COMPARISON_SYSTEM,
+    QTYPE_SUMMARY: _SUMMARY_SYSTEM,
+}
+
+# Deterministic, language-light cues for the question-type classifier. Kept
+# minimal (the eval/host can label types directly); this is the cheap fallback.
+_COMPARISON_CUES = frozenset(
+    "compare comparison versus vs difference differ differs between".split()
+)
+_SUMMARY_CUES = frozenset(
+    "summary summarise summarize overview describe explain tell".split()
+)
+
+
+def classify_question(query: str) -> str:
+    """P33 read-routing: classify a query into a question type so ``recall`` can
+    pick the matching read-assembly operator. Deterministic + cheap (token cues,
+    no model); a real system may pass the label in directly. Defaults to
+    ``factoid`` — the safe terse-lookup operator — when no cue matches."""
+    toks = _content_words(query)
+    if toks & _COMPARISON_CUES or " vs " in f" {query.lower()} ":
+        return QTYPE_COMPARISON
+    if toks & _SUMMARY_CUES:
+        return QTYPE_SUMMARY
+    return QTYPE_FACTOID
 
 
 @dataclass(frozen=True)
@@ -268,6 +322,68 @@ class TieredMemory:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [h for _, h in scored[:k]]
 
+    def recall_union(
+        self,
+        query: str,
+        k: int = 5,
+        *,
+        prefer_single_if_better: bool = True,
+        scorer: Callable[[list[MemoryEntry]], float] | None = None,
+    ) -> list[MemoryEntry]:
+        """P27 — combine the two retrieval rungs (keyword + vector) with the
+        documented guard that a single backend can BEAT a naive union.
+
+        The P23 ladder gives two candidate result sets: the cheap keyword rung
+        (``prefilter=True``) and the vector rung (``prefilter=False``). The naive
+        move is to UNION them — but a reader reasons over a fixed top-k window, so
+        a union can DILUTE the better single rung (window truncation, recall
+        dilution, distractor injection — Pattern 27). This method does NOT blindly
+        union: it builds all three candidates (vector-only, keyword-only, union)
+        and, when ``prefer_single_if_better`` is set and a ``scorer`` is supplied,
+        returns whichever scores highest — so a single rung is free to win.
+
+        ``scorer`` is the measurable hook: a host injects its own quality signal
+        (e.g. mean similarity, a grounding metric, an oracle on a labelled eval).
+        With no scorer the guard can't measure, so it conservatively returns the
+        vector rung alone (the established single backend) — never a blind union.
+        Returns at most ``k`` entries."""
+        vector = self.recall(query, k=k)
+        if not prefer_single_if_better:
+            # Caller explicitly opted into the naive union (documented as risky).
+            return self._merge_recall(query, vector, k)
+        if scorer is None:
+            # No measurement → do not blindly union; keep the single backend.
+            return vector
+        keyword = self._recall_keyword(query, k=k)
+        union = self._merge_recall(query, vector, k, seed=keyword)
+        candidates = {"vector": vector, "keyword": keyword, "union": union}
+        best = max(candidates.values(), key=scorer)
+        return best[:k]
+
+    def _recall_keyword(self, query: str, k: int = 5) -> list[MemoryEntry]:
+        """The cheap keyword rung as a standalone candidate (P23/P27)."""
+        hits = self.store.search(
+            query, top_k=k * self.cfg.overfetch, track=False, prefilter=True
+        )
+        cand = [
+            h for h in hits
+            if h.metadata.get("layer") not in (LAYER_SCENARIO, LAYER_PERSONA)
+            and self._depth(h) > 0.0
+        ]
+        return cand[:k]
+
+    def _merge_recall(
+        self, query: str, vector: list[MemoryEntry], k: int,
+        *, seed: list[MemoryEntry] | None = None,
+    ) -> list[MemoryEntry]:
+        """Union the keyword + vector rungs, de-duplicated by id, capped at k.
+        This is the rung the guard above measures AGAINST a single backend."""
+        keyword = seed if seed is not None else self._recall_keyword(query, k=k)
+        merged: dict[int, MemoryEntry] = {}
+        for h in [*vector, *keyword]:
+            merged.setdefault(h.id, h)
+        return list(merged.values())[:k]
+
     def inject(self, query: str, k: int = 5) -> str:
         """Top-layer context block for the reader. Atoms only — compact facts,
         not raw transcripts (TencentDB progressive disclosure)."""
@@ -282,12 +398,29 @@ class TieredMemory:
         return f"<memory_context>\n{facts}\n</memory_context>" if facts else ""
 
     def build_messages(
-        self, query: str, k: int = 5, *, commit: bool = True
+        self, query: str, k: int = 5, *, commit: bool = True,
+        route: bool = False, qtype: str | None = None,
     ) -> list[Message]:
         """Reader messages with the commit-biased system prompt (the accuracy
-        lever). Caller makes the single answer LLM call."""
-        ctx = self.inject(query, k=k)
-        system = COMMIT_SYSTEM if commit else HEDGE_SYSTEM
+        lever). Caller makes the single answer LLM call.
+
+        P33 read-routing (opt-in): with ``route=True`` the read assembly is
+        SELECTED by question type — a comparison reader enumerates each subject,
+        a summary reader synthesises over a wider context window, a factoid
+        reader does terse latest-wins lookup. Pass ``qtype`` to supply a label
+        the eval already has, else it is classified deterministically. Default
+        (``route=False``) preserves the single universal commit/hedge reader so
+        every existing caller is unchanged."""
+        if route:
+            resolved = qtype or classify_question(query)
+            system = _QTYPE_SYSTEM.get(resolved, COMMIT_SYSTEM)
+            # Comparison/summary need a wider window to cover every subject;
+            # factoid stays terse. The operator owns its retrieval depth (P33).
+            read_k = k * 2 if resolved in (QTYPE_COMPARISON, QTYPE_SUMMARY) else k
+            ctx = self.inject(query, k=read_k)
+        else:
+            system = COMMIT_SYSTEM if commit else HEDGE_SYSTEM
+            ctx = self.inject(query, k=k)
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": f"Context:\n{ctx}\n\nQuestion: {query}"},
@@ -335,6 +468,15 @@ def _demo() -> None:
     # outranks a low-cosine fresh one (needle-in-haystack stays correct).
     needle = tm.cfg.depth_lambda * 1.0
     assert 0.90 + tm.cfg.depth_lambda * 0.01 > 0.50 + needle
+
+    # P33 question-type classifier (deterministic, no LLM).
+    assert classify_question("what is my dog's name") == QTYPE_FACTOID
+    assert classify_question("compare redis and postgres") == QTYPE_COMPARISON
+    assert classify_question("redis vs postgres") == QTYPE_COMPARISON
+    assert classify_question("summarise what you know about me") == QTYPE_SUMMARY
+    # The routed reader selects the matching operator's system prompt.
+    assert _QTYPE_SYSTEM[QTYPE_COMPARISON] is _COMPARISON_SYSTEM
+
     print("tiered._demo OK")
 
 
