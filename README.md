@@ -1,6 +1,6 @@
 # agentkit
 
-A lean, reusable agent-systems library. Eight small modules, one philosophy.
+A lean, reusable agent-systems library. Nine small modules, one philosophy.
 
 > **The design axiom: a cheap deterministic stage gates the expensive LLM stage.**
 > The model is the last resort, not the default — which is why most work never
@@ -14,6 +14,7 @@ A lean, reusable agent-systems library. Eight small modules, one philosophy.
 | `agentkit.runtime` | Durable DAG execution: graph store, cross-process file lock, scheduler (demand-driven, survives `kill -9`). |
 | `agentkit.agent` | DI ReAct loop + difficulty router + **role presets** (Researcher/Reviewer/Writer/Verifier) + a resilient batch runner. |
 | `agentkit.orchestrator` | Long-horizon autonomy: pure stall/diversity/select control + file-state loop wiring `compact()` as the inter-iteration handoff. |
+| `agentkit.topology` | Rule-driven multi-agent topology: pick shape by task (STAR/MESH/PIPELINE/…), generate the DAG, round-trip config ↔ JSON ↔ emitted code — the **config-as-policy reference pattern**. |
 | `agentkit.quality` | Source-grounding `verify`: deterministic citation/link checks + optional LLM claim-support, severity-graded. |
 | `agentkit.backends` | `CliLLMClient` — use a CLI (`codex exec`, `claude -p`) as the model, no API key, no shell-injection surface. |
 | `agentkit.types` | The Protocol seams: `Embedder`, `LLMClient`, `ChatResult`, `Message`. |
@@ -130,7 +131,11 @@ agentkit/
 │   ├── state.py          # Finding, ProgressState, log_event (state-file schema)
 │   └── loop.py           # run(), OrchestratorConfig, Spawn
 ├── quality/verify.py     # verify(), Claim, VerifyFinding, UrlChecker           (feynman)
-└── backends/cli.py       # CliLLMClient (subprocess; no shell-injection)
+├── backends/cli.py       # CliLLMClient (subprocess; no shell-injection)
+└── topology/             # rule-driven topology select + DAG gen          (config-as-policy)
+    ├── core.py           # topology shapes (STAR/MESH/PIPELINE/…)
+    ├── config.py         # TopologyConfig ↔ JSON ↔ emit_topologies_py
+    └── infer.py          # select_topology (choose shape by task)
 ```
 
 Every module ships one runnable self-check:
@@ -146,6 +151,7 @@ python -m agentkit.orchestrator.loop
 python -m agentkit.quality.verify
 python -m agentkit.agent.roles
 python examples/research_agent.py
+python examples/topology_all_demo.py
 ```
 
 ## Provenance
@@ -156,6 +162,17 @@ implementations (the hardcoded oMLX/`openai` clients replaced by Protocol
 seams). The `context` / `orchestrator` / `quality` / `roles` / `batch` /
 `backends` modules **port studied patterns** natively. Full mapping in
 [`docs/DESIGN.md`](docs/DESIGN.md) §5.
+
+## Roadmap — the self-improving direction *(planned, not shipped)*
+
+The nine modules above are *static*: a human writes the roles, tools, and
+topology. The planned next step keeps the deterministic-first axiom but makes the
+**policy surface a folder of config files the agent can improve on its own** —
+behind a sandbox it can't escape and a gate it can't override. Seven planned
+modules — `config/`, `sandbox/`, `gates/`, `evolve/` + `skills/`, `planner/`,
+`evolve/codegen`, and a `SelfImprovingAgent` facade — ordered safety-before-
+capability. **None of these are shipped yet.** Full plan, build order, and
+security model: [`docs/REPLAN-agentkit.md`](docs/REPLAN-agentkit.md).
 
 ## Install
 

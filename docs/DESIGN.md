@@ -1202,6 +1202,41 @@ two integration defects (§7.6). Each sharpened a design decision.
   domain; defaults bias toward never dropping a real claim. Future option:
   ship domain exemplar packs or a small fitted classifier adapter.
 
+### 9.6 The self-improving direction *(planned — see [`REPLAN-agentkit.md`](./REPLAN-agentkit.md))*
+
+The architecture so far is *static*: a human writes the roles, tools, and
+topology; the deterministic-first axiom governs execution. The next step keeps
+that axiom but makes the **policy surface itself a set of config files the agent
+can edit**. The thesis: *config files are the agent's policy surface; the agent
+edits them; a deterministic, non-overridable gate plus a sandbox are the only
+things it cannot edit.*
+
+Seven planned modules, ordered safety-before-capability:
+
+1. `config/` — roles, tools, routing, topology as declarative YAML/JSON.
+   Generalizes the `topology/config.py` round-trip (§5.9) that already proves
+   "file defines it, runtime emits it."
+2. `sandbox/` — a `Sandbox` Protocol (subprocess argv-not-shell, cwd-jail,
+   timeout, net-policy; optional Docker). Containment for any generated code.
+3. `gates/` — the LEARN gate: syntax → sandbox-execute → regression (eval ≥
+   baseline) → safety (LLM hard-reject) → delta → ACCEPT/REJECT/ESCALATE.
+   **Not overridable by the LLM** — the same model-free-control discipline as
+   §2.3, applied to self-modification.
+4. `evolve/` + `skills/` — DGM-style mutation of prompts/config (never weights)
+   and a propose→verify→save skill library; every candidate through `gates/`.
+5. `planner/` — task → subtask DAG → emitted `runtime` graph config.
+6. `evolve/codegen` — agent-authored tools, sandbox-validated with an in-loop
+   debugger; read-only tools auto-register, side-effecting tools ESCALATE.
+7. `SelfImprovingAgent.from_config(dir)` — the facade.
+
+This extends the central axiom rather than departing from it: the gate that
+admits a self-modification is itself model-free, exactly as the control logic
+deciding whether to spend a model call is model-free (§2.3). The cost argument
+carries over too — the many-call evolve/skill loops are ~free on the
+rate-limited oMLX/VibeProxy backends agentkit targets, so self-improvement is
+opt-in and backend-aware, not always-on. Full module-by-module plan, build
+order, and security model: [`REPLAN-agentkit.md`](./REPLAN-agentkit.md).
+
 ---
 
 ## 10. Conclusion
