@@ -106,10 +106,12 @@ prompt_block = mem.inject_context("input handling", k=4)   # ready-to-prompt con
 ```python
 from agentkit import GraphStore
 gs = GraphStore("runs.db")
-gid = gs.create_graph("pipeline", {"fetch": [], "parse": ["fetch"]})   # node -> deps
+dag = {"nodes": {"fetch": {"type": "tool"}, "parse": {"type": "tool"}},
+       "edges": [["fetch", "parse"]]}               # fetch -> parse
+gid = gs.create_graph("pipeline", dag)
 rid = gs.start_run(gid, trigger="manual")
 node = gs.claim_ready_node(rid, worker_id="w1")     # demand-driven; recoverable
-gs.mark_done(rid, "fetch", {"ok": True})            # unlocks dependents
+gs.mark_done(rid, "fetch", {"ok": True})            # unlocks 'parse'
 ```
 
 ### `agent` — ReAct loop + router + roles + batch
@@ -133,7 +135,7 @@ for chunk in run_agent_stream("research X", client=MyClient()):
 from agentkit import assess, is_novel, similarity, cascade, Rubric, Dimension
 a = assess(new_findings=0, stale_count=3)           # -> StallAssessment (pivot/escalate/stop)
 is_novel("try GraphRAG", tried=["try vector RAG"], threshold=0.6)   # diversity gate
-rubric = Rubric([Dimension("relevance", weight=1.0)])
+rubric = Rubric((Dimension("relevance", "Relevance", 1.0),))   # (key, name, weight)
 cascade(items, predicate=lambda x: True, rubric=rubric,
         scorer=lambda x, r: {"relevance": 0.9})     # prefilter -> rank (cheap before LLM)
 ```
@@ -200,7 +202,7 @@ from agentkit.skills import SkillLibrary
 res = evolve_prompt("You are an agent.", propose=my_proposer, evaluate=my_scorer,
                     gate=my_gate, baseline_score=0.5, epochs=5)
 print(res.best, res.delta)                          # best variant kept only if it passed the gate
-lib = SkillLibrary(embedder=MyEmbedder(), skills_dir="skills/")
+lib = SkillLibrary(embedder=MyEmbedder(), directory="skills/")
 lib.retrieve("summarize a PDF", k=3)                # semantic recall of curated, gate-passed skills
 ```
 
