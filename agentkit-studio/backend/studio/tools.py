@@ -204,6 +204,7 @@ class ToolAugmentedClient:
         convo = list(messages)
         total_tokens = 0
         last: ChatResult | None = None
+        call_seq = 0  # globally-unique, valid-char tool_call ids across the chat
 
         for _ in range(self._max_iters):
             result = self._inner.chat(convo, tools=merged_tools)
@@ -222,10 +223,30 @@ class ToolAugmentedClient:
             if not tool_calls:
                 break
 
-            # Echo the assistant turn that requested the tool, then each result.
-            convo.append({"role": "assistant", "content": result.text or ""})
+            # Echo the assistant turn WITH its tool_calls, then each result keyed to
+            # a matching tool_call_id. agentkit's ChatResult drops the original id,
+            # so we synthesize a clean one (`call_N`): a tool_result's id MUST match
+            # ^[a-zA-Z0-9_-]+$ or Anthropic-backed endpoints (VibeProxy→Claude) 400.
+            assistant_calls: list[dict[str, Any]] = []
+            tool_messages: list[Message] = []
             for name, args in tool_calls:
-                convo.append(self._dispatch(name, args))
+                cid = f"call_{call_seq}"
+                call_seq += 1
+                assistant_calls.append(
+                    {
+                        "id": cid,
+                        "type": "function",
+                        "function": {"name": name, "arguments": json.dumps(args)},
+                    }
+                )
+                msg = self._dispatch(name, args)
+                msg["tool_call_id"] = cid
+                msg.pop("name", None)  # OpenAI tool msg keys on tool_call_id, not name
+                tool_messages.append(msg)
+            convo.append(
+                {"role": "assistant", "content": result.text or "", "tool_calls": assistant_calls}
+            )
+            convo.extend(tool_messages)
 
         text = (last.text if last else "") or ""
         remaining = list(last.tool_calls) if last else []
