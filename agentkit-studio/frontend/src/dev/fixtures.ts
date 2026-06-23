@@ -108,17 +108,17 @@ export const FIXTURE_EVENTS: StudioEvent[] = [
   { type: "agent_event", session_id: SID, ts: t(), payload: { step_id: "s1", name: "tool_call", data: { tool: "web.fetch", url: "https://example.com" } } },
   // M7 Wave 1: a web search that succeeds, then one that degrades to a fallback backend.
   { type: "tool_call", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "web_search", args: { query: "autonomous agent safety surveys 2024" } } },
-  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "web_search", summary: "Top hits: arXiv survey, NIST AI RMF, sandboxing blog.", n_results: 7, notice: "" } },
+  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "web_search", summary: "Top hits: arXiv survey, NIST AI RMF, sandboxing blog.", n_results: 7, notice: "", rejected: false } },
   { type: "tool_call", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "web_search", args: { query: "agent jailbreak taxonomy" } } },
-  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "web_search", summary: "3 results via DuckDuckGo.", n_results: 3, notice: "DDG fallback — SearXNG down" } },
+  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "web_search", summary: "3 results via DuckDuckGo.", n_results: 3, notice: "DDG fallback — SearXNG down", rejected: false } },
   // M7 Wave 1: read_file + write_file reuse the same events — a successful read, a
   // successful write, and a rejected write (path escapes workspace) → amber warning.
   { type: "tool_call", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "read_file", args: { path: "notes/sources.md" } } },
-  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "read_file", summary: "read 1.2KB from notes/sources.md", n_results: 1, notice: "" } },
+  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "read_file", summary: "read 1.2KB from notes/sources.md", n_results: 1, notice: "", rejected: false } },
   { type: "tool_call", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "write_file", args: { path: "out/summary.md", bytes: 340 } } },
-  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "write_file", summary: "wrote 340B to out/summary.md", n_results: 1, notice: "" } },
+  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "write_file", summary: "wrote 340B to out/summary.md", n_results: 1, notice: "", rejected: false } },
   { type: "tool_call", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "write_file", args: { path: "../../etc/passwd" } } },
-  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "write_file", summary: "rejected: path escapes workspace sandbox", n_results: 0, notice: "" } },
+  { type: "tool_result", session_id: SID, ts: t(), payload: { step_id: "s1", tool: "write_file", summary: "rejected: path escapes workspace sandbox", n_results: 0, notice: "", rejected: true } },
   {
     type: "token",
     session_id: SID,

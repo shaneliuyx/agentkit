@@ -18,23 +18,13 @@ function summarizeArgs(args: Record<string, unknown>): string {
     .join(", ");
 }
 
-/**
- * A result reads as a warning when the summary signals a rejected/blocked/escaped
- * operation (e.g. a write_file denied for escaping the workspace). Such summaries
- * render in the amber notice style, same as a degradation `notice`.
- */
-const REJECTION_RE = /\b(reject|denied|blocked|refused|escape|forbidden|not allowed)/i;
-
-function isRejected(summary: string | null): boolean {
-  return summary !== null && REJECTION_RE.test(summary);
-}
-
 export function ToolsPanel() {
   const tools = useRunStore((s) => s.tools);
   return (
     <PanelShell empty={tools.length === 0} emptyHint="No tool calls yet.">
       {tools.map((t, i) => {
-        const rejected = isRejected(t.summary);
+        // Explicit jail-rejection flag from the backend (no summary-string guessing).
+        const rejected = t.rejected;
         return (
           <article key={i} className="card panel-row" data-warn={rejected}>
             <div className="panel-row-head">

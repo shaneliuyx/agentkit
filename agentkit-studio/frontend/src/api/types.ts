@@ -242,6 +242,8 @@ export interface ToolResultPayload {
   summary: string;
   n_results: number;
   notice: string;
+  /** True when the jail refused the op (path escape) — explicit, not inferred. */
+  rejected: boolean;
 }
 
 // ── The discriminated union ────────────────────────────────────────────────

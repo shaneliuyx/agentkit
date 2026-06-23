@@ -70,7 +70,7 @@ def test_emits_tool_call_and_result_events() -> None:
         _ScriptedClient(),
         search_fn=_fake_search,
         on_tool_call=lambda sid, tool, args: calls.append((sid, tool, args)),
-        on_tool_result=lambda sid, tool, summary, n, notice: results.append(
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
             (sid, tool, summary, n, notice)
         ),
         step_id_getter=lambda: "s1",
@@ -111,7 +111,7 @@ def test_search_failure_is_nonfatal_with_notice() -> None:
     c = ToolAugmentedClient(
         _ScriptedClient(),
         search_fn=boom,
-        on_tool_result=lambda sid, tool, summary, n, notice: results.append(
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
             (n, notice)
         ),
     )
@@ -177,7 +177,7 @@ def test_write_file_tool_inside_workspace(tmp_path) -> None:
     c = ToolAugmentedClient(
         inner,
         workspace=ws,
-        on_tool_result=lambda sid, tool, summary, n, notice: results.append(
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
             (tool, summary, notice)
         ),
     )
@@ -226,8 +226,8 @@ def test_write_file_escape_rejected_via_tool_result(tmp_path) -> None:
     c = ToolAugmentedClient(
         inner,
         workspace=ws,
-        on_tool_result=lambda sid, tool, summary, n, notice: results.append(
-            (summary, notice)
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
+            (summary, notice, rejected)
         ),
     )
     res = c.chat([{"role": "user", "content": "escape"}])
@@ -238,6 +238,7 @@ def test_write_file_escape_rejected_via_tool_result(tmp_path) -> None:
     payload = json.loads(captured[0]["content"])
     assert "error" in payload and "escapes workspace" in payload["error"]
     assert results[0][1] and "escapes" in results[0][1]  # notice on the event
+    assert results[0][2] is True  # explicit rejected flag, not inferred from text
 
 
 def test_read_file_escape_rejected_via_tool_result(tmp_path) -> None:

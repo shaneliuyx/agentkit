@@ -39,6 +39,8 @@ export interface ToolActivity {
   summary: string | null;
   n_results: number | null;
   notice: string;
+  /** True once a tool_result reports the jail refused the op (path escape). */
+  rejected: boolean;
 }
 
 export type RunStatus = "idle" | "connecting" | "running" | "done" | "error";
@@ -338,6 +340,7 @@ function toolActivityFrom(payload: ToolCallPayload): ToolActivity {
     summary: null,
     n_results: null,
     notice: "",
+    rejected: false,
   };
 }
 
@@ -367,6 +370,7 @@ function mergeToolResult(
         summary: payload.summary,
         n_results: payload.n_results,
         notice: payload.notice,
+        rejected: payload.rejected,
       },
     ];
   }
@@ -377,6 +381,7 @@ function mergeToolResult(
           summary: payload.summary,
           n_results: payload.n_results,
           notice: payload.notice,
+          rejected: payload.rejected,
         }
       : t,
   );

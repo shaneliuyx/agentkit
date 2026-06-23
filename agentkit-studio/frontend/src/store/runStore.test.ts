@@ -39,7 +39,7 @@ describe("runStore M7 Wave 1 reducer cases", () => {
     const store = useRunStore.getState();
     store.apply(frame("tool_call", { step_id: "s1", tool: "web_search", args: { query: "x" } }));
     store.apply(
-      frame("tool_result", { step_id: "s1", tool: "web_search", summary: "found", n_results: 5, notice: "" }),
+      frame("tool_result", { step_id: "s1", tool: "web_search", summary: "found", n_results: 5, notice: "", rejected: false }),
     );
     const tools = useRunStore.getState().tools;
     expect(tools).toHaveLength(1); // merged, not appended
@@ -53,10 +53,10 @@ describe("runStore M7 Wave 1 reducer cases", () => {
     store.apply(frame("tool_call", { step_id: "s1", tool: "web_search", args: { query: "a" } }));
     store.apply(frame("tool_call", { step_id: "s1", tool: "web_search", args: { query: "b" } }));
     store.apply(
-      frame("tool_result", { step_id: "s1", tool: "web_search", summary: "ra", n_results: 1, notice: "" }),
+      frame("tool_result", { step_id: "s1", tool: "web_search", summary: "ra", n_results: 1, notice: "", rejected: false }),
     );
     store.apply(
-      frame("tool_result", { step_id: "s1", tool: "web_search", summary: "rb", n_results: 2, notice: "DDG fallback" }),
+      frame("tool_result", { step_id: "s1", tool: "web_search", summary: "rb", n_results: 2, notice: "DDG fallback", rejected: false }),
     );
     const tools = useRunStore.getState().tools;
     expect(tools).toHaveLength(2);
@@ -68,7 +68,7 @@ describe("runStore M7 Wave 1 reducer cases", () => {
 
   test("tool_result with no preceding call appends a result-only entry", () => {
     useRunStore.getState().apply(
-      frame("tool_result", { step_id: "s1", tool: "web_search", summary: "orphan", n_results: 0, notice: "" }),
+      frame("tool_result", { step_id: "s1", tool: "web_search", summary: "orphan", n_results: 0, notice: "", rejected: false }),
     );
     const tools = useRunStore.getState().tools;
     expect(tools).toHaveLength(1);

@@ -417,9 +417,14 @@ class Runner:
             on_tool_call=lambda sid, tool, args: self._emit(
                 ToolCallEvent(step_id=sid, tool=tool, args=args)
             ),
-            on_tool_result=lambda sid, tool, summary, n, notice: self._emit(
+            on_tool_result=lambda sid, tool, summary, n, notice, rejected: self._emit(
                 ToolResultEvent(
-                    step_id=sid, tool=tool, summary=summary, n_results=n, notice=notice
+                    step_id=sid,
+                    tool=tool,
+                    summary=summary,
+                    n_results=n,
+                    notice=notice,
+                    rejected=rejected,
                 )
             ),
             step_id_getter=lambda: self._current_step_id,

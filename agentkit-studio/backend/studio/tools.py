@@ -101,7 +101,7 @@ WRITE_FILE_TOOL: dict[str, Any] = {
 
 #: Callbacks: (step_id, tool, args) and (step_id, tool, summary, n_results, notice).
 OnToolCall = Callable[[str, str, dict[str, Any]], None]
-OnToolResult = Callable[[str, str, str, int, str], None]
+OnToolResult = Callable[[str, str, str, int, str, bool], None]
 
 
 def web_toolkit_available() -> bool:
@@ -211,10 +211,16 @@ class ToolAugmentedClient:
         return self._tool_message(name, {"error": f"unknown tool {name!r}"})
 
     def _emit_result(
-        self, step_id: str, name: str, summary: str, n: int, notice: str
+        self,
+        step_id: str,
+        name: str,
+        summary: str,
+        n: int,
+        notice: str,
+        rejected: bool = False,
     ) -> None:
         if self._on_tool_result:
-            self._on_tool_result(step_id, name, summary, n, notice)
+            self._on_tool_result(step_id, name, summary, n, notice, rejected)
 
     @staticmethod
     def _tool_message(name: str, payload: dict[str, Any]) -> Message:
@@ -245,7 +251,9 @@ class ToolAugmentedClient:
         try:
             text, n_bytes = self._workspace.read(path)
         except WorkspaceError as exc:
-            self._emit_result(step_id, "read_file", f"rejected: {exc}", 0, str(exc))
+            self._emit_result(
+                step_id, "read_file", f"rejected: {exc}", 0, str(exc), rejected=True
+            )
             return self._tool_message("read_file", {"error": str(exc)})
         summary = f"read {_fmt_bytes(n_bytes)} from {path}"
         self._emit_result(step_id, "read_file", summary, 1, "")
@@ -265,7 +273,9 @@ class ToolAugmentedClient:
         try:
             n_bytes, shown = self._workspace.write(path, content)
         except WorkspaceError as exc:
-            self._emit_result(step_id, "write_file", f"rejected: {exc}", 0, str(exc))
+            self._emit_result(
+                step_id, "write_file", f"rejected: {exc}", 0, str(exc), rejected=True
+            )
             return self._tool_message("write_file", {"error": str(exc)})
         summary = f"wrote {_fmt_bytes(n_bytes)} to {shown}"
         self._emit_result(step_id, "write_file", summary, 1, "")

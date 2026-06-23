@@ -287,6 +287,8 @@ class ToolResultEvent(StudioEvent):
     summary: str = ""
     n_results: int = 0
     notice: str = ""
+    #: True when the jail refused the op (path escape) — drives the warning style.
+    rejected: bool = False
 
 
 @dataclass(frozen=True)
