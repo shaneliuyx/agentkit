@@ -1,0 +1,145 @@
+"""Milestone-1 smoke: the runner drives end-to-end on a FAKE client, offline.
+
+Asserts the SPEC §4 ordering guarantee and the token-honesty behavior. No API
+key, no running services.
+"""
+
+from __future__ import annotations
+
+from typing import Callable
+
+from agentkit.types import LLMClient
+from studio.events import StudioEvent
+from studio.runner import Runner
+from studio.session import SessionRegistry
+
+
+def _make_session(mode: str = "auto", budget: float | None = None):
+    reg = SessionRegistry()
+    return reg.create(
+        llm_spec={"profile": "qwen"},
+        embed_spec={},
+        llm_info={"label": "qwen", "model": "Qwen-test"},
+        embed_info={"label": "none", "model": "none"},
+        mode=mode,
+        budget_ceiling=budget,
+    )
+
+
+def _run(factory: Callable[..., LLMClient], **kw) -> list[StudioEvent]:
+    events: list[StudioEvent] = []
+    session = _make_session(**kw)
+    runner = Runner(session, events.append, client_factory=factory, embedder=None)
+    # Numbered list → a 2-phase linear plan (deterministic decomposer).
+    runner.run("1. compare redis and postgres 2. write a recommendation")
+    return events
+
+
+def test_event_order(fake_client_factory: Callable[..., LLMClient]) -> None:
+    """session → plan → topology → graph → (per phase ...) → budget? → verify → done."""
+    events = _run(fake_client_factory)
+    types = [e.EVENT_TYPE for e in events]
+
+    # Prefix is exact.
+    assert types[:4] == ["session", "plan", "topology", "graph"], types
+
+    # Terminal: verify is the last non-done event; done is last.
+    assert types[-1] == "done", types
+    assert types[-2] == "verify", types
+
+    # No event precedes session; nothing follows done.
+    assert types.count("session") == 1
+    assert types.count("done") == 1
+
+    # Per-phase events appear and phase_start precedes phase_done for each step.
+    assert "phase_start" in types and "phase_done" in types
+    assert types.index("phase_start") < types.index("phase_done")
+
+    # The router frame for a phase comes after that phase's start.
+    first_start = types.index("phase_start")
+    assert "router" in types[first_start:]
+
+
+def test_two_phases_each_have_start_and_done(fake_client_factory) -> None:
+    events = _run(fake_client_factory)
+    starts = [e for e in events if e.EVENT_TYPE == "phase_start"]
+    dones = [e for e in events if e.EVENT_TYPE == "phase_done"]
+    assert len(starts) == 2  # the 2-step plan
+    assert len(dones) == 2
+    # phase_done carries the StepRun fields.
+    assert dones[0].topology in {"single", "star", "mesh", "pipeline"}
+    assert dones[0].n_agents >= 1
+
+
+def test_token_frames_and_cumulative(fake_client_factory, fake_client) -> None:
+    """token frames fire during phases; cumulative total reconciles to calls*5."""
+    events = _run(fake_client_factory)
+    tokens = [e for e in events if e.EVENT_TYPE == "token"]
+    assert tokens, "expected token frames"
+    done = [e for e in events if e.EVENT_TYPE == "done"][0]
+    # FakeClient charges 5 tokens/call; cumulative must equal n_calls * 5.
+    assert done.total_tokens == fake_client.n_calls * 5
+    assert done.total_tokens == tokens[-1].cumulative["total"]
+
+
+def test_done_reports_real_wall_time(fake_client_factory) -> None:
+    """done.wall_s is the real elapsed run time, not a hardcoded 0.0 (honesty)."""
+    events = _run(fake_client_factory)
+    done = [e for e in events if e.EVENT_TYPE == "done"][0]
+    assert done.wall_s > 0.0, done.wall_s
+    # And it surfaces through the SSE payload the frontend reads.
+    assert done.payload()["wall_s"] > 0.0
+
+
+def test_estimated_flag_sticky_offline(fake_client_factory) -> None:
+    """A raw fake client (not a StudioChatClient) reports no usage split, so its
+    run_plan tokens are reconciled as ESTIMATED output tokens — flipping the
+    run's sticky ~ flag. This is the honest signal for a backend with no usage
+    telemetry (SPEC §7). The split must never exceed the total."""
+    events = _run(fake_client_factory)
+    done = [e for e in events if e.EVENT_TYPE == "done"][0]
+    assert done.estimated is True
+    assert done.input + done.output == done.total_tokens
+
+
+def test_verify_runs_offline(fake_client_factory) -> None:
+    """The verify panel produces a finding for the fake's uncited claim."""
+    events = _run(fake_client_factory)
+    verify = [e for e in events if e.EVENT_TYPE == "verify"][0]
+    # "The answer is 42." is an uncited claim → surfaced.
+    assert verify.uncited, verify.uncited
+
+
+def test_all_panel_events_present(fake_client_factory) -> None:
+    """All 7 panel event types appear at least once (comprehensive build)."""
+    events = _run(fake_client_factory)
+    types = {e.EVENT_TYPE for e in events}
+    for panel_type in ("memory", "selfimprove", "evolve", "gate", "dag", "verify", "router"):
+        assert panel_type in types, f"missing panel event: {panel_type}"
+
+
+def test_cancel_stops_before_phases(fake_client_factory) -> None:
+    """A pre-cancelled session emits no phase_start and a cancelled done."""
+    events: list[StudioEvent] = []
+    session = _make_session()
+    session.request_cancel()
+    runner = Runner(session, events.append, client_factory=fake_client_factory, embedder=None)
+    runner.run("1. step one 2. step two")
+    types = [e.EVENT_TYPE for e in events]
+    assert "phase_start" not in types
+    done = [e for e in events if e.EVENT_TYPE == "done"][0]
+    assert done.cancelled is True
+
+
+def test_budget_exceeded_emits_budget(fake_client) -> None:
+    """A tight ceiling on a fan-out phase trips BudgetExceeded → budget frame."""
+
+    def factory(_on_usage) -> LLMClient:
+        return fake_client
+
+    events: list[StudioEvent] = []
+    session = _make_session(budget=1.0)  # 1-token ceiling, fake charges 5/call
+    runner = Runner(session, events.append, client_factory=factory, embedder=None)
+    runner.run("compare redis and postgres")  # MESH → fan-out → charges > 1
+    budget = [e for e in events if e.EVENT_TYPE == "budget"]
+    assert budget and budget[0].exceeded is True

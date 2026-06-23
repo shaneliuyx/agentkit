@@ -1,0 +1,84 @@
+/**
+ * anime.js motion helpers (SPEC §6 "Motion"). React Flow owns layout/structure;
+ * these own transitions. All motion is on transform/opacity (compositor-friendly)
+ * and gated behind `prefers-reduced-motion`.
+ */
+import anime from "animejs";
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+/**
+ * Pulse a running node: gentle scale + glow opacity loop. Returns a cleanup fn
+ * that stops the timeline and resets the transform.
+ */
+export function pulseRunning(el: HTMLElement): () => void {
+  if (prefersReducedMotion()) {
+    el.style.setProperty("--pulse-opacity", "1");
+    return () => undefined;
+  }
+  const instance = anime({
+    targets: el,
+    scale: [1, 1.04, 1],
+    duration: 1400,
+    easing: "easeInOutSine",
+    loop: true,
+  });
+  return () => {
+    instance.pause();
+    anime.set(el, { scale: 1 });
+  };
+}
+
+/**
+ * Count-up tween for the token meter. Calls `onUpdate` with the interpolated
+ * integer each frame; honors reduced-motion by jumping straight to `to`.
+ */
+export function countUp(
+  from: number,
+  to: number,
+  onUpdate: (value: number) => void,
+  duration = 600,
+): () => void {
+  if (prefersReducedMotion() || from === to) {
+    onUpdate(to);
+    return () => undefined;
+  }
+  const obj = { v: from };
+  const instance = anime({
+    targets: obj,
+    v: to,
+    duration,
+    easing: "easeOutExpo",
+    round: 1,
+    update: () => onUpdate(Math.round(obj.v)),
+  });
+  return () => instance.pause();
+}
+
+/**
+ * Flow animation on an active edge path (stroke-dashoffset). Pass the SVG <path>;
+ * returns a cleanup fn.
+ */
+export function flowEdge(path: SVGPathElement): () => void {
+  if (prefersReducedMotion()) {
+    return () => undefined;
+  }
+  path.style.strokeDasharray = "6 6";
+  const instance = anime({
+    targets: path,
+    strokeDashoffset: [12, 0],
+    duration: 700,
+    easing: "linear",
+    loop: true,
+  });
+  return () => {
+    instance.pause();
+    path.style.strokeDasharray = "";
+    path.style.strokeDashoffset = "";
+  };
+}

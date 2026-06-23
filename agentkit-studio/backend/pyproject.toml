@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentkit-studio-backend"
+version = "0.1.0"
+description = "FastAPI backend for AgentKit Studio — a GUI agent platform over agentkit + agent-prep/shared."
+readme = "../README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "agentkit[openai,anthropic,config] @ file:///Users/yuxinliu/code/agentkit",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "sse-starlette>=2.0",
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[tool.setuptools]
+packages = [
+    "studio",
+    "studio.panels",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that require a live LLM endpoint or local service (skipped by default)",
+]
+addopts = "-m 'not integration'"

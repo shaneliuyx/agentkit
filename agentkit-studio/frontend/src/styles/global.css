@@ -1,0 +1,314 @@
+/* Global layout + shared component primitives. Animations stay on transform/opacity. */
+@import "./tokens.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(
+      1200px 600px at 70% -10%,
+      oklch(24% 0.04 250 / 0.6),
+      transparent 60%
+    ),
+    var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--color-accent);
+}
+
+/* ── App shell ── */
+.studio-shell {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100%;
+  gap: 1px;
+  background: var(--color-border);
+}
+
+.studio-top {
+  display: flex;
+  gap: var(--space-4);
+  align-items: stretch;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-1);
+  flex-wrap: wrap;
+}
+
+.studio-main {
+  display: grid;
+  grid-template-columns: 1fr minmax(300px, 22rem);
+  min-height: 0;
+  background: var(--color-bg);
+}
+
+.studio-canvas {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.studio-side {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--color-border);
+  overflow: hidden;
+}
+
+.studio-drawer {
+  background: var(--color-surface-1);
+  border-top: 1px solid var(--color-border-strong);
+  max-height: 38vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── headings & labels ── */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-text-faint);
+}
+
+.brand-mark {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--text-lg);
+  letter-spacing: -0.01em;
+}
+
+.brand-mark .accent {
+  color: var(--color-accent);
+}
+
+.studio-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  justify-content: center;
+  padding-right: var(--space-4);
+  border-right: 1px solid var(--color-border);
+  margin-right: var(--space-2);
+}
+
+.studio-toast {
+  position: absolute;
+  bottom: var(--space-4);
+  left: var(--space-4);
+  right: var(--space-4);
+  background: color-mix(in oklch, var(--color-error), var(--color-bg) 70%);
+  border: 1px solid var(--color-error);
+  color: var(--color-text);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  box-shadow: var(--shadow-2);
+}
+
+/* Cancelled is not an error — amber, sits just above the error toast slot. */
+.studio-toast-cancelled {
+  bottom: calc(var(--space-4) + 3.5rem);
+  background: color-mix(in oklch, var(--color-estimated), var(--color-bg) 72%);
+  border-color: var(--color-estimated);
+}
+
+/* ── form primitives ── */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.field > label {
+  font-size: var(--text-xs);
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  transition:
+    border-color var(--duration-fast) var(--ease-out-expo),
+    box-shadow var(--duration-fast) var(--ease-out-expo);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--color-accent-dim);
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
+}
+
+/* ── buttons ── */
+.btn {
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  padding: var(--space-2) var(--space-4);
+  transition:
+    transform var(--duration-fast) var(--ease-out-expo),
+    background var(--duration-fast) var(--ease-out-expo),
+    box-shadow var(--duration-fast) var(--ease-out-expo);
+}
+
+.btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background: var(--color-surface-3);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--color-accent);
+  color: oklch(18% 0.02 250);
+  border-color: transparent;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.btn-danger {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+/* ── status pill ── */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-dim);
+}
+
+.pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-pending);
+}
+
+.pill[data-state="running"] {
+  color: var(--color-running);
+  border-color: color-mix(in oklch, var(--color-running), transparent 60%);
+}
+.pill[data-state="running"] .dot {
+  background: var(--color-running);
+}
+.pill[data-state="done"] {
+  color: var(--color-done);
+}
+.pill[data-state="done"] .dot {
+  background: var(--color-done);
+}
+.pill[data-state="error"] {
+  color: var(--color-error);
+}
+.pill[data-state="error"] .dot {
+  background: var(--color-error);
+}
+
+/* ── panels ── */
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panel-empty {
+  padding: var(--space-5);
+  color: var(--color-text-faint);
+  font-size: var(--text-sm);
+  font-style: italic;
+}
+
+.panel-scroll {
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.card {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.dim {
+  color: var(--color-text-dim);
+}
+
+.faint {
+  color: var(--color-text-faint);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-3);
+  border-radius: 999px;
+  border: 2px solid var(--color-bg);
+}
+
+/* ── reduced motion: gate all non-essential animation ── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

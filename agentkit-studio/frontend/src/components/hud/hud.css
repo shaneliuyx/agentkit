@@ -1,0 +1,138 @@
+/* Token HUD + stream pane styling. Estimated state uses the reserved amber hue. */
+
+.hud-meter {
+  background: var(--color-surface-1);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.hud-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.hud-estimated-flag {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: oklch(18% 0.02 250);
+  background: var(--color-estimated);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.hud-exact-flag {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-done);
+}
+
+.hud-total {
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--color-text);
+  letter-spacing: -0.02em;
+}
+
+/* When estimated, the whole headline shifts to amber to keep the honesty obvious. */
+.hud-meter[data-estimated="true"] .hud-total,
+.hud-meter[data-estimated="true"] .hud-num,
+.hud-meter[data-estimated="true"] .hud-prefix {
+  color: var(--color-estimated);
+}
+
+.hud-total-unit {
+  font-size: var(--text-sm);
+  color: var(--color-text-faint);
+  font-weight: 400;
+}
+
+.hud-prefix {
+  color: var(--color-estimated);
+}
+
+.hud-split {
+  display: flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  font-size: var(--text-sm);
+  color: var(--color-text-dim);
+}
+
+.hud-num {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.hud-sep {
+  color: var(--color-text-faint);
+}
+
+/* ── budget gauge ── */
+.hud-budget {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.hud-budget-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--text-sm);
+}
+
+.hud-gauge {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-surface-3);
+  overflow: hidden;
+}
+
+.hud-gauge-fill {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: 999px;
+  transition: width var(--duration-normal) var(--ease-out-expo);
+}
+
+.hud-budget[data-exceeded="true"] .hud-gauge-fill {
+  background: var(--color-error);
+}
+
+.hud-exceeded {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-error);
+  font-weight: 600;
+}
+
+/* ── stream pane ── */
+.hud-stream {
+  flex: 1;
+  min-height: 0;
+  background: var(--color-surface-1);
+}
+
+.hud-stream .hud-head {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.hud-stream-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--color-text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
