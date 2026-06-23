@@ -5,7 +5,7 @@
  * `?demo=1` replays the canned fixture (SPEC §8 milestone 2 verification) so the
  * full UI can be exercised without a backend.
  */
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { BackendPanel } from "./components/config/BackendPanel";
 import { RunBar } from "./components/config/RunBar";
 import { RunActions } from "./components/config/RunActions";
@@ -14,6 +14,12 @@ import { TokenMeter } from "./components/hud/TokenMeter";
 import { StreamPane } from "./components/hud/StreamPane";
 import { PanelDrawer } from "./components/panels/PanelDrawer";
 import { useRunStore } from "./store/runStore";
+
+// Lazy-loaded: pulls react-markdown into its own chunk (only fetched when a run
+// finishes and the result window first renders), keeping the initial bundle lean.
+const ResultWindow = lazy(() =>
+  import("./components/result/ResultWindow").then((m) => ({ default: m.ResultWindow })),
+);
 import { replayFixture } from "./dev/fixtures";
 import type { RunMode } from "./api/types";
 
@@ -96,6 +102,10 @@ export default function App() {
       <section className="studio-drawer">
         <PanelDrawer sessionId={sessionId} />
       </section>
+
+      <Suspense fallback={null}>
+        <ResultWindow />
+      </Suspense>
     </div>
   );
 }

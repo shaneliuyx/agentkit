@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildGraph } from "./topologyLayout";
+import { buildGraph, edgeRelationshipLabel } from "./topologyLayout";
 import type { PhaseState } from "../../store/runStore";
 import type { TopologyKind } from "../../api/types";
 
@@ -103,5 +103,70 @@ describe("topologyLayout.buildGraph", () => {
     // PIPELINE: stages = n_agents
     const pipe = buildGraph([phase("a", "PIPELINE", 5)]);
     expect(pipe.nodes.filter((n) => n.data.kind === "stage")).toHaveLength(5);
+  });
+});
+
+/**
+ * Edges must SHOW the relationship (who relates to whom), not just connect nodes.
+ * Each edge carries a relationship `kind`, a `topo-edge-<kind>` className (for the
+ * per-relationship color), and a human `label`. These tests pin the relationship
+ * derivation per topology — the data the renderer needs to make edges legible.
+ */
+describe("edge relationships (who relates to whom)", () => {
+  test("STAR: hub→spoke edges are fan-out, spoke→reduce edges are converge", () => {
+    const { edges } = buildGraph([phase("a", "STAR", 5)]); // 4 spokes
+    const fanout = edges.filter((e) => e.data?.kind === "fanout");
+    const converge = edges.filter((e) => e.data?.kind === "converge");
+    // header→hub (1) + hub→spoke (4) = 5 fan-out; spoke→reduce (4) = 4 converge.
+    expect(fanout).toHaveLength(5);
+    expect(converge).toHaveLength(4);
+    // Convergence edges all TARGET the reducer — that IS the "results converge" relation.
+    expect(converge.every((e) => e.target === "a:reduce")).toBe(true);
+  });
+
+  test("MESH: peer↔peer debate links are tagged mesh; workers→reduce are converge", () => {
+    const { edges } = buildGraph([phase("a", "MESH", 7)]); // 3 debaters
+    const mesh = edges.filter((e) => e.data?.kind === "mesh");
+    const converge = edges.filter((e) => e.data?.kind === "converge");
+    const fanout = edges.filter((e) => e.data?.kind === "fanout");
+    expect(mesh).toHaveLength(3); // C(3,2) peer debate pairs
+    expect(converge).toHaveLength(3); // each debater → reduce
+    expect(fanout).toHaveLength(3); // header → each debater
+  });
+
+  test("PIPELINE: stage hand-offs are tagged pipeline (sequential relationship)", () => {
+    const { edges } = buildGraph([phase("a", "PIPELINE", 4)]);
+    expect(edges.every((e) => e.data?.kind === "pipeline")).toBe(true);
+    expect(edges).toHaveLength(4);
+  });
+
+  test("inter-phase dependency edges are tagged depends_on", () => {
+    const { edges } = buildGraph([
+      phase("a", "SINGLE", 1),
+      phase("b", "SINGLE", 1, ["a"]),
+    ]);
+    const dep = edges.find((e) => e.id === "dep:a->b");
+    expect(dep?.data?.kind).toBe("depends_on");
+  });
+
+  test("every edge carries a relationship className + label for legibility", () => {
+    const { edges } = buildGraph([
+      phase("a", "STAR", 5),
+      phase("b", "MESH", 7, ["a"]),
+      phase("c", "PIPELINE", 3, ["b"]),
+    ]);
+    for (const e of edges) {
+      const kind = e.data?.kind as Parameters<typeof edgeRelationshipLabel>[0];
+      expect(e.className).toBe(`topo-edge-${kind}`);
+      expect(e.label).toBe(edgeRelationshipLabel(kind));
+    }
+  });
+
+  test("edgeRelationshipLabel gives a distinct human label per relationship", () => {
+    expect(edgeRelationshipLabel("fanout")).toBe("fan-out");
+    expect(edgeRelationshipLabel("converge")).toBe("converge");
+    expect(edgeRelationshipLabel("mesh")).toBe("debate");
+    expect(edgeRelationshipLabel("pipeline")).toBe("pipeline");
+    expect(edgeRelationshipLabel("depends_on")).toBe("depends on");
   });
 });

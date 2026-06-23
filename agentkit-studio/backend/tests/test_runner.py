@@ -35,6 +35,30 @@ def _run(factory: Callable[..., LLMClient], **kw) -> list[StudioEvent]:
     return events
 
 
+def test_done_writes_result_file(
+    fake_client_factory: Callable[..., LLMClient], tmp_path
+) -> None:
+    """The finished result is saved to the session workspace and `done` reports
+    its absolute path, matching the result text it carries."""
+    from pathlib import Path
+
+    events: list[StudioEvent] = []
+    session = _make_session()
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=fake_client_factory,
+        embedder=None,
+        workspace_root=tmp_path,
+    )
+    runner.run("1. compare redis and postgres 2. write a recommendation")
+    done = [e for e in events if e.EVENT_TYPE == "done"][0]
+    assert done.result_path.endswith("result.md")
+    saved = Path(done.result_path)
+    assert saved.is_file()
+    assert saved.read_text(encoding="utf-8") == done.result
+
+
 def test_event_order(fake_client_factory: Callable[..., LLMClient]) -> None:
     """session → plan → topology → graph → (per phase ...) → budget? → verify → done."""
     events = _run(fake_client_factory)

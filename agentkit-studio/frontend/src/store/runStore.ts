@@ -87,6 +87,8 @@ export interface ResultState {
   estimated: boolean;
   wall_s: number;
   result: string;
+  /** Absolute path the result was saved to (session workspace); "" if not saved. */
+  result_path: string;
 }
 
 export interface RunState {

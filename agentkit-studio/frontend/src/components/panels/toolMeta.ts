@@ -6,6 +6,7 @@
  */
 const TOOL_ICONS: Record<string, string> = {
   web_search: "🔍",
+  web_fetch: "🌐",
   read_file: "📄",
   write_file: "✏️",
 };

@@ -236,7 +236,7 @@ export const FIXTURE_EVENTS: StudioEvent[] = [
     type: "done",
     session_id: SID,
     ts: t(),
-    payload: { total_tokens: 6200, input: 3220, output: 1140, estimated: true, wall_s: 18.7, result: "Summary: three principal agent-safety risks identified, two with cited support.", cancelled: false },
+    payload: { total_tokens: 6200, input: 3220, output: 1140, estimated: true, wall_s: 18.7, result: "## Agent Safety Landscape\n\n**Three principal risks** were identified, two with cited support:\n\n1. **Prompt injection** — untrusted input steering the agent ([arXiv survey](https://example.test))\n2. **Tool misuse** — unsafe side effects without a gate\n3. **Unbounded autonomy** — no clear stop condition\n\n> Mitigation: bound every loop, gate side-effecting actions, verify claims.\n\n| Risk | Severity | Cited |\n|---|---|---|\n| Injection | high | yes |\n| Tool misuse | high | yes |\n| Autonomy | medium | no |", cancelled: false, result_path: "/tmp/agentkit-studio/sessions/dev/result.md" },
   },
 ];
 

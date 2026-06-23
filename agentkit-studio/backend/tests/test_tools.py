@@ -11,7 +11,7 @@ from studio.tools import ToolAugmentedClient
 import sys
 
 sys.path.insert(0, SHARED_PATH)
-from web_toolkit import SearchResult  # noqa: E402
+from web_toolkit import FetchResult, SearchResult  # noqa: E402
 
 
 class _ScriptedClient:
@@ -187,6 +187,144 @@ def test_no_tool_call_passes_through() -> None:
     assert res.total_tokens == 4
 
 
+# --- web_fetch through the client (offline; fetch_fn injected) ----------------
+
+
+class _FetchClient:
+    """Inner client that issues one web_fetch call, then answers."""
+
+    def __init__(self, args: dict) -> None:
+        self._args = args
+        self.calls = 0
+
+    def chat(self, messages, tools=None) -> ChatResult:
+        self.calls += 1
+        if self.calls == 1:
+            return ChatResult(text="", total_tokens=3, tool_calls=[("web_fetch", self._args)])
+        return ChatResult(text="read the page", total_tokens=2)
+
+
+def test_web_fetch_success_emits_host_summary() -> None:
+    """A successful fetch emits 'fetched <size> from <host>' (host only, not url)."""
+
+    def ok_fetch(url, *, selector=None):
+        return FetchResult(url=url, ok=True, content="hello world", bytes=11)
+
+    results: list[tuple] = []
+    inner = _FetchClient({"url": "https://example.com/page?x=1"})
+    c = ToolAugmentedClient(
+        inner,
+        fetch_fn=ok_fetch,
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
+            (tool, summary, n, notice, rejected)
+        ),
+    )
+    res = c.chat([{"role": "user", "content": "read it"}])
+    assert inner.calls == 2  # fetch turn + answer turn
+    assert res.text == "read the page"
+    tool, summary, n, notice, rejected = results[0]
+    assert tool == "web_fetch"
+    assert summary == "fetched 11B from example.com"  # host only, no path/query
+    assert n == 1 and notice == "" and rejected is False
+
+
+def test_web_fetch_content_is_capped() -> None:
+    """A huge page is truncated to _MAX_FETCH_CHARS and the summary notes it."""
+    from studio.tools import _MAX_FETCH_CHARS
+
+    big = "x" * (_MAX_FETCH_CHARS + 5000)
+
+    def big_fetch(url, *, selector=None):
+        return FetchResult(url=url, ok=True, content=big, bytes=len(big))
+
+    captured: list[dict] = []
+    results: list[tuple] = []
+
+    class _Rec(_FetchClient):
+        def chat(self, messages, tools=None) -> ChatResult:
+            if self.calls >= 1:
+                captured.append(messages[-1])
+            return super().chat(messages, tools)
+
+    inner = _Rec({"url": "https://example.com/big"})
+    c = ToolAugmentedClient(
+        inner,
+        fetch_fn=big_fetch,
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
+            (summary, n)
+        ),
+    )
+    c.chat([{"role": "user", "content": "read big"}])
+    payload = json.loads(captured[0]["content"])
+    assert len(payload["content"]) == _MAX_FETCH_CHARS  # capped
+    assert payload["truncated"] is True
+    assert "truncated" in results[0][0] and results[0][1] == 1
+
+
+def test_web_fetch_page_failure_is_nonfatal() -> None:
+    """ok=False (404/blocked) → error tool-message + notice, loop continues, n=0."""
+
+    def blocked_fetch(url, *, selector=None):
+        return FetchResult(url=url, ok=False, error="403 blocked")
+
+    captured: list[dict] = []
+    results: list[tuple] = []
+
+    class _Rec(_FetchClient):
+        def chat(self, messages, tools=None) -> ChatResult:
+            if self.calls >= 1:
+                captured.append(messages[-1])
+            return super().chat(messages, tools)
+
+    inner = _Rec({"url": "https://example.com/blocked"})
+    c = ToolAugmentedClient(
+        inner,
+        fetch_fn=blocked_fetch,
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
+            (summary, n, notice, rejected)
+        ),
+    )
+    res = c.chat([{"role": "user", "content": "read blocked"}])
+    assert res.text == "read the page"  # not raised; loop continued
+    payload = json.loads(captured[0]["content"])
+    assert payload["error"] == "403 blocked"
+    summary, n, notice, rejected = results[0]
+    assert "fetch failed: 403 blocked" == summary
+    assert n == 0 and notice == "403 blocked" and rejected is False  # degradation, not jail
+
+
+def test_web_fetch_scrapling_missing_is_nonfatal() -> None:
+    """A FetchError (scrapling CLI missing) → same graceful error path, loop continues."""
+    from web_toolkit import FetchError
+
+    def no_scrapling(url, *, selector=None):
+        raise FetchError("'scrapling' not found")
+
+    results: list[tuple] = []
+    inner = _FetchClient({"url": "https://example.com/x"})
+    c = ToolAugmentedClient(
+        inner,
+        fetch_fn=no_scrapling,
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
+            (summary, n, rejected)
+        ),
+    )
+    res = c.chat([{"role": "user", "content": "read x"}])
+    assert res.text == "read the page"  # not raised
+    summary, n, rejected = results[0]
+    assert "fetch failed" in summary and "scrapling" in summary
+    assert n == 0 and rejected is False
+
+
+def test_web_fetch_in_tool_names_and_dispatched() -> None:
+    """web_fetch is advertised and routed through _dispatch."""
+    c = ToolAugmentedClient(_ScriptedClient(), fetch_fn=lambda url, *, selector=None: None)
+    assert "web_fetch" in c._tool_names
+    # Dispatch routes a web_fetch call to _run_fetch (returns a tool message).
+    msg = c._dispatch("web_fetch", {"url": "https://example.com"})
+    assert msg["role"] == "tool"
+
+
 # --- file tools through the client (jailed; offline) --------------------------
 
 import json  # noqa: E402
@@ -312,13 +450,13 @@ def test_read_file_escape_rejected_via_tool_result(tmp_path) -> None:
 
 
 def test_file_tools_absent_without_workspace() -> None:
-    """No workspace → file-tool schemas are not advertised (only web_search)."""
+    """No workspace → file-tool schemas absent; web_search + web_fetch always present."""
     c = ToolAugmentedClient(_ScriptedClient(), search_fn=_fake_search)
     names = {s["function"]["name"] for s in c._schemas}
-    assert names == {"web_search"}
+    assert names == {"web_search", "web_fetch"}
 
 
 def test_file_tools_present_with_workspace(tmp_path) -> None:
     c = ToolAugmentedClient(_ScriptedClient(), workspace=_ws(tmp_path))
     names = {s["function"]["name"] for s in c._schemas}
-    assert names == {"web_search", "read_file", "write_file"}
+    assert names == {"web_search", "web_fetch", "read_file", "write_file"}

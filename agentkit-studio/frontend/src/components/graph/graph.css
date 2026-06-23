@@ -111,6 +111,59 @@
   stroke-width: 1.5;
 }
 
-.react-flow__edge.animated .react-flow__edge-path {
+/* ── Relationship coloring (SHOW who relates to whom) ──────────────────────
+   Each edge is tagged by relationship kind (topologyLayout.EdgeKind) and styled
+   so the viewer reads fan-out vs converge vs debate vs pipeline at a glance — not
+   just nodes lighting up. Base color is always present; `.animated` (a running
+   phase) brightens + flows it as the "active now" emphasis. Colors derive from the
+   theme accent/done tokens (no new palette literals). */
+.react-flow__edge.topo-edge-fanout .react-flow__edge-path {
   stroke: var(--color-accent);
+  stroke-opacity: 0.55;
+}
+.react-flow__edge.topo-edge-converge .react-flow__edge-path {
+  stroke: var(--color-done);
+  stroke-opacity: 0.6;
+}
+.react-flow__edge.topo-edge-mesh .react-flow__edge-path {
+  stroke: var(--color-accent);
+  stroke-opacity: 0.4;
+  stroke-dasharray: 4 4;
+}
+.react-flow__edge.topo-edge-pipeline .react-flow__edge-path {
+  stroke: var(--color-text-dim);
+  stroke-opacity: 0.7;
+}
+.react-flow__edge.topo-edge-depends_on .react-flow__edge-path {
+  stroke: var(--color-border-strong);
+}
+
+/* Active emphasis: a running phase's edges reach full opacity (React Flow handles
+   the dash-offset flow). Compositor work stays on opacity + dash offset only. */
+.react-flow__edge.animated .react-flow__edge-path {
+  stroke-opacity: 1;
+}
+
+/* Edge relationship labels — small, mono, dimmed so they read as annotations. */
+.react-flow__edge-text {
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.04em;
+  fill: var(--color-text-faint);
+  text-transform: lowercase;
+}
+.react-flow__edge-textbg {
+  fill: var(--color-surface-2);
+  fill-opacity: 0.85;
+}
+
+/* Reduced-motion: drop edge flow + node will-change so nothing animates. */
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__edge.animated .react-flow__edge-path {
+    stroke-dasharray: none;
+    animation: none;
+  }
+  .topo-node {
+    will-change: auto;
+  }
 }

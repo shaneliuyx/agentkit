@@ -163,6 +163,7 @@ class Runner:
         embedder: Any = None,
         sandbox_cwd: str = ".",
         search_fn: Callable[..., list[Any]] | None = None,
+        fetch_fn: Callable[..., Any] | None = None,
         workspace_root: Any = None,
     ) -> None:
         self._session = session
@@ -172,6 +173,8 @@ class Runner:
         self._sandbox_cwd = sandbox_cwd
         #: Injected web_search fn for the tool loop (tests pass a stub → no net).
         self._search_fn = search_fn
+        #: Injected web_fetch fn for the tool loop (tests pass a stub → no net).
+        self._fetch_fn = fetch_fn
         #: Workspace root override for the file-tool jail (tests pass a tmp dir).
         self._workspace_root = workspace_root
         self._acc = TokenAccounting()
@@ -459,6 +462,7 @@ class Runner:
             ),
             step_id_getter=lambda: self._current_step_id,
             search_fn=self._search_fn,
+            fetch_fn=self._fetch_fn,
             workspace=workspace,
         )
 
@@ -477,4 +481,20 @@ class Runner:
             wall_s=elapsed,
             result=final_output,
             cancelled=cancelled,
+            result_path=self._write_result(final_output),
         )
+
+    def _write_result(self, final_output: str) -> str:
+        """Save the final result to the session workspace → its absolute path.
+
+        Best-effort: a write failure returns "" (the result still rides in the
+        ``done`` event), and an empty result is not written.
+        """
+        if not final_output.strip():
+            return ""
+        try:
+            ws = Workspace(self._session.session_id, root=self._workspace_root)
+            ws.write("result.md", final_output)
+            return str(ws.root / "result.md")
+        except Exception:  # noqa: BLE001 - saving is auxiliary; never break `done`
+            return ""

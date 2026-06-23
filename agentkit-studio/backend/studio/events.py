@@ -333,6 +333,9 @@ class DoneEvent(StudioEvent):
     wall_s: float = 0.0
     result: str = ""
     cancelled: bool = False
+    #: Absolute path the final result was saved to (in the session workspace), or
+    #: "" if there was nothing to save / the write failed.
+    result_path: str = ""
 
 
 @dataclass(frozen=True)

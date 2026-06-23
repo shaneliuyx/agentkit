@@ -5,11 +5,61 @@
  */
 import anime from "animejs";
 
-function prefersReducedMotion(): boolean {
+export function prefersReducedMotion(): boolean {
   return (
     typeof window !== "undefined" &&
     window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
   );
+}
+
+/**
+ * Staged entrance for a node activating in the time sequence: fade + lift in after
+ * `delayMs` (the fan-out stagger from nodeLifecycle.entranceDelayMs), so a phase's
+ * orchestrator reveals first, its spokes fan out together, and the reduce converges
+ * last. Compositor-friendly (opacity + translateY only). Reduced-motion → instant.
+ * Returns a cleanup fn that stops the timeline and clears the inline props.
+ */
+export function revealNode(el: HTMLElement, delayMs: number): () => void {
+  if (prefersReducedMotion()) {
+    el.style.opacity = "";
+    el.style.transform = "";
+    return () => undefined;
+  }
+  const instance = anime({
+    targets: el,
+    opacity: [0, 1],
+    translateY: [8, 0],
+    duration: 360,
+    delay: delayMs,
+    easing: "easeOutExpo",
+  });
+  return () => {
+    instance.pause();
+    el.style.opacity = "";
+    el.style.transform = "";
+  };
+}
+
+/**
+ * Settle a node as it transitions active→done: a brief scale dip back to rest, so
+ * the convergence (spokes → reduce) reads as "results landing". Transform-only,
+ * reduced-motion → no-op. One-shot; returns a cleanup fn.
+ */
+export function settleNode(el: HTMLElement): () => void {
+  if (prefersReducedMotion()) {
+    el.style.transform = "";
+    return () => undefined;
+  }
+  const instance = anime({
+    targets: el,
+    scale: [1.04, 0.98, 1],
+    duration: 420,
+    easing: "easeOutBack",
+  });
+  return () => {
+    instance.pause();
+    anime.set(el, { scale: 1 });
+  };
 }
 
 /**

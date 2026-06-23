@@ -15,12 +15,36 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { useRunStore } from "../../store/runStore";
 import { buildGraph, type StudioNodeData } from "./topologyLayout";
-import { pulseRunning } from "./nodeAnim";
+import { entranceDelayMs } from "./nodeLifecycle";
+import { pulseRunning, revealNode, settleNode } from "./nodeAnim";
 import { toolBadgeLabel, toolBadgeTitle } from "../panels/toolMeta";
 import "./graph.css";
 
 function StudioNodeView({ data }: NodeProps<StudioNodeData>) {
   const ref = useRef<HTMLDivElement>(null);
+  // Remember the previous lifecycle so we fire the staged ENTRANCE only on the
+  // pending→active transition (the moment this node joins the time sequence), not on
+  // every unrelated re-render of an already-active node.
+  const prevState = useRef<StudioNodeData["state"]>(data.state);
+
+  // Time-sequence transitions: stage the fan-out ENTRANCE when a node first
+  // activates (orchestrator→spokes→reduce ordering via the stagger delay), and play
+  // the convergence SETTLE when it finishes. Fires only on the transition edge — the
+  // prevState ref survives re-renders because React Flow reconciles by node id.
+  useEffect(() => {
+    const prev = prevState.current;
+    prevState.current = data.state;
+    const el = ref.current;
+    if (!el) {
+      return;
+    }
+    if (prev === "pending" && data.state === "running") {
+      return revealNode(el, entranceDelayMs(data.kind, data.siblingIndex));
+    }
+    if (prev === "running" && data.state === "done") {
+      return settleNode(el);
+    }
+  }, [data.state, data.kind, data.siblingIndex]);
 
   // Pulse while running; cleanup on state change / unmount.
   useEffect(() => {

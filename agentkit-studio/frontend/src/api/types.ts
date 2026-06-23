@@ -212,6 +212,8 @@ export interface DonePayload {
   result: string;
   /** True when the run was stopped via /cancel (partial result) rather than finishing. */
   cancelled: boolean;
+  /** Absolute path the result was saved to (session workspace); "" if not saved. */
+  result_path: string;
 }
 
 export interface ErrorPayload {
