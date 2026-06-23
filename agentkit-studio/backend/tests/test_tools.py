@@ -63,6 +63,58 @@ def test_runs_tool_loop_and_accumulates_tokens() -> None:
     )
 
 
+class _InlineToolClient:
+    """Inner client that emits the tool call as INLINE TAGGED TEXT with NO structured
+    tool_calls — mirrors oMLX/Qwen, which don't support OpenAI function-calling."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, messages, tools=None) -> ChatResult:
+        self.calls += 1
+        if self.calls == 1:
+            return ChatResult(
+                text='<execute>{"name": "web_search", "arguments": {"query": "qwen 3"}}</execute>',
+                total_tokens=5,
+                tool_calls=[],  # backend returns NO structured tool_calls
+            )
+        return ChatResult(text="Qwen 3 shipped in 2025.", total_tokens=4)
+
+
+def test_parse_inline_tool_calls_variants() -> None:
+    from studio.tools import _parse_inline_tool_calls
+
+    names = {"web_search", "write_file"}
+    txt = (
+        '<tools>{"name":"write_file","arguments":{"path":"a.txt","content":"x"}}</tools>'
+        '<execute>{"name":"web_search","arguments":{"query":"q"}}</execute>'
+        '<tool_call>{"name":"unknown_tool","arguments":{}}</tool_call>'
+        "<execute>not json</execute>"
+    )
+    got = _parse_inline_tool_calls(txt, names)
+    assert ("write_file", {"path": "a.txt", "content": "x"}) in got
+    assert ("web_search", {"query": "q"}) in got
+    assert all(n != "unknown_tool" for n, _ in got)  # unregistered name filtered out
+    assert len(got) == 2  # non-JSON blob + unknown tool dropped
+
+
+def test_inline_tool_call_fires_on_non_function_calling_backend() -> None:
+    """A backend emitting the call as inline <execute> text still fires the tool;
+    the call blob must NOT leak into the final answer (the live oMLX bug)."""
+    calls: list[tuple] = []
+    inner = _InlineToolClient()
+    c = ToolAugmentedClient(
+        inner,
+        search_fn=_fake_search,
+        on_tool_call=lambda sid, tool, args: calls.append((tool, args)),
+    )
+    res = c.chat([{"role": "user", "content": "when did qwen 3 ship?"}])
+    assert inner.calls == 2  # tool turn + answer turn — the loop continued
+    assert calls and calls[0][0] == "web_search"  # the inline call actually fired
+    assert "<execute>" not in res.text  # blob did not leak
+    assert res.text == "Qwen 3 shipped in 2025."
+
+
 def test_emits_tool_call_and_result_events() -> None:
     calls: list[tuple] = []
     results: list[tuple] = []

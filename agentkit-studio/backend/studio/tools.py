@@ -24,6 +24,7 @@ never a raw ``open()`` outside the workspace.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 from agentkit.types import ChatResult, Message
@@ -113,6 +114,40 @@ def web_toolkit_available() -> bool:
         return False
 
 
+#: Backends without OpenAI structured function-calling (e.g. oMLX/Qwen) emit the
+#: call as inline text in a <execute>/<tools>/<tool_call> tag instead of a
+#: `tool_calls` field. Parse that so tools fire on those backends too — otherwise
+#: the call blob silently leaks into the answer and the tool never runs.
+_INLINE_TOOL_RE = re.compile(r"<(execute|tools?|tool_call)>(.*?)</\1>", re.DOTALL)
+
+
+def _parse_inline_tool_calls(
+    text: str, names: set[str]
+) -> list[tuple[str, dict[str, Any]]]:
+    """Extract ``(name, args)`` calls a model emitted as inline tagged JSON.
+
+    Matches paired ``<execute|tools|tool_call>{...}</...>`` blocks, json-parses the
+    inner object, and keeps only calls naming a registered tool. Returns ``[]`` on
+    any parse miss — an unparseable blob must not break the loop.
+    """
+    out: list[tuple[str, dict[str, Any]]] = []
+    for _tag, inner in _INLINE_TOOL_RE.findall(text):
+        try:
+            obj = json.loads(inner.strip())
+        except Exception:  # noqa: BLE001 - a non-JSON blob is simply not a tool call
+            continue
+        name = obj.get("name")
+        args = obj.get("arguments", obj.get("parameters", {}))
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:  # noqa: BLE001
+                args = {}
+        if name in names and isinstance(args, dict):
+            out.append((name, args))
+    return out
+
+
 class ToolAugmentedClient:
     """An ``LLMClient`` that runs a ``web_search`` tool loop over an inner client.
 
@@ -180,6 +215,10 @@ class ToolAugmentedClient:
                 for (name, args) in (getattr(result, "tool_calls", None) or [])
                 if name in names
             ]
+            if not tool_calls:
+                # Backends without structured function-calling (oMLX/Qwen) emit the
+                # call as inline tagged text — parse it so tools still fire.
+                tool_calls = _parse_inline_tool_calls(result.text or "", names)
             if not tool_calls:
                 break
 

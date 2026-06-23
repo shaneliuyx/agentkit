@@ -214,7 +214,15 @@ def _to_match(loop: dict[str, Any], score: float) -> LoopMatch:
 
 
 def _http_fetch(url: str) -> str:
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    # A real User-Agent is REQUIRED: the catalog CDN's WAF 403s the default
+    # ``Python-urllib/x.y`` UA, which silently degraded /loops to 0 matches.
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "AgentKit-Studio/1.0 (loop-library catalog client)",
+        },
+    )
     with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 - fixed catalog URL
         return resp.read().decode("utf-8")
 

@@ -12,9 +12,34 @@ from pathlib import Path
 import pytest
 
 from agentkit.planner.core import plan
+from studio import loops as loops_mod
 from studio.loops import CatalogClient, make_seeded_decomposer
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "catalog_sample.json"
+
+
+def test_http_fetch_sends_user_agent(monkeypatch) -> None:
+    """The catalog CDN 403s the default Python-urllib UA, which silently emptied
+    /loops. The fetch MUST send a real User-Agent."""
+    captured: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"loops": []}'
+
+    def _fake_urlopen(req, timeout=0):
+        captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+        return _Resp()
+
+    monkeypatch.setattr(loops_mod.urllib.request, "urlopen", _fake_urlopen)
+    loops_mod._http_fetch("https://example.test/catalog.json")
+    assert captured["headers"].get("user-agent")  # urllib lower-cases via header_items
 
 
 @pytest.fixture
