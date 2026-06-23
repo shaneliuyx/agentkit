@@ -101,6 +101,59 @@ point it at any OpenAI-compatible endpoint via `base_url=` / `api_key=` or the
 `ANTHROPIC_API_KEY` when `api_key=` is omitted. Optional extras:
 `pip install agentkit[openai]` and/or `agentkit[anthropic]`.
 
+## Configuring the agent — config is the policy surface
+
+The self-improving layer's premise: an agent's behaviour is a **folder of config
+files**, not hardcoded Python. Roles — each a system prompt, its tools, and a
+reasoning tier — live on disk. The agent loads them, dispatches tasks to them, and
+(gated) **rewrites them to improve itself**. A config directory is roles today
+(tools, routing, and topology join them in later phases):
+
+```
+agent_config/
+└── roles/
+    ├── researcher.yaml      # or .json — both load; YAML needs the [config] extra
+    ├── reviewer.yaml
+    └── verifier.yaml
+```
+
+A role file is a flat, declarative document:
+
+```yaml
+name: Researcher
+system_prompt: |
+  You are a Researcher. Gather evidence across papers, the web, and code; prefer
+  primary sources; attach the source for every non-trivial claim.
+tools: [web_search, read_url, search_code, read_docs]
+difficulty: medium          # trivial | easy | medium | hard | critical
+output_schema: null         # optional JSON-schema-like dict, or null for free-form
+```
+
+Load roles from a folder — deterministic, no model call:
+
+```python
+from agentkit import load_roles, load_default_roles, dump_role
+roles = load_roles("./agent_config/roles")      # -> {name: AgentRole}, your folder
+defaults = load_default_roles()                 # shipped Researcher/Reviewer/Writer/Verifier
+dump_role(defaults["Researcher"], "agent_config/roles/researcher.json")  # round-trips load
+```
+
+The agent runs on those files — and edits them to get better:
+
+```python
+# readme-skip-exec: runs the agent (needs a backend)
+from agentkit import SelfImprovingAgent, OpenAIChatClient
+agent = SelfImprovingAgent.from_config(
+    "./agent_config",
+    backend=OpenAIChatClient(model="Qwen2.5-Coder-7B-Instruct-MLX-4bit"))
+agent.run("survey vector databases")            # dispatch to a role, run on its config
+agent.improve(eval_set, role="Researcher", epochs=10)   # gated evolution REWRITES the role file
+```
+
+`.improve` evolves the role's prompt, admits each candidate through the LEARN gate,
+and on `ACCEPT` writes the better prompt **back to the file on disk** — you review
+it as a `git diff`. The policy is on disk, the history is in the log: nothing hidden.
+
 ## Usage by module
 
 One short example per module. Blocks that reach a real backend construct the
