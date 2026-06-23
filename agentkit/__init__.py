@@ -183,7 +183,7 @@ except ImportError:  # pragma: no cover - defensive optional-dep guard
 # imports (agentkit.config, agentkit.gates, ...) always work; these are the
 # top-level conveniences. Dep-guarded like the blocks above.
 try:
-    from agentkit.config import load_default_roles, load_roles
+    from agentkit.config import dump_role, load_default_roles, load_roles
     from agentkit.gates import Outcome, run_gate
     from agentkit.planner import plan
     from agentkit.sandbox import SubprocessSandbox
@@ -193,6 +193,7 @@ try:
         "SelfImprovingAgent",
         "load_default_roles",
         "load_roles",
+        "dump_role",
         "SubprocessSandbox",
         "run_gate",
         "Outcome",
