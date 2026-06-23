@@ -17,7 +17,7 @@ config-driven **self-improving layer** — seventeen small modules, one philosop
 | `agentkit.orchestrator` | Long-horizon autonomy: pure stall/diversity/select control + file-state loop wiring `compact()` as the inter-iteration handoff. |
 | `agentkit.topology` | Rule-driven multi-agent topology: pick shape by task (STAR/MESH/PIPELINE/…), generate the DAG, round-trip config ↔ JSON ↔ emitted code, **+ dynamic per-step topology assigned from a plan** (`assign_topologies`/`run_plan`). |
 | `agentkit.quality` | Source-grounding `verify`: deterministic citation/link checks + optional LLM claim-support, severity-graded. |
-| `agentkit.backends` | `CliLLMClient` — use a CLI (`codex exec`, `claude -p`) as the model, no API key, no shell-injection surface. |
+| `agentkit.backends` | Standard `LLMClient` adapters behind one seam: `OpenAIChatClient` / `OpenAIEmbedder` (any OpenAI-compatible endpoint — model + `base_url` are params), native `AnthropicChatClient` (Claude), and `CliLLMClient` (a CLI as the model, no API key). |
 | `agentkit.types` | The Protocol seams: `Embedder`, `LLMClient`, `ChatResult`, `Message`. |
 
 **The self-improving layer** — config is the agent's policy surface; a gate + sandbox are the guard it can't edit (see [`docs/REPLAN-agentkit.md`](docs/REPLAN-agentkit.md)):
@@ -78,6 +78,30 @@ print(result.answer)                   # -> "The answer is 4."
 summary = compact(long_message_history, keep=1)   # zero-LLM compaction
 print(summary.text, summary.est_tokens_after)
 ```
+
+The `MyClient` / `MyEmbedder` fakes above keep the snippet runnable offline. In
+real use you don't hand-roll them — agentkit ships a standard OpenAI-compatible
+adapter.
+
+### Use a real backend (one line)
+
+The `LLMClient` seam is the point: multiple vendor adapters, one interface.
+Construct any of these and pass it anywhere an `LLMClient`/`Embedder` is expected
+(`run_agent`, `MemoryStore`, `SelfImprovingAgent`, ...) — unchanged.
+
+```python
+from agentkit import OpenAIChatClient, AnthropicChatClient, OpenAIEmbedder
+client = OpenAIChatClient(model="Qwen2.5-Coder-7B-Instruct-MLX-4bit")            # local oMLX :8000, no key
+client = OpenAIChatClient(model="claude-sonnet-4-5", base_url="http://localhost:8317/v1")  # Claude via VibeProxy (OpenAI-compat)
+client = AnthropicChatClient(model="claude-sonnet-4-5", api_key="sk-ant-...")    # Claude, native Anthropic API
+embedder = OpenAIEmbedder(model="bge-m3-mlx-fp16")
+```
+
+The OpenAI-compatible adapter defaults to a local oMLX on `:8000` (no API key);
+point it at any OpenAI-compatible endpoint via `base_url=` / `api_key=` or the
+`LLM_BASE_URL` / `LLM_API_KEY` env chain. The native Claude adapter reads
+`ANTHROPIC_API_KEY` when `api_key=` is omitted. Optional extras:
+`pip install agentkit[openai]` and/or `agentkit[anthropic]`.
 
 ## Usage by module
 

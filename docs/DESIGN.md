@@ -535,6 +535,27 @@ and two marker-less framing non-claims).**
 never a shell string; `shell=True` is not used, so there is no shell-injection
 surface.
 
+**Standard vendor adapters** *(optional extras — the core stays `numpy`-only).*
+Three concrete `LLMClient`s ship behind the `agentkit.types` Protocol seam, so the
+same agent code runs on any of them by swapping one constructor:
+
+- `OpenAIChatClient(model, *, base_url=None, api_key=None, …)` + `OpenAIEmbedder(model, …)` —
+  any OpenAI-compatible endpoint (local oMLX `:8000`, OpenAI, or Claude via VibeProxy `:8317`).
+  Both the **model and the endpoint are constructor parameters**; env-chain defaults
+  (`LLM_BASE_URL → OMLX_BASE_URL → :8000`), an `"EMPTY"` key sentinel for keyless local
+  servers, and resilient retry are ported from the lab's `shared/llm.py`. `pip install agentkit[openai]`.
+- `AnthropicChatClient(model, *, max_tokens=1024, base_url=None, …)` — the **native** Anthropic
+  Messages API (system split-out, required `max_tokens`, text-block concat,
+  `input_tokens + output_tokens`, `tool_use` mapping). `pip install agentkit[anthropic]`.
+
+The point is the **seam**, not the adapters: `run_agent`, `MemoryStore`,
+`SelfImprovingAgent`, the gate's safety check — every LLM call site takes a
+`LLMClient`, so oMLX, OpenAI, native Claude, a CLI, or a fake are interchangeable
+with no change to agent code. The optional SDKs are lazy-imported, so `import
+agentkit` never hard-fails without them — the `pip install` hint surfaces only on
+construction. This is the design rule *"pluggable deps are Protocols, never
+concrete vendors"* made concrete.
+
 ### 5.9 `topology` — rule-driven topology selection + DAG generation + pipeline
 
 **Purpose.** Turn *a task* into *the right process topology* and *a runnable

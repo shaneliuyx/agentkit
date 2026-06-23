@@ -153,6 +153,30 @@ try:
 except ImportError:  # pragma: no cover - defensive optional-dep guard
     pass
 
+# Optional: the standard OpenAI-compatible adapter (needs the [openai] extra).
+# Module import is lazy-guarded, so this re-export only attaches the names; the
+# clear "pip install agentkit[openai]" hint surfaces on construction, not here.
+try:
+    from agentkit.backends.openai_compat import (
+        OpenAIChatClient,
+        OpenAIEmbedder,
+        make_client,
+    )
+
+    __all__ += ["OpenAIChatClient", "OpenAIEmbedder", "make_client"]
+except ImportError:  # pragma: no cover - defensive optional-dep guard
+    pass
+
+# Optional: the native Claude adapter (needs the [anthropic] extra). Same
+# LLMClient seam as the OpenAI adapter — multiple vendors, one interface. The
+# clear "pip install agentkit[anthropic]" hint surfaces on construction.
+try:
+    from agentkit.backends.anthropic_client import AnthropicChatClient
+
+    __all__ += ["AnthropicChatClient"]
+except ImportError:  # pragma: no cover - defensive optional-dep guard
+    pass
+
 # Optional: the self-improving layer (re-plan) — config-driven roles, the
 # sandbox/gates security spine, the evolve/skills optimizer, planner, codegen,
 # and the SelfImprovingAgent facade. See docs/REPLAN-agentkit.md. Submodule
