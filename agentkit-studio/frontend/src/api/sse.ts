@@ -141,6 +141,11 @@ export function openRunStream(
     try {
       const event = JSON.parse(msg.data) as StudioEvent;
       callbacks.onEvent(event);
+      // Terminal frames end the run — close the source so EventSource does NOT
+      // auto-reconnect (which reopens /run and re-triggers the whole run).
+      if (event.type === "done" || event.type === "error") {
+        source.close();
+      }
     } catch (error: unknown) {
       callbacks.onError?.(`Bad SSE frame: ${getErrorMessage(error)}`);
     }

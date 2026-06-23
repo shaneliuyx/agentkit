@@ -210,7 +210,12 @@ async def get_run(session_id: str, requirement: str) -> EventSourceResponse:
             if item is _STREAM_DONE:
                 break
             ts = _now()
-            yield {"event": item.EVENT_TYPE, "data": item.sse_data(session_id, ts)}
+            # Emit an UNNAMED SSE frame: the browser's EventSource.onmessage only
+            # fires for unnamed events — a named `event: <type>` line routes to a
+            # typed listener the frontend never registers, so it would receive
+            # nothing (0 tokens + SSE error). The type is already in the JSON
+            # payload, so the event name is redundant.
+            yield {"data": item.sse_data(session_id, ts)}
 
     return EventSourceResponse(event_generator())
 
