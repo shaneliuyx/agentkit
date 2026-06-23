@@ -7,3 +7,7 @@ __pycache__/
 .env.local
 .env
 tsconfig.tsbuildinfo
+
+# Per-session file-tool jail + saved run results (runtime, not source).
+backend/tmp/
+tmp/studio-workspaces/
