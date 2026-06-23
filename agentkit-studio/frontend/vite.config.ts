@@ -5,6 +5,8 @@ import react from "@vitejs/plugin-react";
 // fetch helpers can use same-origin relative paths.
 // Backend defaults to :8770 — NOT :8000, which is occupied by oMLX (the model
 // server). Override with VITE_BACKEND_URL if the backend runs elsewhere.
+// The backend routes are UNPREFIXED (/session, /backends, …), so the proxy must
+// STRIP the /api prefix before forwarding — else /api/session 404s.
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -13,6 +15,7 @@ export default defineConfig({
       "/api": {
         target: process.env.VITE_BACKEND_URL ?? "http://localhost:8770",
         changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ""),
       },
     },
   },
