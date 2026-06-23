@@ -132,7 +132,7 @@ output_schema: null         # optional JSON-schema-like dict, or null for free-f
 Load roles from a folder — deterministic, no model call:
 
 ```python
-from agentkit import load_roles, load_default_roles, dump_role
+from agentkit.config import load_roles, load_default_roles, dump_role
 roles = load_roles("./agent_config/roles")      # -> {name: AgentRole}, your folder
 defaults = load_default_roles()                 # shipped Researcher/Reviewer/Writer/Verifier
 dump_role(defaults["Researcher"], "agent_config/roles/researcher.json")  # round-trips load
