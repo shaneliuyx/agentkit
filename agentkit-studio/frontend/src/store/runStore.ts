@@ -16,6 +16,7 @@ import type {
   GatePayload,
   GraphEdgePayload,
   GraphNodePayload,
+  LoopDoctorCheck,
   MemoryEntry,
   PlanStep,
   LoopMatch,
@@ -127,6 +128,10 @@ export interface RunState {
   /** Web/tool activity (tool_call merged with its tool_result by step+tool). */
   tools: ToolActivity[];
 
+  // ── M8 ──
+  /** Loop Doctor health checks from the last `loopdoctor` event (replaced each time). */
+  loopDoctor: LoopDoctorCheck[];
+
   // ── actions ──
   apply: (event: StudioEvent) => void;
   beginRun: (sessionId: string, mode: RunMode) => void;
@@ -161,6 +166,7 @@ const initialState = {
   loops: [] as LoopMatch[],
   loopSeed: null as LoopSeedPayload | null,
   tools: [] as ToolActivity[],
+  loopDoctor: [] as LoopDoctorCheck[],
 };
 
 // ── pure helpers (immutable phase transitions) ─────────────────────────────
@@ -300,6 +306,9 @@ export const useRunStore = create<RunState>((set) => ({
 
         case "tool_result":
           return { tools: mergeToolResult(state.tools, event.payload) };
+
+        case "loopdoctor":
+          return { loopDoctor: event.payload.checks };
 
         case "done":
           return {

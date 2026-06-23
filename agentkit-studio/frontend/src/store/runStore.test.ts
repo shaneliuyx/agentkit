@@ -75,3 +75,45 @@ describe("runStore M7 Wave 1 reducer cases", () => {
     expect(tools[0].summary).toBe("orphan");
   });
 });
+
+describe("runStore M8 loopdoctor reducer case", () => {
+  beforeEach(() => {
+    useRunStore.getState().reset();
+  });
+
+  test("loopdoctor stores the checks", () => {
+    useRunStore.getState().apply(
+      frame("loopdoctor", {
+        checks: [
+          { name: "bounded", status: "pass", fix: "" },
+          { name: "clear_stopping", status: "fail", fix: "add a stop condition" },
+        ],
+      }),
+    );
+    const checks = useRunStore.getState().loopDoctor;
+    expect(checks).toHaveLength(2);
+    expect(checks[0].name).toBe("bounded");
+    expect(checks[1].status).toBe("fail");
+    expect(checks[1].fix).toBe("add a stop condition");
+  });
+
+  test("loopdoctor replaces (does not append) on each event", () => {
+    const store = useRunStore.getState();
+    store.apply(
+      frame("loopdoctor", {
+        checks: [
+          { name: "bounded", status: "warn", fix: "tighten the bound" },
+          { name: "safe_actions", status: "pass", fix: "" },
+        ],
+      }),
+    );
+    store.apply(
+      frame("loopdoctor", {
+        checks: [{ name: "bounded", status: "pass", fix: "" }],
+      }),
+    );
+    const checks = useRunStore.getState().loopDoctor;
+    expect(checks).toHaveLength(1); // replaced, not appended
+    expect(checks[0].status).toBe("pass");
+  });
+});

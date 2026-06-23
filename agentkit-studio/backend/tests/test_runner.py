@@ -43,9 +43,13 @@ def test_event_order(fake_client_factory: Callable[..., LLMClient]) -> None:
     # Prefix is exact.
     assert types[:4] == ["session", "plan", "topology", "graph"], types
 
-    # Terminal: verify is the last non-done event; done is last.
+    # Terminal: done is last, preceded by loopdoctor (M8), preceded by verify.
     assert types[-1] == "done", types
-    assert types[-2] == "verify", types
+    assert types[-2] == "loopdoctor", types
+    assert types[-3] == "verify", types
+    # The Loop Doctor audit is emitted exactly once, after verify, before done.
+    assert types.count("loopdoctor") == 1
+    assert types.index("verify") < types.index("loopdoctor") < types.index("done")
 
     # No event precedes session; nothing follows done.
     assert types.count("session") == 1

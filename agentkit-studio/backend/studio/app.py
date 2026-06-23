@@ -35,9 +35,11 @@ from studio.backends import (
     resolve_backend,
 )
 from studio.events import StudioEvent
+from studio.export import run_to_loop
 from studio.loops import CatalogClient
 from studio.runner import Runner
 from studio.session import SessionRegistry
+from studio.skills_paths import build_path_skills
 
 #: Sentinel pushed onto the event queue to signal stream completion.
 _STREAM_DONE = object()
@@ -225,6 +227,38 @@ def post_cancel(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="unknown session")
     disposition = session.request_cancel()
     return {"cancelled": True, "disposition": disposition}
+
+
+# ---------------------------------------------------------------------------
+# /skills + /export (M9 — loop-library paths + export-run-as-loop)
+# ---------------------------------------------------------------------------
+
+@app.get("/skills")
+def get_skills() -> dict[str, Any]:
+    """The 5 loop-library paths as agentkit skills: name + description each."""
+    return {
+        "skills": [
+            {"name": s.name, "description": s.description} for s in build_path_skills()
+        ]
+    }
+
+
+@app.get("/export/{session_id}")
+def get_export(session_id: str) -> dict[str, Any]:
+    """Serialize a session's finished run into a loop-library loop draft.
+
+    409 when the session has not run (no plan/snapshot) — there is nothing to
+    export until a run completes and records its ``RunSnapshot``.
+    """
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="unknown session")
+    if session.last_run is None or not session.last_run.plan_steps:
+        raise HTTPException(
+            status_code=409,
+            detail="session has no finished run to export; start a run first",
+        )
+    return {"loop": run_to_loop(session.last_run)}
 
 
 # ---------------------------------------------------------------------------

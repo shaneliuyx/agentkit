@@ -210,6 +210,28 @@ export const FIXTURE_EVENTS: StudioEvent[] = [
       uncited: ["Agents are fully autonomous today"],
     },
   },
+  // ── M8: Loop Doctor — the 4 health checks (one warn + one fail carry fixes) ──
+  {
+    type: "loopdoctor",
+    session_id: SID,
+    ts: t(),
+    payload: {
+      checks: [
+        { name: "bounded", status: "pass", fix: "" },
+        {
+          name: "material_checks",
+          status: "warn",
+          fix: "Only 1 of 3 phases verifies its own output — add a check step after s3.",
+        },
+        { name: "safe_actions", status: "pass", fix: "" },
+        {
+          name: "clear_stopping",
+          status: "fail",
+          fix: "No explicit termination condition; the loop relies on the budget ceiling alone.",
+        },
+      ],
+    },
+  },
   {
     type: "done",
     session_id: SID,

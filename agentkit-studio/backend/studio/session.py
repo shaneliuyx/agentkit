@@ -20,6 +20,25 @@ from typing import Any
 from studio.shared_bridge import InterruptStateSnapshot, get_interrupt_disposition
 
 
+@dataclass(frozen=True)
+class RunSnapshot:
+    """An immutable snapshot of a finished run — the input to loop export (M9).
+
+    Captured by the runner at the end of a run so ``GET /export`` can serialize a
+    publishable loop without re-running anything. ``plan_steps`` is the
+    ``PlanEvent.steps`` dict shape; ``topology`` maps step id → topology label;
+    ``loopdoctor_checks`` is the audit's ``[{name, status, fix}]``.
+    """
+
+    requirement: str
+    plan_steps: list[dict[str, Any]]
+    topology: dict[str, str]
+    loopdoctor_checks: list[dict[str, Any]]
+    budget_ceiling: float | None
+    result: str
+    cancelled: bool
+
+
 @dataclass
 class Session:
     """A configured studio session (mutable run-level state)."""
@@ -44,11 +63,17 @@ class Session:
     )
     #: True while a /run stream is active for this session (one run at a time).
     running: bool = False
+    #: M9: snapshot of the most recent finished run — the source for /export.
+    last_run: "RunSnapshot | None" = None
 
     def seed(self, loop_id: str, steps: list[dict[str, Any]]) -> None:
         """Pre-seed this session from a chosen loop-library loop."""
         self.seed_loop_id = loop_id
         self.seed_steps = steps
+
+    def record_run(self, snapshot: "RunSnapshot") -> None:
+        """Store the finished-run snapshot so ``GET /export`` can serialize it."""
+        self.last_run = snapshot
 
     @property
     def cancel_requested(self) -> bool:

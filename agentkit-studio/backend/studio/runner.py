@@ -51,12 +51,13 @@ from studio.events import (
 from studio.loops import make_seeded_decomposer
 from studio.panels.dag import DagTracker
 from studio.panels.evolve import build_evolve_event
+from studio.panels.loopdoctor import build_loopdoctor_event
 from studio.panels.memory import MemoryTracker
 from studio.panels.router import build_router_event
 from studio.panels.security import run_gate_event
 from studio.panels.selfimprove import SelfImproveTracker
 from studio.panels.verify import build_verify_event
-from studio.session import Session
+from studio.session import RunSnapshot, Session
 from studio.shared_bridge import TokenAccounting, UsageReport
 from studio.tools import ToolAugmentedClient, web_toolkit_available
 from studio.workspace import Workspace
@@ -258,30 +259,29 @@ class Runner:
             self._emit(LoopSeedEvent(loop_id=session.seed_loop_id, steps=seed_steps))
         else:
             plan_obj = plan(requirement)
-        self._emit(
-            PlanEvent(
-                task=plan_obj.task,
-                steps=[
-                    {
-                        "id": s.id,
-                        "description": s.description,
-                        "depends_on": list(s.depends_on),
-                        "role": s.role,
-                        "difficulty": s.difficulty,
-                    }
-                    for s in plan_obj.steps
-                ],
-            )
-        )
+        # Capture the plan-as-dicts once: the PlanEvent payload AND the input the
+        # Loop Doctor audits (its clear_stopping check walks this DAG at run end).
+        plan_step_dicts = [
+            {
+                "id": s.id,
+                "description": s.description,
+                "depends_on": list(s.depends_on),
+                "role": s.role,
+                "difficulty": s.difficulty,
+            }
+            for s in plan_obj.steps
+        ]
+        self._emit(PlanEvent(task=plan_obj.task, steps=plan_step_dicts))
 
         # assign topologies (auto; llm path only when mode=='llm' AND client given)
         use_llm = session.mode == "llm"
         plan_obj = assign_topologies(
             plan_obj, mode="auto", client=client, llm=use_llm
         )
+        topology_map = {s.id: (s.topology or SINGLE) for s in plan_obj.steps}
         self._emit(
             TopologyEvent(
-                steps=[{"id": s.id, "topology": s.topology or SINGLE} for s in plan_obj.steps]
+                steps=[{"id": sid, "topology": topo} for sid, topo in topology_map.items()]
             )
         )
 
@@ -302,6 +302,9 @@ class Runner:
         outputs: dict[str, str] = {}
         cancelled = False
         final_output = ""
+        #: Gate outcomes collected across phases — the Loop Doctor's safe_actions
+        #: check reads these at run end (no re-running of any gate).
+        gate_events: list[GateEvent] = []
 
         for step in plan_obj.steps:
             if session.cancel_requested:
@@ -368,7 +371,9 @@ class Runner:
                 )
             )
             self._emit(build_evolve_event(len(outputs), list(outputs.values())))
-            self._emit(self._gate_event_for(step.id, sr.output))
+            gate_event = self._gate_event_for(step.id, sr.output)
+            gate_events.append(gate_event)
+            self._emit(gate_event)
 
         # budget gauge
         if budget is not None:
@@ -381,7 +386,32 @@ class Runner:
             )
 
         # verification (pure tier, always runs)
-        self._emit(build_verify_event(final_output))
+        verify_event = build_verify_event(final_output)
+        self._emit(verify_event)
+
+        # Loop Doctor (M8): audit the finished run against loop-library's
+        # checklist, composed from the run's collected gate/verify outcomes +
+        # the budget ceiling + the plan DAG. Suggestions only — never applied.
+        loopdoctor_event = build_loopdoctor_event(
+            plan_step_dicts,
+            budget_ceiling=session.budget_ceiling,
+            gate_events=gate_events,
+            verify_event=verify_event,
+        )
+        self._emit(loopdoctor_event)
+
+        # Record the finished run so GET /export can serialize it to a loop (M9).
+        session.record_run(
+            RunSnapshot(
+                requirement=requirement,
+                plan_steps=plan_step_dicts,
+                topology=topology_map,
+                loopdoctor_checks=loopdoctor_event.checks,
+                budget_ceiling=session.budget_ceiling,
+                result=final_output,
+                cancelled=cancelled,
+            )
+        )
 
         # done
         self._emit(self._done_event(final_output, cancelled=cancelled))

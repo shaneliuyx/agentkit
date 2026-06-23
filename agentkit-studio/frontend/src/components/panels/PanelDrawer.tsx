@@ -14,6 +14,7 @@ import { VerifyPanel } from "./VerifyPanel";
 import { RouterPanel } from "./RouterPanel";
 import { LoopsPanel } from "./LoopsPanel";
 import { ToolsPanel } from "./ToolsPanel";
+import { LoopDoctorPanel } from "./LoopDoctorPanel";
 import "./panels.css";
 
 type TabId =
@@ -24,6 +25,7 @@ type TabId =
   | "selfimprove"
   | "evolve"
   | "security"
+  | "doctor"
   | "dag"
   | "verify";
 
@@ -35,6 +37,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "selfimprove", label: "Self-improve" },
   { id: "evolve", label: "Evolve" },
   { id: "security", label: "Security" },
+  { id: "doctor", label: "Loop Doctor" },
   { id: "dag", label: "DAG" },
   { id: "verify", label: "Verify" },
 ];
@@ -55,6 +58,7 @@ export function PanelDrawer({ sessionId }: PanelDrawerProps) {
     selfimprove: s.selfimprove.length + s.agentEvents.length,
     evolve: s.evolve.length,
     security: s.gates.length,
+    doctor: s.loopDoctor.length,
     dag: s.dag ? s.dag.nodes.length : 0,
     verify: s.verify ? s.verify.findings.length : 0,
   }));
@@ -86,6 +90,7 @@ export function PanelDrawer({ sessionId }: PanelDrawerProps) {
         {active === "selfimprove" && <SelfImprovePanel />}
         {active === "evolve" && <EvolvePanel />}
         {active === "security" && <SecurityPanel />}
+        {active === "doctor" && <LoopDoctorPanel />}
         {active === "dag" && <DagPanel />}
         {active === "verify" && <VerifyPanel />}
       </div>

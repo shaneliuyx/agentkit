@@ -46,6 +46,18 @@
   font-size: var(--text-base);
 }
 
+/* M9: post-run actions (export-as-loop) — sits beside the run bar once done. */
+.run-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.run-actions-error {
+  font-size: var(--text-xs);
+  color: var(--color-error);
+}
+
 .run-mode {
   display: inline-flex;
   border: 1px solid var(--color-border-strong);

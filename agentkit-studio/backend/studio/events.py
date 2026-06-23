@@ -301,6 +301,22 @@ class VerifyEvent(StudioEvent):
     uncited: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class LoopDoctorEvent(StudioEvent):
+    """``loopdoctor`` — the run audited against loop-library's checklist (M8).
+
+    Maps loop-library's four audit dimensions onto Studio's EXISTING primitives:
+    ``bounded`` ⇆ ``FanoutBudget.ceiling``; ``material_checks`` ⇆ ``quality.verify``;
+    ``safe_actions`` ⇆ the per-phase ``gates.run_gate`` outcomes; ``clear_stopping``
+    ⇆ the plan being a finite DAG. ``checks`` = ``[{name, status, fix}]`` where
+    ``status`` ∈ ``"pass"|"warn"|"fail"`` and ``fix`` is a SUGGESTION string (empty
+    when ``pass``) — never auto-applied (matches loop-library's no-silent-change rule).
+    """
+
+    EVENT_TYPE: str = field(default="loopdoctor", init=False, repr=False)
+    checks: list[dict[str, Any]] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Terminal
 # ---------------------------------------------------------------------------

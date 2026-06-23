@@ -4,13 +4,18 @@
  * from a chosen loop. Once a `loop_seed` event arrives, the store's `loopSeed`
  * drives the "seeded from <title>" banner on the graph (see App).
  */
-import { useState } from "react";
-import { fetchLoops, seedLoop } from "../../api/sse";
+import { useEffect, useState } from "react";
+import { fetchLoops, fetchSkills, seedLoop } from "../../api/sse";
 import { useRunStore } from "../../store/runStore";
 import { PanelShell } from "./PanelShell";
 
 interface LoopsPanelProps {
   sessionId: string | null;
+}
+
+interface PathSkill {
+  name: string;
+  description: string;
 }
 
 export function LoopsPanel({ sessionId }: LoopsPanelProps) {
@@ -22,6 +27,25 @@ export function LoopsPanel({ sessionId }: LoopsPanelProps) {
   const [busy, setBusy] = useState(false);
   const [seeding, setSeeding] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [skills, setSkills] = useState<PathSkill[]>([]);
+
+  // M9: surface the 5 path skills so the available loop paths are visible. Best
+  // effort — failure leaves the section hidden rather than disrupting the panel.
+  useEffect(() => {
+    let cancelled = false;
+    fetchSkills()
+      .then((res) => {
+        if (!cancelled) {
+          setSkills(res.skills);
+        }
+      })
+      .catch(() => {
+        /* skills are an optional affordance; ignore fetch failure */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleFind = async () => {
     if (query.trim().length === 0) {
@@ -119,6 +143,18 @@ export function LoopsPanel({ sessionId }: LoopsPanelProps) {
           </article>
         ))
       )}
+
+      {skills.length > 0 ? (
+        <section className="loops-skills">
+          <p className="mono tag">path skills</p>
+          {skills.map((s) => (
+            <p key={s.name} className="loops-skill" title={s.description}>
+              <span className="mono dim">{s.name}</span>
+              <span className="panel-row-text"> — {s.description}</span>
+            </p>
+          ))}
+        </section>
+      ) : null}
     </PanelShell>
   );
 }

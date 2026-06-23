@@ -85,6 +85,30 @@ export function seedLoop(
   );
 }
 
+/**
+ * GET /api/export/{session_id} → the finished run serialized as a reusable loop
+ * (M9). The loop JSON shape is owned by the backend, so we keep it `unknown` and
+ * the caller just downloads it verbatim.
+ */
+export async function exportLoop(sessionId: string): Promise<{ loop: unknown }> {
+  const res = await fetch(`${API_BASE}/export/${sessionId}`);
+  if (!res.ok) {
+    throw new Error(`GET /export/${sessionId} failed: ${res.status}`);
+  }
+  return (await res.json()) as { loop: unknown };
+}
+
+/** GET /api/skills → the 5 path skills (name + description) for display (M9). */
+export async function fetchSkills(): Promise<{
+  skills: { name: string; description: string }[];
+}> {
+  const res = await fetch(`${API_BASE}/skills`);
+  if (!res.ok) {
+    throw new Error(`GET /skills failed: ${res.status}`);
+  }
+  return (await res.json()) as { skills: { name: string; description: string }[] };
+}
+
 export interface RunStreamHandle {
   /** Tear down the EventSource. Idempotent. */
   close: () => void;

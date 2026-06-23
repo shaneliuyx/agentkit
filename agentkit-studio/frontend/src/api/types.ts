@@ -246,6 +246,25 @@ export interface ToolResultPayload {
   rejected: boolean;
 }
 
+// ── M8: Loop Doctor health checks ──────────────────────────────────────────
+
+export type LoopDoctorStatus = "pass" | "warn" | "fail";
+
+/**
+ * One Loop Doctor health check (M8). The four checks are bounded,
+ * material_checks, safe_actions, clear_stopping. `fix` is an advisory repair
+ * SUGGESTION — render as text, never as an action button.
+ */
+export interface LoopDoctorCheck {
+  name: string;
+  status: LoopDoctorStatus;
+  fix: string;
+}
+
+export interface LoopDoctorPayload {
+  checks: LoopDoctorCheck[];
+}
+
 // ── The discriminated union ────────────────────────────────────────────────
 
 /** Base envelope every frame shares. */
@@ -279,7 +298,8 @@ export type StudioEvent =
   | Frame<"loops", LoopsPayload>
   | Frame<"loop_seed", LoopSeedPayload>
   | Frame<"tool_call", ToolCallPayload>
-  | Frame<"tool_result", ToolResultPayload>;
+  | Frame<"tool_result", ToolResultPayload>
+  | Frame<"loopdoctor", LoopDoctorPayload>;
 
 export type StudioEventType = StudioEvent["type"];
 
