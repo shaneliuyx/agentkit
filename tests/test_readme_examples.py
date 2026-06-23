@@ -4,8 +4,12 @@ silently drift from the API.
 Drift — a renamed parameter, a changed return shape, a moved symbol — makes the
 relevant block raise, and this test fails. The blocks reference a few names
 illustratively (``messages``, ``items``, ``eval_set`` …); those are seeded in a
-shared namespace, alongside the ``MyClient`` / ``MyEmbedder`` fakes the README's
-Quickstart defines, so the literal documentation runs with no network.
+shared namespace so the deterministic, zero-LLM blocks run with no network.
+
+Blocks that reach a real backend construct the shipped ``OpenAIChatClient`` /
+``OpenAIEmbedder`` adapters and carry a ``# readme-skip-exec`` marker: every
+block is still compiled (syntax-checked), but a marked block is not executed
+offline — it is exercised only against a live endpoint.
 
 GateGuard facts: importers — none (test only); public API — exercises the
 documented surface of every module; data schema — none persisted (tmp cwd);
@@ -19,30 +23,7 @@ import re
 
 import pytest
 
-from agentkit.types import ChatResult
-
 README = pathlib.Path(__file__).resolve().parents[1] / "README.md"
-
-# A reply that is harmless as a generic agent answer AND parses as a valid
-# codegen proposal (SCHEMA: marker + a fenced read-only python tool), so the
-# `codegen` / `forge_tool` examples reach ACCEPT instead of erroring.
-_FORGE_REPLY = (
-    'SCHEMA: {"name": "f", "description": "demo", "parameters": {}}\n'
-    "```python\n"
-    "def f():\n"
-    "    return 1\n"
-    "```"
-)
-
-
-class _Embedder:
-    def embed(self, texts):
-        return [[float(len(t)), 1.0] for t in texts]
-
-
-class _Client:
-    def chat(self, messages, tools=None):
-        return ChatResult(text=_FORGE_REPLY)
 
 
 def _python_blocks() -> list[str]:
@@ -60,8 +41,6 @@ def _namespace() -> dict:
     ]
     return {
         "__name__": "readme_example",
-        "MyEmbedder": _Embedder,
-        "MyClient": _Client,
         # illustrative placeholders referenced but not defined in their block
         "messages": list(msgs),
         "later_messages": list(msgs),
@@ -99,4 +78,7 @@ def test_readme_example_runs(idx, tmp_path, monkeypatch):
     for name, role in load_default_roles().items():
         dump_role(role, roles_dir / f"{name.lower()}.json")
 
-    exec(compile(block, f"<README block {idx}>", "exec"), _namespace())
+    compiled = compile(block, f"<README block {idx}>", "exec")  # syntax-check every block
+    if "readme-skip-exec" in block:
+        return  # block runs against a live backend; syntax-checked only, not executed offline
+    exec(compiled, _namespace())

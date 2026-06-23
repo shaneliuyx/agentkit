@@ -58,30 +58,28 @@ you build the adapter and pass it in.
 ## Quickstart — a memory-aware agent
 
 ```python
-from agentkit import MemoryStore, run_agent, compact, ChatResult
+# readme-skip-exec
+from agentkit import MemoryStore, run_agent, compact, OpenAIChatClient, OpenAIEmbedder
 
-class MyEmbedder:                      # wrap any embeddings endpoint
-    def embed(self, texts): return [[float(len(t))] for t in texts]
+client = OpenAIChatClient(model="Qwen2.5-Coder-7B-Instruct-MLX-4bit")   # local oMLX :8000
+embedder = OpenAIEmbedder(model="bge-m3-mlx-fp16")
 
-class MyClient:                        # wrap any chat endpoint
-    def chat(self, messages, tools=None):
-        return ChatResult(text="The answer is 4.")
-
-memory = MemoryStore("memory.db", embedder=MyEmbedder())
+memory = MemoryStore("memory.db", embedder=embedder)
 memory.add("semantic", "Always validate inputs before parsing.")
 
-result = run_agent("What is 2+2?", client=MyClient(),
+result = run_agent("What is 2+2?", client=client,
                    tools={"add": lambda a: {"sum": a["a"] + a["b"]}},
                    memory=memory)
-print(result.answer)                   # -> "The answer is 4."
+print(result.answer)
 
 summary = compact(long_message_history, keep=1)   # zero-LLM compaction
 print(summary.text, summary.est_tokens_after)
 ```
 
-The `MyClient` / `MyEmbedder` fakes above keep the snippet runnable offline. In
-real use you don't hand-roll them — agentkit ships a standard OpenAI-compatible
-adapter.
+This snippet reaches a real backend (the agent call embeds memory and queries
+the model), so it is marked `# readme-skip-exec`: the README test syntax-checks
+it but does not run it offline. The shipped `OpenAIChatClient` / `OpenAIEmbedder`
+adapters target any OpenAI-compatible endpoint — no hand-rolled client needed.
 
 ### Use a real backend (one line)
 
@@ -105,9 +103,10 @@ point it at any OpenAI-compatible endpoint via `base_url=` / `api_key=` or the
 
 ## Usage by module
 
-One short example per module. They use the injected `MyClient` / `MyEmbedder`
-fakes from the Quickstart where a real backend would go — copy a block, swap in
-your adapter, run it.
+One short example per module. Blocks that reach a real backend construct the
+shipped `OpenAIChatClient` / `OpenAIEmbedder` adapters and are marked
+`# readme-skip-exec` (syntax-checked, not run offline); the deterministic,
+zero-LLM blocks run offline in the README test as written.
 
 ### `context` — deterministic, zero-LLM compaction
 ```python
@@ -119,8 +118,9 @@ r = merge(r, compact(later_messages))      # fold a newer compaction into an old
 
 ### `memory` — tiered episodic/semantic store
 ```python
-from agentkit import MemoryStore
-mem = MemoryStore("mem.db", embedder=MyEmbedder())
+# readme-skip-exec
+from agentkit import MemoryStore, OpenAIEmbedder
+mem = MemoryStore("mem.db", embedder=OpenAIEmbedder(model="bge-m3-mlx-fp16"))
 mem.add("semantic", "Always validate inputs before parsing.")
 hits = mem.search("input handling", top_k=4)        # vector recall -> list[MemoryEntry]
 prompt_block = mem.inject_context("input handling", k=4)   # ready-to-prompt context string
@@ -140,17 +140,19 @@ gs.mark_done(rid, "fetch", {"ok": True})            # unlocks 'parse'
 
 ### `agent` — ReAct loop + router + roles + batch
 ```python
+# readme-skip-exec
 from agentkit import (run_agent, run_agent_stream, route, run_role, dispatch,
-                      RESEARCHER, run_batch, BatchConfig)
-res = run_agent("What is 2+2?", client=MyClient(),
+                      RESEARCHER, run_batch, BatchConfig, OpenAIChatClient)
+client = OpenAIChatClient(model="Qwen2.5-Coder-7B-Instruct-MLX-4bit")
+res = run_agent("What is 2+2?", client=client,
                 tools={"add": lambda a: {"sum": a["a"] + a["b"]}})
 print(res.answer)
 route("hard")                                       # -> RouteDecision (which reasoning tier)
 role = dispatch("review this draft")                # keyword heuristic -> AgentRole (no LLM)
-run_role(RESEARCHER, "survey vector DBs", client=MyClient())   # a role is config over run_agent
-run_batch(items, lambda x: run_agent(x, client=MyClient()).answer,   # return JSON-serializable
+run_role(RESEARCHER, "survey vector DBs", client=client)   # a role is config over run_agent
+run_batch(items, lambda x: run_agent(x, client=client).answer,   # return JSON-serializable
           output_path="out.jsonl", failures_path="fail.jsonl", config=BatchConfig())
-for chunk in run_agent_stream("research X", client=MyClient()):
+for chunk in run_agent_stream("research X", client=client):
     ...                                             # streaming: partial ChatChunks then AgentResult (TTFT)
 ```
 
@@ -167,15 +169,18 @@ cascade(items, predicate=lambda x: True, rubric=rubric,
 ### `quality` — source-grounding verification
 ```python
 from agentkit import verify
-findings = verify(text, sources={"[1]": "the cited source text"}, client=MyClient())
+findings = verify(text, sources={"[1]": "the cited source text"})  # client optional: deterministic citation/link checks run with no model
 for f in findings:                                  # uncited claims, dead links, unsupported claims
     print(f)                                        # each VerifyFinding is severity-graded
 ```
 
 ### `topology` — pick a multi-agent shape, generate its DAG
 ```python
+# readme-skip-exec
 from agentkit.topology import infer_spec, select_topology, generate_dag
-spec = infer_spec("compare A and B then summarize", client=MyClient())  # -> TaskSpec
+from agentkit import OpenAIChatClient
+client = OpenAIChatClient(model="Qwen2.5-Coder-7B-Instruct-MLX-4bit")
+spec = infer_spec("compare A and B then summarize", client=client)  # -> TaskSpec
 choice = select_topology(spec)                      # rule-driven -> TopologyChoice (STAR/MESH/...)
 dag, n_calls = generate_dag(choice, spec, llm=False)   # config-as-policy: the DAG as data
 
@@ -183,7 +188,7 @@ dag, n_calls = generate_dag(choice, spec, llm=False)   # config-as-policy: the D
 from agentkit import plan, assign_topologies, run_plan
 p = assign_topologies(plan("compare X and Y, then write a brief"), mode="auto")
 #   -> 'compare' step = MESH, 'write' step = single (deterministic keyword cues, 0 LLM)
-result = run_plan(p, client=MyClient())             # runs each step under its own topology
+result = run_plan(p, client=client)                 # runs each step under its own topology
 ```
 
 ### `config` — roles as declarative files (re-plan Phase 1)
@@ -221,12 +226,14 @@ client = CliLLMClient(...)        # wraps `claude -p` / `codex exec`; argv, no s
 
 ### `evolve` + `skills` — text-space optimization against the gate
 ```python
+# readme-skip-exec
 from agentkit.evolve import evolve_prompt
 from agentkit.skills import SkillLibrary
+from agentkit import OpenAIEmbedder
 res = evolve_prompt("You are an agent.", propose=my_proposer, evaluate=my_scorer,
                     gate=my_gate, baseline_score=0.5, epochs=5)
 print(res.best, res.delta)                          # best variant kept only if it passed the gate
-lib = SkillLibrary(embedder=MyEmbedder(), directory="skills/")
+lib = SkillLibrary(embedder=OpenAIEmbedder(model="bge-m3-mlx-fp16"), directory="skills/")
 lib.retrieve("summarize a PDF", k=3)                # semantic recall of curated, gate-passed skills
 ```
 
@@ -239,10 +246,13 @@ cfg = plan_to_graph_config(p)                       # -> {nodes, edges} for Grap
 
 ### `codegen` — agent-authored, sandbox-validated tools
 ```python
+# readme-skip-exec
 from agentkit.codegen import ToolForge
 from agentkit.sandbox import SubprocessSandbox
 from agentkit.gates import Gate
-forge = ToolForge(client=MyClient(), sandbox=SubprocessSandbox(),
+from agentkit import OpenAIChatClient
+forge = ToolForge(client=OpenAIChatClient(model="Qwen2.5-Coder-7B-Instruct-MLX-4bit"),
+                  sandbox=SubprocessSandbox(),
                   gate=Gate(sandbox=SubprocessSandbox(), evaluator=lambda p: 1.0))
 tool = forge.forge("a tool that adds two numbers")  # query->schema->code->validate->repair->gate
 forge.register(tool, registry)                       # registers ONLY if the gate returned ACCEPT
@@ -250,8 +260,11 @@ forge.register(tool, registry)                       # registers ONLY if the gat
 
 ### `selfimproving` — the facade (the whole loop, one object)
 ```python
-from agentkit import SelfImprovingAgent
-agent = SelfImprovingAgent.from_config("./agent_config", backend=MyClient(), embedder=MyEmbedder())
+# readme-skip-exec
+from agentkit import SelfImprovingAgent, OpenAIChatClient, OpenAIEmbedder
+agent = SelfImprovingAgent.from_config("./agent_config",
+                                       backend=OpenAIChatClient(model="Qwen2.5-Coder-7B-Instruct-MLX-4bit"),
+                                       embedder=OpenAIEmbedder(model="bge-m3-mlx-fp16"))
 agent.run("research X and write a brief")           # config-driven role dispatch + memory
 agent.improve(eval_set, role="Researcher", epochs=10)   # gated prompt evolution -> rewrites the role FILE
 agent.skills.retrieve("how to cite sources")        # the curated skill library
