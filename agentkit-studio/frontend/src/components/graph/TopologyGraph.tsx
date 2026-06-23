@@ -16,6 +16,7 @@ import "reactflow/dist/style.css";
 import { useRunStore } from "../../store/runStore";
 import { buildGraph, type StudioNodeData } from "./topologyLayout";
 import { pulseRunning } from "./nodeAnim";
+import { toolBadgeLabel, toolBadgeTitle } from "../panels/toolMeta";
 import "./graph.css";
 
 function StudioNodeView({ data }: NodeProps<StudioNodeData>) {
@@ -50,6 +51,14 @@ function StudioNodeView({ data }: NodeProps<StudioNodeData>) {
               {data.nCalls} calls
             </span>
           ) : null}
+          {data.toolCounts && Object.keys(data.toolCounts).length > 0 ? (
+            <span
+              className="topo-node-web"
+              title={toolBadgeTitle(data.toolCounts)}
+            >
+              {toolBadgeLabel(data.toolCounts)}
+            </span>
+          ) : null}
         </span>
       ) : null}
       <Handle type="source" position={Position.Bottom} />
@@ -61,8 +70,26 @@ const NODE_TYPES = { studio: StudioNodeView };
 
 export function TopologyGraph() {
   const phases = useRunStore((s) => s.phases);
+  const tools = useRunStore((s) => s.tools);
 
-  const { nodes, edges } = useMemo(() => buildGraph(phases), [phases]);
+  const { nodes, edges } = useMemo(() => {
+    const built = buildGraph(phases);
+    // Inject per-phase, per-tool call counts onto the phase header nodes (the pure
+    // buildGraph has no tool data — it lives in a separate store slice). Counts are
+    // generic over tool name (web_search/read_file/write_file/…).
+    const perStep = new Map<string, Record<string, number>>();
+    for (const t of tools) {
+      const byTool = perStep.get(t.step_id) ?? {};
+      byTool[t.tool] = (byTool[t.tool] ?? 0) + 1;
+      perStep.set(t.step_id, byTool);
+    }
+    const nodesWithTools = built.nodes.map((n) =>
+      n.data.kind === "phase" && perStep.has(n.data.phaseId)
+        ? { ...n, data: { ...n.data, toolCounts: perStep.get(n.data.phaseId) } }
+        : n,
+    );
+    return { nodes: nodesWithTools, edges: built.edges };
+  }, [phases, tools]);
 
   if (phases.length === 0) {
     return (

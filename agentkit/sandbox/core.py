@@ -93,26 +93,40 @@ def _cap(raw: bytes) -> str:
     return raw.decode("utf-8", "replace")
 
 
+def is_within(path: str | Path, root: str | Path) -> bool:
+    """True iff ``path`` resolves to ``root`` itself or somewhere inside it.
+
+    The single source of truth for the cwd/root containment policy. A relative
+    ``path`` is resolved against ``root``; an absolute ``path`` is taken as-is.
+    Both sides are ``realpath``-resolved first, so symlink and ``..`` escapes
+    are caught (a symlink pointing outside ``root`` resolves outside and fails).
+    Used by the sandbox code-string scanner AND by ``agentkit.tools.fs`` — keep
+    the jail with ONE implementation.
+    """
+    root_resolved = Path(root).resolve()
+    candidate = Path(path)
+    target = candidate if candidate.is_absolute() else root_resolved / candidate
+    try:
+        resolved = target.resolve()
+    except OSError:  # pragma: no cover - defensive
+        return False
+    return resolved == root_resolved or root_resolved in resolved.parents
+
+
 def _assert_paths_within_cwd(code: str, cwd: Path) -> None:
     """Reject a code string that opens a path escaping ``cwd``.
 
     Static, deterministic, conservative: only string literals handed to
-    ``open(...)`` / ``Path(...)`` are inspected. A relative path is resolved
-    against ``cwd``; an absolute path is taken as-is. Any resolved path that is
-    not inside ``cwd`` raises ``ValueError`` before the code is executed.
+    ``open(...)`` / ``Path(...)`` are inspected. Each is checked against the
+    shared ``is_within`` jail; anything outside ``cwd`` raises ``ValueError``
+    before the code is executed.
     """
     cwd_resolved = cwd.resolve()
     for m in _PATH_OPEN_RE.finditer(code):
         raw = m.group("path")
         if not raw:
             continue
-        candidate = Path(raw)
-        target = candidate if candidate.is_absolute() else cwd_resolved / candidate
-        try:
-            resolved = target.resolve()
-        except OSError:  # pragma: no cover - defensive
-            raise ValueError(f"sandbox: cannot resolve path {raw!r}")
-        if resolved != cwd_resolved and cwd_resolved not in resolved.parents:
+        if not is_within(raw, cwd_resolved):
             raise ValueError(
                 f"sandbox: path {raw!r} escapes the cwd jail {cwd_resolved}"
             )
@@ -211,6 +225,12 @@ if __name__ == "__main__":
     sb = SubprocessSandbox()
     with tempfile.TemporaryDirectory() as d:
         cwd = Path(d)
+
+        # shared jail primitive: inside passes, escapes fail.
+        assert is_within("a/b.txt", cwd)
+        assert is_within(str(cwd / "x"), cwd)
+        assert not is_within("../escape.txt", cwd)
+        assert not is_within("/etc/passwd", cwd)
 
         # argv command runs and captures stdout.
         r = sb.run([sys.executable, "-c", "print('hi')"], timeout=10, cwd=cwd)

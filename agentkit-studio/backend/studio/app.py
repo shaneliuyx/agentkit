@@ -35,6 +35,7 @@ from studio.backends import (
     resolve_backend,
 )
 from studio.events import StudioEvent
+from studio.loops import CatalogClient
 from studio.runner import Runner
 from studio.session import SessionRegistry
 
@@ -51,6 +52,16 @@ app.add_middleware(
 )
 
 registry = SessionRegistry()
+
+#: Loaded once on first /loops or seed call (fetch + 24h disk cache).
+_catalog: CatalogClient | None = None
+
+
+def _get_catalog() -> CatalogClient:
+    global _catalog
+    if _catalog is None:
+        _catalog = CatalogClient.load()
+    return _catalog
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +88,7 @@ def post_session(body: dict[str, Any]) -> dict[str, str]:
     embed_spec = body.get("embed") or {}
     mode = body.get("mode", "auto")
     budget = (body.get("budget") or {}).get("ceiling")
+    tools_enabled = bool(body.get("tools_enabled", True))
 
     try:
         backend = resolve_backend(llm_spec)
@@ -98,8 +110,47 @@ def post_session(body: dict[str, Any]) -> dict[str, str]:
         embed_info=embed_info,
         mode=mode,
         budget_ceiling=budget,
+        tools_enabled=tools_enabled,
     )
+    # Optionally seed from a chosen loop-library loop in the same request.
+    loop_id = body.get("loop_id")
+    if loop_id:
+        _seed_session(session.session_id, loop_id)
     return {"session_id": session.session_id}
+
+
+# ---------------------------------------------------------------------------
+# /loops (M7 Wave 1 — loop-library catalog integration)
+# ---------------------------------------------------------------------------
+
+@app.get("/loops")
+def get_loops(requirement: str) -> dict[str, Any]:
+    """Match ``requirement`` against the loop-library catalog → top matches."""
+    matches = _get_catalog().find(requirement)
+    return {"matches": [m.to_dict() for m in matches]}
+
+
+@app.post("/session/{session_id}/seed")
+def post_seed(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Seed a session from a chosen loop. Body: ``{loop_id}``."""
+    loop_id = body.get("loop_id")
+    if not loop_id:
+        raise HTTPException(status_code=400, detail="loop_id required")
+    return _seed_session(session_id, loop_id)
+
+
+def _seed_session(session_id: str, loop_id: str) -> dict[str, Any]:
+    """Adapt a loop's steps and seed the session; raise 404 on unknown ids."""
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="unknown session")
+    catalog = _get_catalog()
+    loop = catalog.get(loop_id)
+    if loop is None:
+        raise HTTPException(status_code=404, detail=f"unknown loop: {loop_id}")
+    steps = catalog.adapt(loop)
+    session.seed(loop_id, steps)
+    return {"session_id": session_id, "loop_id": loop_id, "steps": steps}
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ packages = [
     "agentkit.topology",
     "agentkit.config",
     "agentkit.sandbox",
+    "agentkit.tools",
     "agentkit.gates",
     "agentkit.planner",
     "agentkit.evolve",

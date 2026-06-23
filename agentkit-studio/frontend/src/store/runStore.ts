@@ -18,14 +18,28 @@ import type {
   GraphNodePayload,
   MemoryEntry,
   PlanStep,
+  LoopMatch,
+  LoopSeedPayload,
   RouterPayload,
   RunMode,
   SelfImprovePayload,
   SessionPayload,
   StudioEvent,
+  ToolCallPayload,
+  ToolResultPayload,
   TopologyKind,
   VerifyFinding,
 } from "../api/types";
+
+/** A web/tool activity entry — a tool_call optionally paired with its tool_result. */
+export interface ToolActivity {
+  step_id: string;
+  tool: string;
+  args: Record<string, unknown>;
+  summary: string | null;
+  n_results: number | null;
+  notice: string;
+}
 
 export type RunStatus = "idle" | "connecting" | "running" | "done" | "error";
 
@@ -103,6 +117,14 @@ export interface RunState {
   router: RouterPayload[];
   agentEvents: AgentEventPayload[];
 
+  // ── M7 Wave 1 ──
+  /** Loop-library catalog matches from the last `loops` event. */
+  loops: LoopMatch[];
+  /** Set when the plan was pre-seeded from a loop; null otherwise. */
+  loopSeed: LoopSeedPayload | null;
+  /** Web/tool activity (tool_call merged with its tool_result by step+tool). */
+  tools: ToolActivity[];
+
   // ── actions ──
   apply: (event: StudioEvent) => void;
   beginRun: (sessionId: string, mode: RunMode) => void;
@@ -134,6 +156,9 @@ const initialState = {
   verify: null as { findings: VerifyFinding[]; uncited: string[] } | null,
   router: [] as RouterPayload[],
   agentEvents: [] as AgentEventPayload[],
+  loops: [] as LoopMatch[],
+  loopSeed: null as LoopSeedPayload | null,
+  tools: [] as ToolActivity[],
 };
 
 // ── pure helpers (immutable phase transitions) ─────────────────────────────
@@ -262,6 +287,18 @@ export const useRunStore = create<RunState>((set) => ({
             },
           };
 
+        case "loops":
+          return { loops: event.payload.matches };
+
+        case "loop_seed":
+          return { loopSeed: event.payload };
+
+        case "tool_call":
+          return { tools: [...state.tools, toolActivityFrom(event.payload)] };
+
+        case "tool_result":
+          return { tools: mergeToolResult(state.tools, event.payload) };
+
         case "done":
           return {
             status: "done",
@@ -291,6 +328,58 @@ export const useRunStore = create<RunState>((set) => ({
 
 function budgetFrom(payload: BudgetPayload): BudgetState {
   return { spent: payload.spent, ceiling: payload.ceiling, exceeded: payload.exceeded };
+}
+
+function toolActivityFrom(payload: ToolCallPayload): ToolActivity {
+  return {
+    step_id: payload.step_id,
+    tool: payload.tool,
+    args: payload.args,
+    summary: null,
+    n_results: null,
+    notice: "",
+  };
+}
+
+/**
+ * Merge a tool_result into the FIRST matching open tool_call (same step+tool with
+ * no summary yet) — results pair with calls in FIFO order, so when a step fires the
+ * same tool twice, result #1 fills call #1. If none is open (result without a
+ * preceding call), append a result-only entry so nothing is dropped.
+ */
+function mergeToolResult(
+  tools: ToolActivity[],
+  payload: ToolResultPayload,
+): ToolActivity[] {
+  const openIndex = tools.findIndex(
+    (t) =>
+      t.step_id === payload.step_id &&
+      t.tool === payload.tool &&
+      t.summary === null,
+  );
+  if (openIndex === -1) {
+    return [
+      ...tools,
+      {
+        step_id: payload.step_id,
+        tool: payload.tool,
+        args: {},
+        summary: payload.summary,
+        n_results: payload.n_results,
+        notice: payload.notice,
+      },
+    ];
+  }
+  return tools.map((t, i) =>
+    i === openIndex
+      ? {
+          ...t,
+          summary: payload.summary,
+          n_results: payload.n_results,
+          notice: payload.notice,
+        }
+      : t,
+  );
 }
 
 function assertNever(event: never): never {

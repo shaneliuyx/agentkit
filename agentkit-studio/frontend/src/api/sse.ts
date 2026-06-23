@@ -7,6 +7,8 @@
  */
 import type {
   BackendsResponse,
+  LoopSeedPayload,
+  LoopsPayload,
   SessionRequest,
   SessionResponse,
   StudioEvent,
@@ -50,6 +52,37 @@ export function createSession(req: SessionRequest): Promise<SessionResponse> {
 /** POST /api/cancel/{session_id} → cooperative cancel via interrupt_state. */
 export function cancelRun(sessionId: string): Promise<{ cancelled: boolean }> {
   return postJson<{ cancelled: boolean }>(`/cancel/${sessionId}`, {});
+}
+
+/**
+ * GET /api/loops?requirement=... → loop-library catalog matches (M7 Wave 1).
+ * Returns the same shape as the `loops` SSE payload.
+ */
+export async function fetchLoops(requirement: string): Promise<LoopsPayload> {
+  const res = await fetch(
+    `${API_BASE}/loops?requirement=${encodeURIComponent(requirement)}`,
+  );
+  if (!res.ok) {
+    throw new Error(`GET /loops failed: ${res.status}`);
+  }
+  return (await res.json()) as LoopsPayload;
+}
+
+/**
+ * Seed the session's next run from a chosen loop (M7 Wave 1).
+ * RECONCILED: backend `POST /api/session/{session_id}/seed` (body `{loop_id}`)
+ * returns the adapted plan — `{session_id, loop_id, steps}` — not a bare bool.
+ * The seed banner is driven by the live `loop_seed` SSE frame; this response is
+ * confirmation + the adapted steps.
+ */
+export function seedLoop(
+  sessionId: string,
+  loopId: string,
+): Promise<{ session_id: string } & LoopSeedPayload> {
+  return postJson<{ session_id: string } & LoopSeedPayload>(
+    `/session/${sessionId}/seed`,
+    { loop_id: loopId },
+  );
 }
 
 export interface RunStreamHandle {

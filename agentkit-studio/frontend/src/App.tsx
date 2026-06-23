@@ -22,8 +22,15 @@ export default function App() {
   const session = useRunStore((s) => s.session);
   const errorMessage = useRunStore((s) => s.errorMessage);
   const cancelled = useRunStore((s) => s.cancelled);
+  const loopSeed = useRunStore((s) => s.loopSeed);
+  const loops = useRunStore((s) => s.loops);
   const apply = useRunStore((s) => s.apply);
   const beginRun = useRunStore((s) => s.beginRun);
+
+  // Resolve the seeded loop's human title from the catalog matches; fall back to id.
+  const seededTitle = loopSeed
+    ? (loops.find((l) => l.id === loopSeed.loop_id)?.title ?? loopSeed.loop_id)
+    : null;
 
   // Demo replay: ?demo=1
   useEffect(() => {
@@ -60,6 +67,12 @@ export default function App() {
 
       <main className="studio-main">
         <section className="studio-canvas">
+          {seededTitle ? (
+            <div className="studio-seed-banner" role="status">
+              <span className="mono tag">seeded</span>
+              from loop <strong>{seededTitle}</strong>
+            </div>
+          ) : null}
           <TopologyGraph />
           {cancelled ? (
             <div className="studio-toast studio-toast-cancelled" role="status">
@@ -79,7 +92,7 @@ export default function App() {
       </main>
 
       <section className="studio-drawer">
-        <PanelDrawer />
+        <PanelDrawer sessionId={sessionId} />
       </section>
     </div>
   );

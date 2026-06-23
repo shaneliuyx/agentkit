@@ -13,6 +13,7 @@ from agentkit.sandbox.core import (
     ExecResult,
     Sandbox,
     SubprocessSandbox,
+    is_within,
 )
 from agentkit.sandbox.net_guard import (
     EgressBlocked,
@@ -29,6 +30,7 @@ __all__ = [
     "DockerSandbox",
     "MAX_OUTPUT_BYTES",
     "DEFAULT_TIMEOUT",
+    "is_within",
     "EgressBlocked",
     "allowed_hosts",
     "assert_allowed",

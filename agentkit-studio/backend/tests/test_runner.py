@@ -143,3 +143,64 @@ def test_budget_exceeded_emits_budget(fake_client) -> None:
     runner.run("compare redis and postgres")  # MESH → fan-out → charges > 1
     budget = [e for e in events if e.EVENT_TYPE == "budget"]
     assert budget and budget[0].exceeded is True
+
+
+# --- M7 Wave 1 integration: seeded run + web-search tool loop -----------------
+
+def test_seeded_run_emits_loop_seed(fake_client_factory) -> None:
+    """A session seeded from a loop emits loop_seed and plans from the seed steps."""
+    events: list[StudioEvent] = []
+    session = _make_session()
+    session.tools_enabled = False  # isolate the seeding behavior
+    session.seed(
+        "overnight-docs-sweep",
+        [
+            {"id": "s1", "description": "review changes", "depends_on": [], "role": "engineering"},
+            {"id": "s2", "description": "fix docs", "depends_on": ["s1"], "role": "engineering"},
+        ],
+    )
+    runner = Runner(session, events.append, client_factory=fake_client_factory, embedder=None)
+    runner.run("update the docs")
+    seed = [e for e in events if e.EVENT_TYPE == "loop_seed"]
+    assert seed and seed[0].loop_id == "overnight-docs-sweep"
+    # The plan reflects the seed (2 steps), not cold decomposition of the prompt.
+    plan_evt = [e for e in events if e.EVENT_TYPE == "plan"][0]
+    assert [s["id"] for s in plan_evt.steps] == ["s1", "s2"]
+
+
+def test_tool_loop_emits_tool_events(fake_client) -> None:
+    """With tools enabled + a mocked search_fn, a tool-calling client fires
+    tool_call/tool_result during a phase (web_search runs, no network)."""
+    from agentkit.types import ChatResult
+
+    # A client that requests web_search once, then answers.
+    class _ToolClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, tools=None) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(text="", total_tokens=3,
+                                  tool_calls=[("web_search", {"query": "q"})])
+            return ChatResult(text="answer.", total_tokens=2)
+
+    def factory(_on_usage) -> LLMClient:
+        return _ToolClient()
+
+    def fake_search(query, *, results=5):
+        from web_toolkit import SearchResult
+        return [SearchResult(title="t", url="https://x.test/t", snippet="s")]
+
+    events: list[StudioEvent] = []
+    session = _make_session()  # tools_enabled defaults True
+    runner = Runner(
+        session, events.append, client_factory=factory, embedder=None,
+        search_fn=fake_search,
+    )
+    runner.run("write a short note")  # SINGLE phase
+    tool_calls = [e for e in events if e.EVENT_TYPE == "tool_call"]
+    tool_results = [e for e in events if e.EVENT_TYPE == "tool_result"]
+    assert tool_calls and tool_calls[0].tool == "web_search"
+    assert tool_calls[0].step_id  # attributed to the running phase
+    assert tool_results and tool_results[0].n_results == 1

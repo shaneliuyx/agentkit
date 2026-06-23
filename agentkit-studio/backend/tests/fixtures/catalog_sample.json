@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 2,
+  "name": "Loop Library",
+  "updated": "2026-06-22",
+  "loopCount": 3,
+  "categories": [
+    {
+      "slug": "engineering",
+      "label": "Engineering"
+    },
+    {
+      "slug": "evaluation",
+      "label": "Evaluation"
+    },
+    {
+      "slug": "operations",
+      "label": "Operations"
+    },
+    {
+      "slug": "content",
+      "label": "Content"
+    },
+    {
+      "slug": "design",
+      "label": "Design"
+    }
+  ],
+  "loops": [
+    {
+      "number": "001",
+      "slug": "overnight-docs-sweep",
+      "title": "The docs sweep",
+      "url": "https://signals.forwardfuture.ai/loop-library/loops/overnight-docs-sweep/",
+      "category": {
+        "slug": "engineering",
+        "label": "Engineering"
+      },
+      "author": "Matthew Berman",
+      "published": "2026-06-12",
+      "modified": "2026-06-18",
+      "description": "A reusable AI coding-agent workflow for comparing documentation with the current codebase, fixing drift, and opening a reviewable pull request.",
+      "useWhen": "Use this whenever implementation changes may have left READMEs, setup guides, API references, examples, or runbooks behind.",
+      "prompt": "Whenever a documentation pass is needed, review the codebase in full and make sure all documentation reflects the current implementation. Update stale documentation, verify the changes, then open a pull request.",
+      "verification": {
+        "title": "Documentation matches the current implementation.",
+        "detail": "Finish with a reviewable pull request."
+      },
+      "steps": [
+        "Review implementation changes since the last documentation pass.",
+        "Compare the repository's documentation with the code, configuration, commands, and behavior that now ship.",
+        "Update only stale material, then verify commands, links, and examples against the current repository.",
+        "Run the relevant checks and open a pull request that explains the documentation drift and the fixes."
+      ],
+      "why": "The loop ties documentation to the implementation instead of relying on memory. Requiring a pull request creates a visible diff, a review point, and a durable record of what changed.",
+      "implementationNote": "Keep the scope tied to real implementation changes. Do not rewrite accurate documentation just to create activity.",
+      "keywords": [
+        "AI coding agent",
+        "documentation audit",
+        "documentation drift",
+        "documentation maintenance",
+        "pull request workflow"
+      ],
+      "related": [
+        {
+          "slug": "production-error-sweep",
+          "title": "The production error sweep",
+          "url": "https://signals.forwardfuture.ai/loop-library/loops/production-error-sweep/"
+        },
+        {
+          "slug": "architecture-satisfaction-loop",
+          "title": "The architecture satisfaction loop",
+          "url": "https://signals.forwardfuture.ai/loop-library/loops/architecture-satisfaction-loop/"
+        }
+      ]
+    },
+    {
+      "number": "006",
+      "slug": "seo-geo-visibility-loop",
+      "title": "The SEO/GEO visibility loop",
+      "url": "https://signals.forwardfuture.ai/loop-library/loops/seo-geo-visibility-loop/",
+      "category": {
+        "slug": "content",
+        "label": "Content"
+      },
+      "author": "Matthew Berman",
+      "published": "2026-06-13",
+      "modified": "2026-06-17",
+      "description": "A repeatable search visibility workflow that fixes the highest-impact crawl, indexation, page-intent, citation, and answer-readiness gaps first.",
+      "useWhen": "Use this when a site has a defined set of priority pages and target questions, and you can rerun the same technical crawl and search visibility checks after each change.",
+      "prompt": "Run an SEO/GEO audit across crawlability, indexation, page intent, titles, internal links, structured data, source citations, and answer-first content. Rank the gaps by expected impact, fix the highest-leverage issue, then rerun the same crawl and target-query benchmark across search engines and AI answer engines. Repeat until no critical technical issues remain, every priority query maps to a clear answer-ready page, and the benchmark shows no high-impact gap left to fix.",
+      "verification": {
+        "title": "Priority pages are indexable, answer-ready, and technically sound.",
+        "detail": "The repeatable crawl and query benchmark finds no remaining high-impact gaps."
+      },
+      "steps": [
+        "Record the target queries, answer engines, search engines, locale, date, and benchmark method.",
+        "Audit crawlability, indexation, page intent, titles, internal links, structured data, citations, and visible answer quality.",
+        "Rank findings by expected impact and fix one high-leverage issue at a time.",
+        "Rerun the original crawl and query benchmark until no critical technical issue or high-impact content gap remains."
+      ],
+      "why": "A fixed benchmark makes visibility work measurable and prevents a long list of low-value SEO tasks from replacing the highest-impact fix. Mapping each priority query to a strong page also gives search and answer systems a clear destination.",
+      "implementationNote": "AI citations and search results vary by time, location, account state, and model. Record the test conditions and treat sampled visibility as evidence, not a guaranteed ranking.",
+      "keywords": [
+        "SEO audit",
+        "generative engine optimization",
+        "GEO workflow",
+        "AI search visibility",
+        "answer engine optimization"
+      ],
+      "related": [
+        {
+          "slug": "overnight-docs-sweep",
+          "title": "The docs sweep",
+          "url": "https://signals.forwardfuture.ai/loop-library/loops/overnight-docs-sweep/"
+        },
+        {
+          "slug": "production-error-sweep",
+          "title": "The production error sweep",
+          "url": "https://signals.forwardfuture.ai/loop-library/loops/production-error-sweep/"
+        }
+      ]
+    },
+    {
+      "number": "009",
+      "slug": "quality-streak-loop",
+      "title": "The quality streak loop",
+      "url": "https://signals.forwardfuture.ai/loop-library/loops/quality-streak-loop/",
+      "category": {
+        "slug": "evaluation",
+        "label": "Evaluation"
+      },
+      "author": "Matthew Berman",
+      "published": "2026-06-16",
+      "modified": "2026-06-17",
+      "description": "A realistic product-testing workflow that turns every failure into documented regression coverage and restarts the success streak after each fix.",
+      "useWhen": "Use this when product quality needs a strict consecutive-success bar and failures should permanently improve the test and benchmark suite.",
+      "prompt": "Test realistic scenarios. When one fails, document it, add regression and benchmark coverage, fix it, and restart the streak. Stop after [N] successful cases in a row.",
+      "verification": {
+        "title": "The latest [N] realistic cases pass in a row.",
+        "detail": "Every earlier failure is documented, fixed, and protected by regression and benchmark coverage."
+      },
+      "steps": [
+        "Define realistic scenarios, the quality bar, the value of [N], and the evidence required for a pass.",
+        "Run cases one at a time under consistent conditions and preserve the result for review.",
+        "On any failure, document it, add regression and benchmark coverage, fix the cause, verify the fix, and reset the streak to zero.",
+        "Stop only after [N] consecutive cases meet the original quality bar."
+      ],
+      "why": "Restarting the streak prevents isolated successes from hiding intermittent weaknesses. Converting each failure into durable coverage makes the evaluation stronger after every miss.",
+      "implementationNote": "Choose [N] before the run and keep the scenario distribution representative. Do not lower the quality bar or avoid difficult cases to preserve the streak.",
+      "keywords": [
+        "AI product evaluation",
+        "quality streak",
+        "regression testing",
+        "benchmark coverage",
+        "realistic scenarios"
+      ],
+      "related": [
+        {
+          "slug": "full-product-evaluation-loop",
+          "title": "The full product evaluation loop",
+          "url": "https://signals.forwardfuture.ai/loop-library/loops/full-product-evaluation-loop/"
+        },
+        {
+          "slug": "100-percent-test-coverage-loop",
+          "title": "The 100% test coverage loop",
+          "url": "https://signals.forwardfuture.ai/loop-library/loops/100-percent-test-coverage-loop/"
+        }
+      ]
+    }
+  ]
+}

@@ -46,6 +46,13 @@ export interface StudioNodeData {
    * reduce — rendered as an "N calls" badge, distinct from the worker-node count.
    */
   nCalls?: number | null;
+  /**
+   * Per-tool call counts this phase emitted (M7 Wave 1, generalized over any tool
+   * name — web_search/read_file/write_file/…). Set on the `phase` header node from
+   * store tool activity; drives the tool badge, distinct from `nCalls`. Injected
+   * post-`buildGraph` since tool data lives outside the pure phase list.
+   */
+  toolCounts?: Record<string, number>;
 }
 
 export type StudioNode = Node<StudioNodeData>;

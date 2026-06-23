@@ -19,6 +19,13 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
 
+# Track agentkit from source (editable) — a non-editable copy froze a stale
+# snapshot that lacked `agentkit.sandbox.is_within` / `agentkit.tools.fs`, so
+# studio's file-tool jail couldn't import the shared primitive. Editable keeps
+# the sibling lib and studio's runtime in lockstep.
+[tool.uv.sources]
+agentkit = { path = "/Users/yuxinliu/code/agentkit", editable = true }
+
 [tool.setuptools]
 packages = [
     "studio",

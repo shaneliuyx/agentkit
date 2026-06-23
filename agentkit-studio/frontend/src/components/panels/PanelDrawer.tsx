@@ -1,6 +1,7 @@
 /**
- * Tabbed panel drawer (SPEC §6) hosting all 7 comprehensive panels. Each tab shows
- * a live count badge so the operator sees activity without switching tabs.
+ * Tabbed panel drawer hosting the comprehensive panels + the M7 Wave 1 additions
+ * (Loops catalog, web/Tools activity). Each tab shows a live count badge so the
+ * operator sees activity without switching tabs.
  */
 import { useState } from "react";
 import { useRunStore } from "../../store/runStore";
@@ -11,9 +12,13 @@ import { SecurityPanel } from "./SecurityPanel";
 import { DagPanel } from "./DagPanel";
 import { VerifyPanel } from "./VerifyPanel";
 import { RouterPanel } from "./RouterPanel";
+import { LoopsPanel } from "./LoopsPanel";
+import { ToolsPanel } from "./ToolsPanel";
 import "./panels.css";
 
 type TabId =
+  | "loops"
+  | "tools"
   | "router"
   | "memory"
   | "selfimprove"
@@ -23,6 +28,8 @@ type TabId =
   | "verify";
 
 const TABS: { id: TabId; label: string }[] = [
+  { id: "loops", label: "Loops" },
+  { id: "tools", label: "Tools" },
   { id: "router", label: "Router" },
   { id: "memory", label: "Memory" },
   { id: "selfimprove", label: "Self-improve" },
@@ -32,11 +39,17 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "verify", label: "Verify" },
 ];
 
-export function PanelDrawer() {
-  const [active, setActive] = useState<TabId>("router");
+interface PanelDrawerProps {
+  sessionId: string | null;
+}
+
+export function PanelDrawer({ sessionId }: PanelDrawerProps) {
+  const [active, setActive] = useState<TabId>("loops");
 
   // Per-tab counts for the badges.
   const counts = useRunStore((s) => ({
+    loops: s.loops.length,
+    tools: s.tools.length,
     router: s.router.length,
     memory: s.memory.length,
     selfimprove: s.selfimprove.length + s.agentEvents.length,
@@ -66,6 +79,8 @@ export function PanelDrawer() {
         ))}
       </div>
       <div className="drawer-body">
+        {active === "loops" && <LoopsPanel sessionId={sessionId} />}
+        {active === "tools" && <ToolsPanel />}
         {active === "router" && <RouterPanel />}
         {active === "memory" && <MemoryPanel />}
         {active === "selfimprove" && <SelfImprovePanel />}

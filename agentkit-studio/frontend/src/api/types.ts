@@ -71,6 +71,29 @@ export interface DagNode {
   status: string;
 }
 
+/**
+ * A loop-library catalog match (M7 Wave 1). RECONCILED against backend
+ * `loops.LoopMatch.to_dict()`: mapped keys id←slug, summary←description,
+ * trigger←useWhen, plus the real `keywords` field and a ranking `score`.
+ */
+export interface LoopMatch {
+  id: string;
+  title: string;
+  summary: string;
+  url: string;
+  trigger: string;
+  keywords: string[];
+  score: number;
+}
+
+/** A pre-seeded plan step delivered by a loop seed (M7 Wave 1). */
+export interface LoopSeedStep {
+  id: string;
+  description: string;
+  depends_on: string[];
+  role: string;
+}
+
 // ── Per-event payloads (one per SPEC §4 row) ───────────────────────────────
 
 export interface SessionPayload {
@@ -196,6 +219,31 @@ export interface ErrorPayload {
   where: string;
 }
 
+// ── M7 Wave 1: loop library + web-tool activity ────────────────────────────
+
+export interface LoopsPayload {
+  matches: LoopMatch[];
+}
+
+export interface LoopSeedPayload {
+  loop_id: string;
+  steps: LoopSeedStep[];
+}
+
+export interface ToolCallPayload {
+  step_id: string;
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+export interface ToolResultPayload {
+  step_id: string;
+  tool: string;
+  summary: string;
+  n_results: number;
+  notice: string;
+}
+
 // ── The discriminated union ────────────────────────────────────────────────
 
 /** Base envelope every frame shares. */
@@ -225,7 +273,11 @@ export type StudioEvent =
   | Frame<"dag", DagPayload>
   | Frame<"verify", VerifyPayload>
   | Frame<"done", DonePayload>
-  | Frame<"error", ErrorPayload>;
+  | Frame<"error", ErrorPayload>
+  | Frame<"loops", LoopsPayload>
+  | Frame<"loop_seed", LoopSeedPayload>
+  | Frame<"tool_call", ToolCallPayload>
+  | Frame<"tool_result", ToolResultPayload>;
 
 export type StudioEventType = StudioEvent["type"];
 

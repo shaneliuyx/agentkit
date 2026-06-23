@@ -241,6 +241,55 @@ class DagEvent(StudioEvent):
 
 
 @dataclass(frozen=True)
+class LoopsEvent(StudioEvent):
+    """``loops`` — loop-library catalog matches for a requirement.
+
+    ``matches`` = ``[{id, title, summary, url, trigger, keywords, score}]``.
+    Field names align to the REAL catalog.json (schemaVersion 2): a catalog loop
+    has no ``id``/``summary``/``trigger`` field, so loops.py maps ``id←slug``,
+    ``summary←description``, ``trigger←useWhen`` and adds ``keywords``/``score``.
+    """
+
+    EVENT_TYPE: str = field(default="loops", init=False, repr=False)
+    matches: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class LoopSeedEvent(StudioEvent):
+    """``loop_seed`` — the chosen loop's adapted seed steps.
+
+    ``steps`` = ``[{id, description, depends_on, role}]`` — a linear DAG
+    synthesized from the loop's flat ``steps`` list (mirrors planner._linear_steps).
+    """
+
+    EVENT_TYPE: str = field(default="loop_seed", init=False, repr=False)
+    loop_id: str = ""
+    steps: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ToolCallEvent(StudioEvent):
+    """``tool_call`` — an agent tool invocation (e.g. web_search)."""
+
+    EVENT_TYPE: str = field(default="tool_call", init=False, repr=False)
+    step_id: str = ""
+    tool: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolResultEvent(StudioEvent):
+    """``tool_result`` — the result of an agent tool invocation."""
+
+    EVENT_TYPE: str = field(default="tool_result", init=False, repr=False)
+    step_id: str = ""
+    tool: str = ""
+    summary: str = ""
+    n_results: int = 0
+    notice: str = ""
+
+
+@dataclass(frozen=True)
 class VerifyEvent(StudioEvent):
     """``verify`` — from ``quality.verify``. ``findings`` =
     ``[{claim, supported, sources}]``; ``uncited`` = claim strings."""

@@ -145,6 +145,26 @@ try:
 except ImportError:  # pragma: no cover - defensive optional-dep guard
     pass
 
+# Optional: tools (reusable, jailed tools for the agent loop).
+try:
+    from agentkit.tools import (
+        FS_TOOL_SCHEMAS,
+        FileToolError,
+        make_fs_tools,
+        read_file,
+        write_file,
+    )
+
+    __all__ += [
+        "read_file",
+        "write_file",
+        "FileToolError",
+        "FS_TOOL_SCHEMAS",
+        "make_fs_tools",
+    ]
+except ImportError:  # pragma: no cover - defensive optional-dep guard
+    pass
+
 # Optional: backends (concrete LLMClient adapters).
 try:
     from agentkit.backends import CliLLMClient

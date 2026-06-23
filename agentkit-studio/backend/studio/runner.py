@@ -37,14 +37,18 @@ from studio.events import (
     ErrorEvent,
     GateEvent,
     GraphEvent,
+    LoopSeedEvent,
     PhaseDoneEvent,
     PhaseStartEvent,
     PlanEvent,
     SessionEvent,
     StudioEvent,
     TokenEvent,
+    ToolCallEvent,
+    ToolResultEvent,
     TopologyEvent,
 )
+from studio.loops import make_seeded_decomposer
 from studio.panels.dag import DagTracker
 from studio.panels.evolve import build_evolve_event
 from studio.panels.memory import MemoryTracker
@@ -54,6 +58,8 @@ from studio.panels.selfimprove import SelfImproveTracker
 from studio.panels.verify import build_verify_event
 from studio.session import Session
 from studio.shared_bridge import TokenAccounting, UsageReport
+from studio.tools import ToolAugmentedClient, web_toolkit_available
+from studio.workspace import Workspace
 
 #: Emit sink: the runner calls this for every event; app.py wires it to a queue.
 Emit = Callable[[StudioEvent], None]
@@ -155,12 +161,18 @@ class Runner:
         client_factory: Callable[[Callable[[UsageReport], None]], LLMClient] | None = None,
         embedder: Any = None,
         sandbox_cwd: str = ".",
+        search_fn: Callable[..., list[Any]] | None = None,
+        workspace_root: Any = None,
     ) -> None:
         self._session = session
         self._emit = emit
         self._client_factory = client_factory
         self._embedder = embedder
         self._sandbox_cwd = sandbox_cwd
+        #: Injected web_search fn for the tool loop (tests pass a stub → no net).
+        self._search_fn = search_fn
+        #: Workspace root override for the file-tool jail (tests pass a tmp dir).
+        self._workspace_root = workspace_root
         self._acc = TokenAccounting()
         self._current_step_id = ""
         #: Wall-clock start of the run, stamped in run(); the done frame reports
@@ -233,10 +245,19 @@ class Runner:
         )
 
         # build the usage-capturing client (injected factory in tests)
-        client = self._build_client()
+        base_client = self._build_client()
+        # Wrap in a web_search tool loop when tools are enabled (run_plan stays
+        # unchanged — it sees a plain LLMClient that happens to run a tool loop).
+        client = self._maybe_tool_augment(base_client)
 
-        # plan → emit plan
-        plan_obj = plan(requirement)
+        # plan → emit plan. A seeded session pre-seeds decomposition from a
+        # chosen loop-library loop (emit loop_seed); else cold decomposition.
+        seed_steps = session.seed_steps
+        if seed_steps:
+            plan_obj = plan(requirement, decomposer=make_seeded_decomposer(seed_steps))
+            self._emit(LoopSeedEvent(loop_id=session.seed_loop_id, steps=seed_steps))
+        else:
+            plan_obj = plan(requirement)
         self._emit(
             PlanEvent(
                 task=plan_obj.task,
@@ -374,6 +395,37 @@ class Runner:
         backend = resolve_backend(self._session.llm_spec)
         # session info may be filled lazily; ensure label/model present
         return build_chat_client(backend, self._on_usage)
+
+    def _maybe_tool_augment(self, client: LLMClient) -> LLMClient:
+        """Wrap ``client`` in the tool loop (web_search + jailed file tools) when
+        tools are enabled.
+
+        Gated on ``session.tools_enabled`` AND web_toolkit being importable; in
+        tests an injected ``search_fn`` (set via ``self._search_fn``) bypasses the
+        import so no network is hit. The file tools are confined to a per-session
+        :class:`~studio.workspace.Workspace` (realpath jail). Returns the bare
+        client when tools are off.
+        """
+        enabled = self._session.tools_enabled and (
+            self._search_fn is not None or web_toolkit_available()
+        )
+        if not enabled:
+            return client
+        workspace = Workspace(self._session.session_id, root=self._workspace_root)
+        return ToolAugmentedClient(
+            client,
+            on_tool_call=lambda sid, tool, args: self._emit(
+                ToolCallEvent(step_id=sid, tool=tool, args=args)
+            ),
+            on_tool_result=lambda sid, tool, summary, n, notice: self._emit(
+                ToolResultEvent(
+                    step_id=sid, tool=tool, summary=summary, n_results=n, notice=notice
+                )
+            ),
+            step_id_getter=lambda: self._current_step_id,
+            search_fn=self._search_fn,
+            workspace=workspace,
+        )
 
     def _gate_event_for(self, step_id: str, output: str) -> GateEvent:
         """Run the phase output through the security gate as a text proposal."""

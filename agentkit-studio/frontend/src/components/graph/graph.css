@@ -94,6 +94,17 @@
   border-radius: 999px;
 }
 
+/* Web/tool activity badge — accent-tinted, distinct from the neutral calls badge. */
+.topo-node-web {
+  font-size: 0.6rem;
+  color: var(--color-accent);
+  letter-spacing: 0.04em;
+  padding: 1px var(--space-2);
+  border: 1px solid color-mix(in oklch, var(--color-accent), transparent 55%);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
 /* React Flow edge color follows the dark theme. */
 .react-flow__edge-path {
   stroke: var(--color-border-strong);

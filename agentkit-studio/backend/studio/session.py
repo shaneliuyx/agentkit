@@ -31,6 +31,11 @@ class Session:
     embed_info: dict[str, Any]
     mode: str = "auto"
     budget_ceiling: float | None = None
+    #: M7: web-search tool loop on/off (default on when web_toolkit importable).
+    tools_enabled: bool = True
+    #: M7: loop-library seed — adapted steps + the source loop id (empty = cold).
+    seed_steps: list[dict[str, Any]] = field(default_factory=list)
+    seed_loop_id: str = ""
     #: Cooperative-cancel snapshot (graceful-stop semantics from shared infra).
     interrupt: InterruptStateSnapshot = field(
         default_factory=lambda: InterruptStateSnapshot(
@@ -39,6 +44,11 @@ class Session:
     )
     #: True while a /run stream is active for this session (one run at a time).
     running: bool = False
+
+    def seed(self, loop_id: str, steps: list[dict[str, Any]]) -> None:
+        """Pre-seed this session from a chosen loop-library loop."""
+        self.seed_loop_id = loop_id
+        self.seed_steps = steps
 
     @property
     def cancel_requested(self) -> bool:
@@ -72,6 +82,7 @@ class SessionRegistry:
         embed_info: dict[str, Any],
         mode: str,
         budget_ceiling: float | None,
+        tools_enabled: bool = True,
     ) -> Session:
         """Register a new session and return it."""
         session = Session(
@@ -82,6 +93,7 @@ class SessionRegistry:
             embed_info=embed_info,
             mode=mode,
             budget_ceiling=budget_ceiling,
+            tools_enabled=tools_enabled,
         )
         with self._lock:
             self._sessions[session.session_id] = session
