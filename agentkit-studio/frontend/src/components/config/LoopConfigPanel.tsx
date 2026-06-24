@@ -62,7 +62,7 @@ async function _postGoal(
     if (goal.max_turns) payload.max_turns = Number(goal.max_turns);
     if (goal.max_tokens) payload.max_tokens = Number(goal.max_tokens);
     if (goal.timeout_s) payload.timeout_s = Number(goal.timeout_s);
-    const res = await fetch(`http://localhost:8000/session/${sessionId}/goal`, {
+    const res = await fetch(`/api/session/${sessionId}/goal`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -120,7 +120,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   // Load scheduler triggers when tab opened
   useEffect(() => {
     if (tab !== "scheduler") return;
-    fetch("http://localhost:8000/scheduler")
+    fetch("/api/scheduler")
       .then((r) => r.json())
       .then((d) => setTriggers(d.triggers ?? []))
       .catch(() => setTriggers([]));
@@ -149,7 +149,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
 
   const handleClearGoal = async () => {
     if (!sessionId) return;
-    const res = await fetch(`http://localhost:8000/session/${sessionId}/goal`, {
+    const res = await fetch(`/api/session/${sessionId}/goal`, {
       method: "DELETE",
     }).catch(() => null);
     setGoalStatus(res?.ok ? "✓ Goal cleared" : "✗ Clear failed");
@@ -162,7 +162,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
     setGoalStatus(null);
     try {
       const res = await fetch(
-        `http://localhost:8000/session/${sessionId}/goal/suggest`,
+        `/api/session/${sessionId}/goal/suggest`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -202,7 +202,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const handleAddCron = async () => {
     if (!cronSpec.trim()) return;
     setSchedStatus(null);
-    const res = await fetch("http://localhost:8000/scheduler/cron", {
+    const res = await fetch("/api/scheduler/cron", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ spec: cronSpec.trim(), chain_id: cronChain.trim() || null }),
@@ -212,7 +212,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
       setCronSpec("");
       setCronChain("");
       // Refresh list
-      fetch("http://localhost:8000/scheduler")
+      fetch("/api/scheduler")
         .then((r) => r.json())
         .then((d) => setTriggers(d.triggers ?? []))
         .catch(() => null);
