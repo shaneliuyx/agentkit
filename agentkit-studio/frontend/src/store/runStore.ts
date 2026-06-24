@@ -32,6 +32,12 @@ import type {
   VerifyFinding,
 } from "../api/types";
 import { toTopologyKind } from "../api/types";
+import type {
+  GoalMetPayload,
+  HillClimbPayload,
+  SchedulerPayload,
+  ChainPayload,
+} from "../api/types";
 
 /** A web/tool activity entry — a tool_call optionally paired with its tool_result. */
 export interface ToolActivity {
@@ -135,6 +141,12 @@ export interface RunState {
   /** Loop Doctor health checks from the last `loopdoctor` event (replaced each time). */
   loopDoctor: LoopDoctorCheck[];
 
+  // ── Loop Engineering (agentkit.loop) ──
+  goalMet: GoalMetPayload | null;
+  hillClimb: HillClimbPayload[];
+  schedulerTriggers: SchedulerPayload | null;
+  chainResults: ChainPayload[];
+
   // ── actions ──
   apply: (event: StudioEvent) => void;
   beginRun: (sessionId: string, mode: RunMode) => void;
@@ -173,6 +185,10 @@ const initialState = {
   loopSeed: null as LoopSeedPayload | null,
   tools: [] as ToolActivity[],
   loopDoctor: [] as LoopDoctorCheck[],
+  goalMet: null as GoalMetPayload | null,
+  hillClimb: [] as HillClimbPayload[],
+  schedulerTriggers: null as SchedulerPayload | null,
+  chainResults: [] as ChainPayload[],
   pendingContinue: null as string | null,
 };
 
@@ -318,6 +334,18 @@ export const useRunStore = create<RunState>((set) => ({
 
         case "loopdoctor":
           return { loopDoctor: event.payload.checks };
+
+        case "goal_met":
+          return { goalMet: event.payload };
+
+        case "hill_climb":
+          return { hillClimb: [...state.hillClimb, event.payload] };
+
+        case "scheduler":
+          return { schedulerTriggers: event.payload };
+
+        case "chain":
+          return { chainResults: [...state.chainResults, event.payload] };
 
         case "done":
           return {

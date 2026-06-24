@@ -251,10 +251,11 @@ def post_chat(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "follow-up questions. Be concise and accurate.\n\n"
         f"--- RESULT ---\n{session.last_run.result}\n--- END RESULT ---"
     )
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-    for turn in history:
-        messages.append({"role": turn["role"], "content": turn["content"]})
-    messages.append({"role": "user", "content": message})
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        *({"role": turn["role"], "content": turn["content"]} for turn in history),
+        {"role": "user", "content": message},
+    ]
 
     result = client.chat(messages)
     return {"reply": result.text}
@@ -346,3 +347,117 @@ def _port_open(host: str, port: int, timeout: float = 0.2) -> bool:
             return True
     except OSError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# /session/{id}/goal — set or clear the LoopGoal for a session
+# ---------------------------------------------------------------------------
+
+@app.post("/session/{session_id}/goal")
+def set_goal(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Set or clear the LoopGoal for a session.
+
+    Body: {end_state, evidence_cmd?, success_pattern?, constraints?,
+           max_turns?, max_tokens?, timeout_s?}
+    Send {} or {end_state: ""} to clear.
+    """
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    end_state = body.get("end_state", "")
+    if not end_state:
+        session.goal = None
+        return {"cleared": True}
+
+    try:
+        from agentkit.loop.goal import LoopGoal
+        session.goal = LoopGoal(
+            end_state=end_state,
+            evidence_cmd=body.get("evidence_cmd") or None,
+            success_pattern=body.get("success_pattern") or None,
+            constraints=tuple(body.get("constraints") or []),
+            max_turns=int(body.get("max_turns", 25)),
+            max_tokens=int(body.get("max_tokens", 100_000)),
+            timeout_s=float(body.get("timeout_s", 1800.0)),
+        )
+    except (ImportError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"set": True, "end_state": session.goal.end_state}
+
+
+# ---------------------------------------------------------------------------
+# /scheduler — read registered Scheduler triggers
+# ---------------------------------------------------------------------------
+
+@app.get("/scheduler")
+def get_scheduler() -> dict[str, Any]:
+    """Return current scheduler trigger list (stub — wire via agentkit.runtime.scheduler)."""
+    return {
+        "triggers": [],
+        "note": "Wire cron/webhook triggers via agentkit.runtime.scheduler.Scheduler",
+    }
+
+
+# ---------------------------------------------------------------------------
+# /chain/run — synchronous LoopChain execution
+# ---------------------------------------------------------------------------
+
+@app.post("/chain/run")
+def run_chain(body: dict[str, Any]) -> dict[str, Any]:
+    """Run a LoopChain described as a JSON spec.
+
+    Body: {
+      "specs": [
+        {"name": "step1", "description": "...", "depends_on": []},
+        {"name": "step2", "description": "...", "depends_on": ["step1"]}
+      ],
+      "initial_ctx": {"task": "..."}
+    }
+    """
+    try:
+        from agentkit.loop.chain import LoopChain, LoopSpec
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"agentkit.loop not installed: {exc}") from exc
+
+    specs_raw: list[dict[str, Any]] = body.get("specs", [])
+    initial_ctx: dict[str, Any] = body.get("initial_ctx", {})
+
+    if not specs_raw:
+        raise HTTPException(status_code=400, detail="specs must be non-empty")
+
+    chain = LoopChain()
+    for s in specs_raw:
+        name = s.get("name", "")
+        if not name:
+            raise HTTPException(status_code=400, detail="each spec must have a name")
+        description = s.get("description", name)
+        depends_on = tuple(s.get("depends_on") or [])
+
+        def _make_runner(desc: str):  # type: ignore[no-untyped-def]
+            def _run(ctx: dict) -> dict:
+                return {"description": desc, "status": "stub — wire a real runner"}
+            return _run
+
+        try:
+            chain.add(LoopSpec(name=name, runner=_make_runner(description), depends_on=depends_on))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result = chain.run(initial_ctx)
+    return {
+        "status": result.status,
+        "outputs": {
+            k: {kk: str(vv)[:500] for kk, vv in v.items()}
+            for k, v in result.outputs.items()
+        },
+        "results": [
+            {
+                "name": r.name,
+                "skipped": r.skipped,
+                "verdict": r.verdict.reason if r.verdict else "no goal",
+            }
+            for r in result.results
+        ],
+    }

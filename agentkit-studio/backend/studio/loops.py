@@ -196,7 +196,12 @@ def make_seeded_decomposer(seed_steps: list[dict[str, Any]]):
         # Inject the task into s1 so downstream steps know the topic via upstream
         # folding. Without this the loop's abstract process steps reach the LLM
         # with no subject matter — the agent has no idea what to work on.
-        steps[0]["description"] = f"Task: {task.strip()}\n\n{steps[0]['description']}"
+        steps[0]["description"] = (
+            f"Task: {task.strip()}\n\n"
+            f"Write your primary artifact or research output to a file named 'artifact.md'. "
+            f"Subsequent steps will read 'artifact.md' to continue building on your work.\n\n"
+            f"{steps[0]['description']}"
+        )
         return steps
 
     return _decompose

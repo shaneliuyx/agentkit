@@ -345,3 +345,50 @@ class ErrorEvent(StudioEvent):
     EVENT_TYPE: str = field(default="error", init=False, repr=False)
     message: str = ""
     where: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Loop Engineering (agentkit.loop) events — added for loop-engineering shared lib
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class GoalMetEvent(StudioEvent):
+    """``goal_met`` — emitted when check_goal() returns met=True during a run."""
+
+    EVENT_TYPE: str = field(default="goal_met", init=False, repr=False)
+    end_state: str = ""
+    evidence: str = ""
+    reason: str = ""
+    step_id: str = ""
+
+
+@dataclass(frozen=True)
+class HillClimbEvent(StudioEvent):
+    """``hill_climb`` — per-epoch detail from a DGM optimization run."""
+
+    EVENT_TYPE: str = field(default="hill_climb", init=False, repr=False)
+    epoch: int = 0
+    score: float = 0.0
+    delta: float = 0.0
+    status: str = "reject"
+    note: str = ""
+    weaknesses: list = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SchedulerEvent(StudioEvent):
+    """``scheduler`` — current state of the runtime Scheduler."""
+
+    EVENT_TYPE: str = field(default="scheduler", init=False, repr=False)
+    triggers: list = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ChainEvent(StudioEvent):
+    """``chain`` — progress frame from a LoopChain.run() call."""
+
+    EVENT_TYPE: str = field(default="chain", init=False, repr=False)
+    spec_name: str = ""
+    status: str = "done"
+    skipped: bool = False
+    output_summary: str = ""

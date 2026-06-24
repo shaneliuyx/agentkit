@@ -36,6 +36,7 @@ from studio.events import (
     DoneEvent,
     ErrorEvent,
     GateEvent,
+    GoalMetEvent,
     GraphEvent,
     LoopSeedEvent,
     PhaseDoneEvent,
@@ -336,8 +337,24 @@ class Runner:
             upstream = "\n\n".join(
                 f"[{dep}] {outputs[dep]}" for dep in step.depends_on if outputs.get(dep)
             )
+            is_last = step is plan_obj.steps[-1]
+            desc = step.description
+            # On the final step, if there is upstream content, prefix with an
+            # explicit instruction to output the artifact rather than asking for
+            # more context. Loop catalog "stop" steps are written for humans; the
+            # LLM needs an imperative framing to produce the artifact, not a
+            # meta-decision about whether to continue.
+            if is_last and upstream:
+                desc = (
+                    f"You are the final step of a multi-step agent workflow. "
+                    f"The prior steps have already produced the following output. "
+                    f"Your job: return the complete, final artifact exactly as produced "
+                    f"by the prior steps (optionally refining it). "
+                    f"Do NOT ask for more context or input — all necessary work is already done.\n\n"
+                    f"Workflow instruction: {desc}"
+                )
             sub_step = replace(
-                step, description=_with_upstream(step.description, upstream), depends_on=()
+                step, description=_with_upstream(desc, upstream), depends_on=()
             )
             sub_plan = Plan(task=plan_obj.task, steps=(sub_step,))
 
@@ -386,6 +403,22 @@ class Runner:
             gate_events.append(gate_event)
             self._emit(gate_event)
 
+            # Goal check: if session has a LoopGoal, verify after each phase.
+            if getattr(session, 'goal', None) is not None:
+                try:
+                    from agentkit.loop.goal import check_goal
+                    _verdict = check_goal(session.goal, cwd=self._sandbox_cwd)
+                    if _verdict.met:
+                        self._emit(GoalMetEvent(
+                            end_state=session.goal.end_state,
+                            evidence=_verdict.evidence,
+                            reason=_verdict.reason,
+                            step_id=step.id,
+                        ))
+                        break
+                except Exception:  # noqa: BLE001
+                    pass  # agentkit.loop not installed → skip silently
+
         # budget gauge
         if budget is not None:
             self._emit(
@@ -396,8 +429,30 @@ class Runner:
                 )
             )
 
+        # If the final step produced less than its direct predecessor, fall back
+        # to the predecessor's output. In research loops, the last step is a
+        # meta "stop/continue" decision — the real artifact lives in the step it
+        # depends on (its direct predecessor in the DAG).
+        last_step = plan_obj.steps[-1] if plan_obj.steps else None
+        predecessor_id = (
+            last_step.depends_on[-1] if (last_step and last_step.depends_on) else None
+        )
+        predecessor_output = outputs.get(predecessor_id, "") if predecessor_id else ""
+        result_output = (
+            predecessor_output
+            if predecessor_output and len(predecessor_output) > len(final_output)
+            else final_output
+        )
+
+        # Steps that write their artifact to artifact.md produce content in a
+        # file rather than in the LLM text response. Prefer the file when it
+        # exists and is longer than either the final or predecessor text output.
+        ws_artifact = self._read_workspace_artifact()
+        if ws_artifact and len(ws_artifact) > len(result_output):
+            result_output = ws_artifact
+
         # verification (pure tier, always runs)
-        verify_event = build_verify_event(final_output)
+        verify_event = build_verify_event(result_output)
         self._emit(verify_event)
 
         # Loop Doctor (M8): audit the finished run against loop-library's
@@ -419,13 +474,13 @@ class Runner:
                 topology=topology_map,
                 loopdoctor_checks=loopdoctor_event.checks,
                 budget_ceiling=session.budget_ceiling,
-                result=final_output,
+                result=result_output,
                 cancelled=cancelled,
             )
         )
 
         # done
-        self._emit(self._done_event(final_output, cancelled=cancelled))
+        self._emit(self._done_event(result_output, cancelled=cancelled))
 
     # -- helpers -----------------------------------------------------------
 
@@ -491,6 +546,17 @@ class Runner:
             cancelled=cancelled,
             result_path=self._write_result(final_output),
         )
+
+    def _read_workspace_artifact(self) -> str:
+        """Return content of artifact.md from the workspace if it exists."""
+        try:
+            ws = Workspace(self._session.session_id, root=self._workspace_root)
+            artifact = ws.root / "artifact.md"
+            if artifact.exists():
+                return artifact.read_text(encoding="utf-8").strip()
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
 
     def _write_result(self, final_output: str) -> str:
         """Save the final result to the session workspace → its absolute path.

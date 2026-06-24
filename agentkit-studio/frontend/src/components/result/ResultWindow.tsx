@@ -55,7 +55,7 @@ export function ResultWindow() {
     if (!text || sending || !sessionId) return;
 
     const userMsg: ChatMessage = { role: "user", content: text };
-    const historyBefore = [...messages];
+    const historyBefore = messages;
     const next = [...historyBefore, userMsg];
     setMessages(next);
     setInput("");

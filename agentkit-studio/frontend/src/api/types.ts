@@ -284,6 +284,43 @@ interface Frame<T extends string, P> {
   payload: P;
 }
 
+
+// ── Loop Engineering payloads (agentkit.loop) ─────────────────────────────
+
+export interface GoalMetPayload {
+  met: boolean;
+  end_state: string;
+  evidence: string;
+  reason: string;
+  step_id: string;
+}
+
+export interface HillClimbPayload {
+  epoch: number;
+  score: number;
+  delta: number;
+  status: string;
+  note: string;
+  weaknesses: string[];
+}
+
+export interface SchedulerPayload {
+  triggers: Array<{
+    type: string;
+    id: string;
+    spec: string;
+    last_fired: string | null;
+    next_fire: string | null;
+  }>;
+}
+
+export interface ChainPayload {
+  spec_name: string;
+  status: string;
+  skipped: boolean;
+  output_summary: string;
+}
+
 export type StudioEvent =
   | Frame<"session", SessionPayload>
   | Frame<"plan", PlanPayload>
@@ -308,7 +345,11 @@ export type StudioEvent =
   | Frame<"loop_seed", LoopSeedPayload>
   | Frame<"tool_call", ToolCallPayload>
   | Frame<"tool_result", ToolResultPayload>
-  | Frame<"loopdoctor", LoopDoctorPayload>;
+  | Frame<"loopdoctor", LoopDoctorPayload>
+  | Frame<"goal_met", GoalMetPayload>
+  | Frame<"hill_climb", HillClimbPayload>
+  | Frame<"scheduler", SchedulerPayload>
+  | Frame<"chain", ChainPayload>;
 
 export type StudioEventType = StudioEvent["type"];
 

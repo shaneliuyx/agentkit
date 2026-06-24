@@ -15,6 +15,10 @@ import { RouterPanel } from "./RouterPanel";
 import { LoopsPanel } from "./LoopsPanel";
 import { ToolsPanel } from "./ToolsPanel";
 import { LoopDoctorPanel } from "./LoopDoctorPanel";
+import { GoalPanel } from "./GoalPanel";
+import { HillClimbPanel } from "./HillClimbPanel";
+import { SchedulerPanel } from "./SchedulerPanel";
+import { ChainComposerPanel } from "./ChainComposerPanel";
 import "./panels.css";
 
 type TabId =
@@ -27,7 +31,11 @@ type TabId =
   | "security"
   | "doctor"
   | "dag"
-  | "verify";
+  | "verify"
+  | "goal"
+  | "hillclimb"
+  | "scheduler"
+  | "chain";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "loops", label: "Loops" },
@@ -40,6 +48,10 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "doctor", label: "Loop Doctor" },
   { id: "dag", label: "DAG" },
   { id: "verify", label: "Verify" },
+  { id: "goal", label: "Goal" },
+  { id: "hillclimb", label: "Hill Climb" },
+  { id: "scheduler", label: "Scheduler" },
+  { id: "chain", label: "Chain" },
 ];
 
 interface PanelDrawerProps {
@@ -61,6 +73,10 @@ export function PanelDrawer({ sessionId }: PanelDrawerProps) {
     doctor: s.loopDoctor.length,
     dag: s.dag ? s.dag.nodes.length : 0,
     verify: s.verify ? s.verify.findings.length : 0,
+    goal: s.goalMet ? 1 : 0,
+    hillclimb: s.hillClimb.length,
+    scheduler: s.schedulerTriggers?.triggers.length ?? 0,
+    chain: s.chainResults.length,
   }));
 
   return (
@@ -93,6 +109,10 @@ export function PanelDrawer({ sessionId }: PanelDrawerProps) {
         {active === "doctor" && <LoopDoctorPanel />}
         {active === "dag" && <DagPanel />}
         {active === "verify" && <VerifyPanel />}
+        {active === "goal" && <GoalPanel />}
+        {active === "hillclimb" && <HillClimbPanel />}
+        {active === "scheduler" && <SchedulerPanel />}
+        {active === "chain" && <ChainComposerPanel />}
       </div>
     </div>
   );

@@ -391,10 +391,14 @@ agentkit/
 │   └── loop.py           # run(), OrchestratorConfig, Spawn
 ├── quality/verify.py     # verify(), Claim, VerifyFinding, UrlChecker           (feynman)
 ├── backends/cli.py       # CliLLMClient (subprocess; no shell-injection)
-└── topology/             # rule-driven topology select + DAG gen          (config-as-policy)
-    ├── core.py           # topology shapes (STAR/MESH/PIPELINE/…)
-    ├── config.py         # TopologyConfig ↔ JSON ↔ emit_topologies_py
-    └── infer.py          # select_topology (choose shape by task)
+├── topology/             # rule-driven topology select + DAG gen          (config-as-policy)
+│   ├── core.py           # topology shapes (STAR/MESH/PIPELINE/…)
+│   ├── config.py         # TopologyConfig ↔ JSON ↔ emit_topologies_py
+│   └── infer.py          # select_topology (choose shape by task)
+└── loop/                 # loop engineering shared library                  (NEW)
+    ├── goal.py           # LoopGoal, check_goal() → StopVerdict  (pure subprocess; no LLM)
+    ├── chain.py          # LoopChain, LoopSpec — DAG composition with Kahn topo-sort
+    └── hill_climb.py     # mine_weaknesses() + hill_climb_from_traces() (DGM pipeline)
 ```
 
 Every module ships one runnable self-check:
@@ -409,6 +413,8 @@ python -m agentkit.orchestrator.stall
 python -m agentkit.orchestrator.loop
 python -m agentkit.quality.verify
 python -m agentkit.agent.roles
+python -m agentkit.loop.goal
+python -m agentkit.loop.chain
 python examples/research_agent.py
 python examples/topology_all_demo.py
 ```

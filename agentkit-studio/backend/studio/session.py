@@ -65,6 +65,8 @@ class Session:
     running: bool = False
     #: M9: snapshot of the most recent finished run — the source for /export.
     last_run: "RunSnapshot | None" = None
+    #: Loop goal — when set, runner polls check_goal() after each phase (agentkit.loop).
+    goal: object = None  # LoopGoal | None when agentkit.loop installed
 
     def seed(self, loop_id: str, steps: list[dict[str, Any]]) -> None:
         """Pre-seed this session from a chosen loop-library loop."""
