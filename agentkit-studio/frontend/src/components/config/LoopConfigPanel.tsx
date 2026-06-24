@@ -103,7 +103,13 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const [cronChain, setCronChain] = useState("");
   const [schedStatus, setSchedStatus] = useState<string | null>(null);
 
-  const open = () => dialogRef.current?.showModal();
+  const open = () => {
+    // Pre-fill end_state from the RunBar task if it's a sensible non-error string
+    if (currentTask && !goal.end_state && !currentTask.startsWith("✗")) {
+      setGoal((g) => ({ ...g, end_state: currentTask }));
+    }
+    dialogRef.current?.showModal();
+  };
   const close = () => dialogRef.current?.close();
 
   // Close on backdrop click
@@ -346,7 +352,13 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   className="btn"
                   onClick={handleSuggest}
                   disabled={suggestBusy || !sessionId || !goal.end_state.trim()}
-                  title={!sessionId ? "Connect a session first — Suggest calls the LLM" : "Ask the LLM to suggest parameters from your end_state"}
+                  title={
+                    !sessionId
+                      ? "Connect a session first — Suggest calls the LLM"
+                      : !goal.end_state.trim()
+                      ? "Type an end state above first"
+                      : "Ask the LLM to suggest evidence_cmd, success_pattern and limits"
+                  }
                 >
                   {suggestBusy ? "Thinking…" : "✨ Suggest"}
                 </button>
