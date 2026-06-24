@@ -387,6 +387,85 @@ def set_goal(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"set": True, "end_state": session.goal.end_state}
 
 
+
+
+# ---------------------------------------------------------------------------
+# /session/{id}/goal/suggest — LLM-inferred LoopGoal parameters
+# ---------------------------------------------------------------------------
+
+@app.post("/session/{session_id}/goal/suggest")
+def suggest_goal_params(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Use the session's LLM to suggest LoopGoal parameters from an end_state description.
+
+    Body: {end_state: str, task?: str}
+    Returns: {evidence_cmd, success_pattern, max_turns, max_tokens, timeout_s, constraints[]}
+    """
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    end_state = (body.get("end_state") or "").strip()
+    task = (body.get("task") or "").strip()
+    if not end_state:
+        raise HTTPException(status_code=422, detail="end_state is required")
+
+    context = f"The agent's task is: \"{task}\"\n" if task else ""
+    prompt = (
+        f"{context}Given this loop stop condition:\n"
+        f"\"{end_state}\"\n\n"
+        "Suggest LoopGoal parameters. Return ONLY valid JSON, no prose, no markdown:\n"
+        "{\n"
+        "  \"evidence_cmd\": \"<shell command that verifies the goal; empty string if no cmd applies>\",\n"
+        "  \"success_pattern\": \"<regex applied to stdout; empty string if exit code 0 is enough>\",\n"
+        "  \"max_turns\": <int 5-50>,\n"
+        "  \"max_tokens\": <int 10000-200000>,\n"
+        "  \"timeout_s\": <int 60-7200>,\n"
+        "  \"constraints\": [\"<constraint1>\", \"<constraint2>\"]\n"
+        "}\n\n"
+        "Rules:\n"
+        "- evidence_cmd: use pytest for test goals, curl for HTTP, grep for file flags, "
+        "wc -c for file size, git log for commits. Leave empty if goal is purely descriptive.\n"
+        "- success_pattern: e.g. \\\\d+ passed for pytest, \"status\".*\"ok\" for HTTP JSON. "
+        "Leave empty if exit code 0 suffices.\n"
+        "- max_turns: 10 for simple/focused, 25 for medium, 40 for complex multi-step.\n"
+        "- constraints: infer implicit invariants (e.g. \"do not change public API\", "
+        "\"no new dependencies\"). Empty list if none obvious."
+    )
+
+    import json, re
+    backend = resolve_backend(session.llm_spec)
+    client = build_chat_client(backend, on_usage=lambda _: None, temperature=0.2)
+    result = client.chat([{"role": "user", "content": prompt}])
+    text = result.text
+
+    # Extract JSON object from response (model may wrap in markdown)
+    json_match = re.search(r"\{[\s\S]*\}", text)
+    if not json_match:
+        raise HTTPException(status_code=502, detail="LLM did not return valid JSON")
+    try:
+        data = json.loads(json_match.group())
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"JSON parse error: {exc}") from exc
+
+    return {
+        "evidence_cmd":     data.get("evidence_cmd", ""),
+        "success_pattern":  data.get("success_pattern", ""),
+        "max_turns":        int(data.get("max_turns", 25)),
+        "max_tokens":       int(data.get("max_tokens", 100_000)),
+        "timeout_s":        float(data.get("timeout_s", 1800)),
+        "constraints":      [str(c) for c in (data.get("constraints") or [])],
+    }
+
+
+@app.delete("/session/{session_id}/goal")
+def clear_goal(session_id: str) -> dict[str, Any]:
+    """Remove the active LoopGoal from a session."""
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    session.goal = None
+    return {"cleared": True}
+
 # ---------------------------------------------------------------------------
 # /scheduler — read registered Scheduler triggers
 # ---------------------------------------------------------------------------

@@ -13,9 +13,10 @@ interface RunBarProps {
   sessionId: string | null;
   mode: RunMode;
   onModeChange: (mode: RunMode) => void;
+  onRequirementChange?: (req: string) => void;
 }
 
-export function RunBar({ sessionId, mode, onModeChange }: RunBarProps) {
+export function RunBar({ sessionId, mode, onModeChange, onRequirementChange }: RunBarProps) {
   const [requirement, setRequirement] = useState("");
   const status = useRunStore((s) => s.status);
   const apply = useRunStore((s) => s.apply);
@@ -83,7 +84,7 @@ export function RunBar({ sessionId, mode, onModeChange }: RunBarProps) {
         className="run-input"
         placeholder="Describe a requirement to plan, deploy, and run…"
         value={requirement}
-        onChange={(e) => setRequirement(e.target.value)}
+        onChange={(e) => { setRequirement(e.target.value); onRequirementChange?.(e.target.value); }}
         onKeyDown={(e) => {
           // Enter submits; Shift+Enter inserts a newline (multi-line requirements).
           if (e.key === "Enter" && !e.shiftKey) {

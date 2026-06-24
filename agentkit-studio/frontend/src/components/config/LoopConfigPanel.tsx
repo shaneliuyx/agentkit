@@ -11,6 +11,7 @@ import "./config.css";
 
 interface LoopConfigPanelProps {
   sessionId: string | null;
+  currentTask?: string;
 }
 
 type Tab = "goal" | "scheduler" | "chain";
@@ -43,7 +44,7 @@ interface SchedulerTrigger {
   next_fire: string | null;
 }
 
-export function LoopConfigPanel({ sessionId }: LoopConfigPanelProps) {
+export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanelProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [tab, setTab] = useState<Tab>("goal");
 
@@ -51,6 +52,7 @@ export function LoopConfigPanel({ sessionId }: LoopConfigPanelProps) {
   const [goal, setGoal] = useState<GoalForm>(GOAL_DEFAULTS);
   const [goalStatus, setGoalStatus] = useState<string | null>(null);
   const [goalBusy, setGoalBusy] = useState(false);
+  const [suggestBusy, setSuggestBusy] = useState(false);
 
   // ── Scheduler state ─────────────────────────────────────────────────────
   const [triggers, setTriggers] = useState<SchedulerTrigger[]>([]);
@@ -58,7 +60,12 @@ export function LoopConfigPanel({ sessionId }: LoopConfigPanelProps) {
   const [cronChain, setCronChain] = useState("");
   const [schedStatus, setSchedStatus] = useState<string | null>(null);
 
-  const open = () => dialogRef.current?.showModal();
+  const open = () => {
+    if (currentTask && !goal.end_state) {
+      setGoal((g) => ({ ...g, end_state: currentTask }));
+    }
+    dialogRef.current?.showModal();
+  };
   const close = () => dialogRef.current?.close();
 
   // Close on backdrop click
@@ -116,6 +123,44 @@ export function LoopConfigPanel({ sessionId }: LoopConfigPanelProps) {
     }).catch(() => null);
     setGoalStatus(res?.ok ? "✓ Goal cleared" : "✗ Clear failed");
     if (res?.ok) setGoal(GOAL_DEFAULTS);
+  };
+
+  const handleSuggest = async () => {
+    if (!sessionId || !goal.end_state.trim()) return;
+    setSuggestBusy(true);
+    setGoalStatus(null);
+    try {
+      const res = await fetch(
+        `http://localhost:8000/session/${sessionId}/goal/suggest`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ end_state: goal.end_state, task: currentTask }),
+        }
+      );
+      if (res.ok) {
+        const s = await res.json();
+        setGoal((g) => ({
+          ...g,
+          evidence_cmd:    s.evidence_cmd    ?? g.evidence_cmd,
+          success_pattern: s.success_pattern ?? g.success_pattern,
+          constraints:     Array.isArray(s.constraints)
+                             ? s.constraints.join("\n")
+                             : g.constraints,
+          max_turns:       s.max_turns    != null ? String(s.max_turns)    : g.max_turns,
+          max_tokens:      s.max_tokens   != null ? String(s.max_tokens)   : g.max_tokens,
+          timeout_s:       s.timeout_s    != null ? String(s.timeout_s)    : g.timeout_s,
+        }));
+        setGoalStatus("✓ Parameters suggested — review before applying");
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setGoalStatus(`✗ ${(d as { detail?: string }).detail ?? "Suggest failed"}`);
+      }
+    } catch (e: unknown) {
+      setGoalStatus(`✗ ${e instanceof Error ? e.message : "Network error"}`);
+    } finally {
+      setSuggestBusy(false);
+    }
   };
 
   const handleAddCron = async () => {
@@ -267,6 +312,14 @@ export function LoopConfigPanel({ sessionId }: LoopConfigPanelProps) {
               </div>
 
               <div className="lc-actions">
+                <button
+                  className="btn"
+                  onClick={handleSuggest}
+                  disabled={suggestBusy || !sessionId || !goal.end_state.trim()}
+                  title="Ask the LLM to suggest evidence_cmd, success_pattern and limits"
+                >
+                  {suggestBusy ? "Thinking…" : "✨ Suggest"}
+                </button>
                 <button
                   className="btn btn-primary"
                   onClick={handleApplyGoal}
