@@ -133,14 +133,17 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  const handleApplyGoal = async () => {
+  const handleApplyGoal = () => {
     if (!goal.end_state.trim()) return;
-    if (!sessionId) {
-      pendingApply.current = true;
-      setGoalStatus("✓ Goal saved — will apply when session connects");
-      return;
+    // Always save locally — user gets instant feedback regardless of session state
+    pendingApply.current = true;
+    setGoalStatus("✓ Goal saved — will apply on next run");
+    // Best-effort push to backend if session exists
+    if (sessionId) {
+      void _postGoal(sessionId, goal, () => {}, (s) => {
+        if (s?.startsWith("✓")) setGoalStatus("✓ Goal applied to session");
+      });
     }
-    await _postGoal(sessionId, goal, setGoalBusy, setGoalStatus, () => { pendingApply.current = true; });
   };
 
   const handleClearGoal = async () => {
