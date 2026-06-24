@@ -512,3 +512,38 @@ def run_chain(body: dict[str, Any]) -> dict[str, Any]:
             for r in result.results
         ],
     }
+
+
+# /chain/suggest — LLM-inferred LoopChain DAG spec from a task description
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/chain/suggest")
+def suggest_chain(body: dict[str, Any]) -> dict[str, Any]:
+    """Use an LLM to decompose a task into a LoopChain DAG spec."""
+    task = str(body.get("task") or "").strip()
+    if not task:
+        raise HTTPException(status_code=422, detail="task required")
+
+    from agentkit.loop.suggest import suggest_chain_spec
+    from studio.backends import resolve_backend, build_chat_client
+
+    # Use the first available LLM backend to generate the suggestion.
+    try:
+        from studio.catalog import _catalog  # type: ignore[attr-defined]
+        backends = list(_catalog.values())
+    except Exception:
+        backends = []
+
+    if not backends:
+        # Fallback: single-step spec
+        return {
+            "specs": [{"name": "run", "description": task, "depends_on": []}],
+            "initial_ctx": {"task": task},
+        }
+
+    backend = resolve_backend(backends[0].get("spec") or backends[0])
+    client = build_chat_client(backend, on_usage=lambda _: None, temperature=0.3)
+    suggestion = suggest_chain_spec(task, client)
+    return {
+        "specs": list(suggestion.specs),
+        "initial_ctx": suggestion.initial_ctx,
+    }

@@ -1,8 +1,5 @@
 /**
- * Loop Chain Composer — JSON editor for LoopChain specs + live result view.
- *
- * Phase 1: JSON textarea + Run button + ChainPayload event list.
- * Phase 2 (future): drag-and-drop node graph.
+ * Loop Chain Composer — task description → LLM-suggested chain spec → run.
  */
 import { useState } from "react";
 import { useRunStore } from "../../store/runStore";
@@ -22,9 +19,38 @@ const EXAMPLE = JSON.stringify(
 
 export function ChainComposerPanel() {
   const chainResults = useRunStore((s) => s.chainResults);
+  const [task, setTask] = useState("");
   const [spec, setSpec] = useState(EXAMPLE);
   const [running, setRunning] = useState(false);
+  const [suggesting, setSuggesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [suggestStatus, setSuggestStatus] = useState<string | null>(null);
+
+  const handleSuggest = async () => {
+    if (!task.trim()) return;
+    setSuggesting(true);
+    setSuggestStatus(null);
+    setError(null);
+    try {
+      const res = await fetch("/api/chain/suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: task.trim() }),
+      });
+      if (res.ok) {
+        const data = await res.json() as { specs: unknown[]; initial_ctx: unknown };
+        setSpec(JSON.stringify(data, null, 2));
+        setSuggestStatus("✓ Chain spec generated");
+      } else {
+        const d = await res.json().catch(() => ({})) as { detail?: string };
+        setSuggestStatus(`✗ ${d.detail ?? "Suggest failed"}`);
+      }
+    } catch (e: unknown) {
+      setSuggestStatus(`✗ ${e instanceof Error ? e.message : "Network error"}`);
+    } finally {
+      setSuggesting(false);
+    }
+  };
 
   const handleRun = async () => {
     setError(null);
@@ -50,12 +76,36 @@ export function ChainComposerPanel() {
   return (
     <PanelShell empty={false} emptyHint="">
       <div className="chain-composer">
-        <label className="panel-label mono">Chain Spec (JSON)</label>
+        <label className="panel-label mono">Task description</label>
+        <input
+          className="chain-task-input mono"
+          placeholder="Describe the multi-step task…"
+          value={task}
+          onChange={(e) => setTask(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") void handleSuggest(); }}
+        />
+        <div className="chain-actions">
+          <button
+            className="btn btn-primary"
+            onClick={handleSuggest}
+            disabled={suggesting || !task.trim()}
+            title={!task.trim() ? "Enter a task description first" : "Let the LLM generate a chain spec"}
+          >
+            {suggesting ? "Generating…" : "✦ Suggest chain"}
+          </button>
+          {suggestStatus && (
+            <span className="lc-status mono" data-ok={suggestStatus.startsWith("✓")}>
+              {suggestStatus}
+            </span>
+          )}
+        </div>
+
+        <label className="panel-label mono" style={{ marginTop: "12px" }}>Chain Spec (JSON)</label>
         <textarea
           className="chain-editor mono"
           value={spec}
           onChange={(e) => setSpec(e.target.value)}
-          rows={10}
+          rows={12}
           spellCheck={false}
         />
         {error && (

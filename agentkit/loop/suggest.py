@@ -125,3 +125,93 @@ if __name__ == "__main__":
     except Exception:
         pass
     print("loop.suggest self-check OK")
+
+
+_CHAIN_PROMPT = """Decompose this task into a LoopChain DAG of named steps.
+Task: "{task}"
+
+Return ONLY valid JSON, no prose, no markdown:
+{{
+  "specs": [
+    {{"name": "<snake_case_id>", "description": "<what this step does>", "depends_on": []}},
+    {{"name": "<snake_case_id>", "description": "<what this step does>", "depends_on": ["<prior_step_name>"]}}
+  ],
+  "initial_ctx": {{"task": "{task}"}}
+}}
+
+Rules:
+- 2-5 specs. Each spec is one focused sub-task.
+- depends_on: list names of specs that must finish before this one. Use [] for the first step.
+- Names: lowercase, underscores, no spaces (e.g. "research", "synthesize", "write_report").
+- Make the DAG linear (pipeline) unless parallel execution genuinely makes sense.
+- initial_ctx must contain "task" with the original task string.
+"""
+
+
+@dataclass(frozen=True)
+class ChainSpecSuggestion:
+    """Suggested LoopChain spec from an LLM decomposition pass."""
+
+    specs: tuple[dict, ...] = field(default_factory=tuple)
+    initial_ctx: dict = field(default_factory=dict)
+
+
+def suggest_chain_spec(
+    task: str,
+    client: LLMClient,
+    *,
+    temperature: float = 0.3,
+) -> ChainSpecSuggestion:
+    """Decompose a task into a LoopChain DAG spec using an LLM.
+
+    Returns a ``ChainSpecSuggestion`` with ``specs`` and ``initial_ctx``.
+    Falls back to a minimal single-step spec on any parse failure — never raises.
+    """
+    if not task.strip():
+        return ChainSpecSuggestion(
+            specs=({"name": "run", "description": task or "run", "depends_on": []},),
+            initial_ctx={"task": task},
+        )
+
+    prompt = _CHAIN_PROMPT.format(task=task.strip())
+
+    try:
+        result = client.chat([{"role": "user", "content": prompt}])
+        text = result.text
+    except Exception:  # noqa: BLE001
+        return ChainSpecSuggestion(
+            specs=({"name": "run", "description": task, "depends_on": []},),
+            initial_ctx={"task": task},
+        )
+
+    json_match = re.search(r"{[\s\S]*}", text)
+    if not json_match:
+        return ChainSpecSuggestion(
+            specs=({"name": "run", "description": task, "depends_on": []},),
+            initial_ctx={"task": task},
+        )
+
+    try:
+        data = json.loads(json_match.group())
+    except json.JSONDecodeError:
+        return ChainSpecSuggestion(
+            specs=({"name": "run", "description": task, "depends_on": []},),
+            initial_ctx={"task": task},
+        )
+
+    raw_specs = data.get("specs") or []
+    specs = tuple(
+        {
+            "name": str(s.get("name") or f"step_{i}"),
+            "description": str(s.get("description") or ""),
+            "depends_on": [str(d) for d in (s.get("depends_on") or [])],
+        }
+        for i, s in enumerate(raw_specs)
+        if isinstance(s, dict)
+    )
+    if not specs:
+        specs = ({"name": "run", "description": task, "depends_on": []},)
+
+    initial_ctx = data.get("initial_ctx") or {"task": task}
+
+    return ChainSpecSuggestion(specs=specs, initial_ctx=initial_ctx)

@@ -197,3 +197,27 @@
 .drawer-body .panel-empty {
   flex: 1;
 }
+
+/* Chain composer task input */
+.chain-task-input {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  box-sizing: border-box;
+}
+.chain-task-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+.chain-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.lc-status[data-ok="false"] { color: var(--color-error, #f87171); }
+.lc-status[data-ok="true"]  { color: var(--color-done, #4ade80); }
