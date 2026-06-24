@@ -72,7 +72,7 @@ async function _postGoal(
     } else {
       const d = await res.json().catch(() => ({}));
       const detail = (d as { detail?: string }).detail ?? "Failed";
-      if (res.status === 404 && detail.includes("session") && onSessionNotFound) {
+      if (res.status === 404 && onSessionNotFound) {
         onSessionNotFound();
         setStatus("✓ Goal saved — session expired, will apply on next connect");
       } else {
