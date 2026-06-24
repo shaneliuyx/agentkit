@@ -44,6 +44,41 @@ interface SchedulerTrigger {
   next_fire: string | null;
 }
 
+async function _postGoal(
+  sessionId: string,
+  goal: GoalForm,
+  setBusy: (b: boolean) => void,
+  setStatus: (s: string | null) => void,
+) {
+  setBusy(true);
+  setStatus(null);
+  try {
+    const payload: Record<string, unknown> = { end_state: goal.end_state.trim() };
+    if (goal.evidence_cmd.trim()) payload.evidence_cmd = goal.evidence_cmd.trim();
+    if (goal.success_pattern.trim()) payload.success_pattern = goal.success_pattern.trim();
+    if (goal.constraints.trim())
+      payload.constraints = goal.constraints.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (goal.max_turns) payload.max_turns = Number(goal.max_turns);
+    if (goal.max_tokens) payload.max_tokens = Number(goal.max_tokens);
+    if (goal.timeout_s) payload.timeout_s = Number(goal.timeout_s);
+    const res = await fetch(`http://localhost:8000/session/${sessionId}/goal`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      setStatus("✓ Goal applied");
+    } else {
+      const d = await res.json().catch(() => ({}));
+      setStatus(`✗ ${(d as { detail?: string }).detail ?? "Failed"}`);
+    }
+  } catch (e: unknown) {
+    setStatus(`✗ ${e instanceof Error ? e.message : "Network error"}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
 export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanelProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [tab, setTab] = useState<Tab>("goal");
@@ -53,6 +88,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const [goalStatus, setGoalStatus] = useState<string | null>(null);
   const [goalBusy, setGoalBusy] = useState(false);
   const [suggestBusy, setSuggestBusy] = useState(false);
+  const pendingApply = useRef(false);
 
   // ── Scheduler state ─────────────────────────────────────────────────────
   const [triggers, setTriggers] = useState<SchedulerTrigger[]>([]);
@@ -82,38 +118,22 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
       .catch(() => setTriggers([]));
   }, [tab]);
 
-  const handleApplyGoal = async () => {
-    if (!sessionId || !goal.end_state.trim()) return;
-    setGoalBusy(true);
-    setGoalStatus(null);
-    try {
-      const payload: Record<string, unknown> = {
-        end_state: goal.end_state.trim(),
-      };
-      if (goal.evidence_cmd.trim()) payload.evidence_cmd = goal.evidence_cmd.trim();
-      if (goal.success_pattern.trim()) payload.success_pattern = goal.success_pattern.trim();
-      if (goal.constraints.trim())
-        payload.constraints = goal.constraints.split("\n").map((s) => s.trim()).filter(Boolean);
-      if (goal.max_turns) payload.max_turns = Number(goal.max_turns);
-      if (goal.max_tokens) payload.max_tokens = Number(goal.max_tokens);
-      if (goal.timeout_s) payload.timeout_s = Number(goal.timeout_s);
+  // Auto-apply goal when a session connects if the user had saved one locally
+  useEffect(() => {
+    if (!sessionId || !pendingApply.current) return;
+    pendingApply.current = false;
+    void _postGoal(sessionId, goal, setGoalBusy, setGoalStatus);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
-      const res = await fetch(`http://localhost:8000/session/${sessionId}/goal`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        setGoalStatus("✓ Goal applied");
-      } else {
-        const d = await res.json().catch(() => ({}));
-        setGoalStatus(`✗ ${(d as { detail?: string }).detail ?? "Failed"}`);
-      }
-    } catch (e: unknown) {
-      setGoalStatus(`✗ ${e instanceof Error ? e.message : "Network error"}`);
-    } finally {
-      setGoalBusy(false);
+  const handleApplyGoal = async () => {
+    if (!goal.end_state.trim()) return;
+    if (!sessionId) {
+      pendingApply.current = true;
+      setGoalStatus("✓ Goal saved — will apply when session connects");
+      return;
     }
+    await _postGoal(sessionId, goal, setGoalBusy, setGoalStatus);
   };
 
   const handleClearGoal = async () => {
@@ -323,7 +343,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                 <button
                   className="btn btn-primary"
                   onClick={handleApplyGoal}
-                  disabled={goalBusy || !sessionId || !goal.end_state.trim()}
+                  disabled={goalBusy || !goal.end_state.trim()}
                 >
                   {goalBusy ? "Applying…" : "Apply goal"}
                 </button>
