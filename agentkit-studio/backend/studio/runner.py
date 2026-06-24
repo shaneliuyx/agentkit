@@ -252,6 +252,19 @@ class Runner:
     def _run_inner(self, requirement: str) -> None:
         session = self._session
 
+        # Inject goal end_state and constraints into requirement so the agent
+        # sees them during planning — not just during post-phase verification.
+        _goal = getattr(session, "goal", None)
+        if _goal is not None:
+            _parts: list[str] = []
+            if getattr(_goal, "end_state", None):
+                _parts.append(f"Goal: {_goal.end_state}")
+            _constraints = getattr(_goal, "constraints", None) or []
+            if _constraints:
+                _parts.append("Constraints:\n" + "\n".join(f"- {c}" for c in _constraints))
+            if _parts:
+                requirement = "\n".join(_parts) + "\n\n" + requirement
+
         # session frame
         self._emit(
             SessionEvent(llm=session.llm_info, embed=session.embed_info, mode=session.mode)
