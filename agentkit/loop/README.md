@@ -107,3 +107,46 @@ curl -X POST http://localhost:8000/session/{id}/goal \
   -H "Content-Type: application/json" \
   -d '{"end_state": "All tests pass", "evidence_cmd": "pytest -q", "success_pattern": "passed"}'
 ```
+
+## LLM-Assisted Goal Suggestion
+
+When building a LoopGoal interactively, skip manual parameter tuning — let the LLM propose values:
+
+```python
+from agentkit.loop.suggest import suggest_goal_params
+
+# Any LLMClient from agentkit.types
+s = suggest_goal_params(
+    end_state="All billing tests pass",
+    client=my_client,
+    task="Build billing service with Stripe integration",
+)
+
+goal = LoopGoal(
+    end_state="All billing tests pass",
+    evidence_cmd=s.evidence_cmd,      # e.g. "pytest tests/billing -q"
+    success_pattern=s.success_pattern, # e.g. r"\d+ passed"
+    max_turns=s.max_turns,            # e.g. 20
+    max_tokens=s.max_tokens,
+    timeout_s=s.timeout_s,
+    constraints=list(s.constraints),  # e.g. ["no new dependencies"]
+)
+```
+
+`suggest_goal_params` uses a structured prompt to infer:
+- **evidence_cmd** — shell command to verify completion (pytest, curl, grep, wc, git log)
+- **success_pattern** — regex matched against stdout; empty = exit code 0 suffices
+- **max_turns / max_tokens / timeout_s** — sized to task complexity (10 simple, 25 medium, 40 complex)
+- **constraints** — implicit invariants drawn from the task description
+
+The function is pure library code — no HTTP, no Studio dependency. Pass any `LLMClient`
+instance (the same one your agent uses). Returns safe defaults on any parse failure,
+so `check_goal()` always receives valid values.
+
+```python
+# GoalSuggestion is a frozen dataclass — immutable, hashable, inspectable
+from agentkit.loop.suggest import GoalSuggestion
+s = GoalSuggestion()  # all-default fallback
+print(s.max_turns, s.evidence_cmd)  # 25, ""
+```
+

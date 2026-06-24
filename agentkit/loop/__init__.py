@@ -8,3 +8,12 @@ __all__ = [
     "TraceWeakness", "mine_weaknesses", "hill_climb_from_traces",
     "LoopSpec", "LoopChain", "ChainResult", "SpecResult",
 ]
+
+from agentkit.loop.suggest import GoalSuggestion, suggest_goal_params
+
+__all__ = [
+    "LoopGoal", "StopVerdict", "check_goal",
+    "LoopSpec", "SpecResult", "ChainResult", "LoopChain",
+    "TraceWeakness", "mine_weaknesses", "hill_climb_from_traces",
+    "GoalSuggestion", "suggest_goal_params",
+]

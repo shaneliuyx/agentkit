@@ -415,6 +415,7 @@ python -m agentkit.quality.verify
 python -m agentkit.agent.roles
 python -m agentkit.loop.goal
 python -m agentkit.loop.chain
+python -m agentkit.loop.suggest
 python examples/research_agent.py
 python examples/topology_all_demo.py
 ```

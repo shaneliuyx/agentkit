@@ -409,51 +409,22 @@ def suggest_goal_params(session_id: str, body: dict[str, Any]) -> dict[str, Any]
     if not end_state:
         raise HTTPException(status_code=422, detail="end_state is required")
 
-    context = f"The agent's task is: \"{task}\"\n" if task else ""
-    prompt = (
-        f"{context}Given this loop stop condition:\n"
-        f"\"{end_state}\"\n\n"
-        "Suggest LoopGoal parameters. Return ONLY valid JSON, no prose, no markdown:\n"
-        "{\n"
-        "  \"evidence_cmd\": \"<shell command that verifies the goal; empty string if no cmd applies>\",\n"
-        "  \"success_pattern\": \"<regex applied to stdout; empty string if exit code 0 is enough>\",\n"
-        "  \"max_turns\": <int 5-50>,\n"
-        "  \"max_tokens\": <int 10000-200000>,\n"
-        "  \"timeout_s\": <int 60-7200>,\n"
-        "  \"constraints\": [\"<constraint1>\", \"<constraint2>\"]\n"
-        "}\n\n"
-        "Rules:\n"
-        "- evidence_cmd: use pytest for test goals, curl for HTTP, grep for file flags, "
-        "wc -c for file size, git log for commits. Leave empty if goal is purely descriptive.\n"
-        "- success_pattern: e.g. \\\\d+ passed for pytest, \"status\".*\"ok\" for HTTP JSON. "
-        "Leave empty if exit code 0 suffices.\n"
-        "- max_turns: 10 for simple/focused, 25 for medium, 40 for complex multi-step.\n"
-        "- constraints: infer implicit invariants (e.g. \"do not change public API\", "
-        "\"no new dependencies\"). Empty list if none obvious."
-    )
 
-    import json, re
+    try:
+        from agentkit.loop.suggest import suggest_goal_params
+    except ImportError as exc:
+        raise HTTPException(status_code=501, detail="agentkit.loop not installed") from exc
+
     backend = resolve_backend(session.llm_spec)
     client = build_chat_client(backend, on_usage=lambda _: None, temperature=0.2)
-    result = client.chat([{"role": "user", "content": prompt}])
-    text = result.text
-
-    # Extract JSON object from response (model may wrap in markdown)
-    json_match = re.search(r"\{[\s\S]*\}", text)
-    if not json_match:
-        raise HTTPException(status_code=502, detail="LLM did not return valid JSON")
-    try:
-        data = json.loads(json_match.group())
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=502, detail=f"JSON parse error: {exc}") from exc
-
+    s = suggest_goal_params(end_state, client, task=task)
     return {
-        "evidence_cmd":     data.get("evidence_cmd", ""),
-        "success_pattern":  data.get("success_pattern", ""),
-        "max_turns":        int(data.get("max_turns", 25)),
-        "max_tokens":       int(data.get("max_tokens", 100_000)),
-        "timeout_s":        float(data.get("timeout_s", 1800)),
-        "constraints":      [str(c) for c in (data.get("constraints") or [])],
+        "evidence_cmd":    s.evidence_cmd,
+        "success_pattern": s.success_pattern,
+        "max_turns":       s.max_turns,
+        "max_tokens":      s.max_tokens,
+        "timeout_s":       s.timeout_s,
+        "constraints":     list(s.constraints),
     }
 
 
