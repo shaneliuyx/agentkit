@@ -139,6 +139,8 @@ function workerCount(topology: TopologyKind, nAgents: number | null): number {
       return 1;
     case "STAR":
       return Math.max(1, nAgents - 1); // minus the reduce call
+    case "MAP":
+      return Math.max(1, nAgents - 1); // one worker per upstream item, minus reduce
     case "MESH":
       return Math.max(2, Math.round((nAgents - 1) / 2)); // two rounds + reduce
     case "PIPELINE":
@@ -290,6 +292,35 @@ function buildPhase(
         // hub → spoke is the fan-out; spoke → reduce is the convergence.
         edges.push(relEdge(hubId, spokeId, state, "fanout"));
         edges.push(relEdge(spokeId, reduceId, state, "converge"));
+      }
+      nodes.push(
+        makeNode(
+          reduceId,
+          { label: "reduce", kind: "reduce", phaseId: pid, topology, state },
+          baseX,
+          REDUCE_ROW_Y,
+        ),
+      );
+      break;
+    }
+
+    case "MAP": {
+      // MAP: header → N item-workers (one per upstream item) → reduce.
+      // No hub — items come from upstream, not from sub-dividing the description.
+      const reduceId = `${pid}:reduce`;
+      const n = workerCount("MAP", phase.n_agents);
+      for (let i = 0; i < n; i++) {
+        const workerId = `${pid}:item:${i}`;
+        nodes.push(
+          makeNode(
+            workerId,
+            { label: `item ${i + 1}`, kind: "agent", phaseId: pid, topology, state, siblingIndex: i },
+            baseX + (i - (n - 1) / 2) * AGENT_X_GAP,
+            AGENT_ROW_Y,
+          ),
+        );
+        edges.push(relEdge(header.id, workerId, state, "fanout"));
+        edges.push(relEdge(workerId, reduceId, state, "converge"));
       }
       nodes.push(
         makeNode(

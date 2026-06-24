@@ -192,7 +192,12 @@ def make_seeded_decomposer(seed_steps: list[dict[str, Any]]):
     def _decompose(task: str) -> list[dict[str, Any]]:
         if not seed_steps:
             return [{"id": "s1", "description": task.strip(), "depends_on": []}]
-        return [dict(s) for s in seed_steps]  # copy: never hand out shared dicts
+        steps = [dict(s) for s in seed_steps]
+        # Inject the task into s1 so downstream steps know the topic via upstream
+        # folding. Without this the loop's abstract process steps reach the LLM
+        # with no subject matter — the agent has no idea what to work on.
+        steps[0]["description"] = f"Task: {task.strip()}\n\n{steps[0]['description']}"
+        return steps
 
     return _decompose
 

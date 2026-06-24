@@ -3,7 +3,7 @@
  * Run opens the SSE stream against the active session; Cancel posts cooperative
  * cancel. The session must be connected (BackendPanel) before Run is enabled.
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cancelRun, openRunStream, type RunStreamHandle } from "../../api/sse";
 import { useRunStore } from "../../store/runStore";
 import type { RunMode } from "../../api/types";
@@ -20,18 +20,29 @@ export function RunBar({ sessionId, mode, onModeChange }: RunBarProps) {
   const status = useRunStore((s) => s.status);
   const apply = useRunStore((s) => s.apply);
   const beginRun = useRunStore((s) => s.beginRun);
+  const pendingContinue = useRunStore((s) => s.pendingContinue);
+  const setContinue = useRunStore((s) => s.setContinue);
   const streamRef = useRef<RunStreamHandle | null>(null);
 
   const isRunning = status === "running" || status === "connecting";
   const canRun = !!sessionId && requirement.trim().length > 0 && !isRunning;
 
-  const handleRun = () => {
-    if (!sessionId) {
+  // Consume one-shot "continue run" signal from ResultWindow.
+  useEffect(() => {
+    if (!pendingContinue || isRunning) return;
+    setContinue(null);
+    handleRun(pendingContinue);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingContinue]);
+
+  const handleRun = (reqOverride?: string) => {
+    const req = reqOverride ?? requirement.trim();
+    if (!sessionId || !req) {
       return;
     }
     streamRef.current?.close();
     beginRun(sessionId, mode);
-    streamRef.current = openRunStream(sessionId, requirement.trim(), {
+    streamRef.current = openRunStream(sessionId, req, {
       onEvent: apply,
       onError: (message) => {
         // Surface only if the run hasn't already completed cleanly.
@@ -68,11 +79,21 @@ export function RunBar({ sessionId, mode, onModeChange }: RunBarProps) {
         }
       }}
     >
-      <input
+      <textarea
         className="run-input"
         placeholder="Describe a requirement to plan, deploy, and run…"
         value={requirement}
         onChange={(e) => setRequirement(e.target.value)}
+        onKeyDown={(e) => {
+          // Enter submits; Shift+Enter inserts a newline (multi-line requirements).
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            if (canRun) {
+              handleRun();
+            }
+          }
+        }}
+        rows={2}
         aria-label="Requirement"
       />
 

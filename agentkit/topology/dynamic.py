@@ -39,6 +39,7 @@ from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
 from agentkit.planner.core import Plan, PlanStep
 from agentkit.topology.a2a import MessageBus
 from agentkit.topology.core import (
+    MAP,
     MESH,
     PIPELINE,
     SINGLE,
@@ -95,6 +96,13 @@ def classify_step_topology(description: str) -> str:
     toks = _content_words(description)
     if toks & _MESH_CUES or " vs " in f" {description.lower()} ":
         return MESH
+    # MAP: "fetch each URL" / "analyze each article" / "summarize every result"
+    # — independent per-item workers over an upstream list. "each"/"every" is the
+    # reliable signal: it almost always means "one operation per item from prior
+    # step". Checked before STAR so concrete per-item steps don't fall into the
+    # abstract facet fan-out. "map" alone also routes here.
+    if "each" in toks or "every" in toks or "map" in toks:
+        return MAP
     if toks & _STAR_CUES:
         return STAR
     if toks & _PIPELINE_CUES:
@@ -310,8 +318,93 @@ def _run_pipeline(
     return carry, len(_PIPELINE_STAGES), tokens
 
 
+def _extract_items(text: str) -> list[str]:
+    """Extract a concrete item list from upstream step output.
+
+    Tries (in order): JSON array, URL regex, markdown bullets/numbered list,
+    non-empty lines. Returns an empty list when the text carries no parseable
+    list so the caller can fall back gracefully.
+    """
+    import json
+    import re
+
+    text = text.strip()
+    if not text:
+        return []
+
+    # JSON array
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return [str(x) for x in data if x]
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # URLs (most common case: search results piped into a fetch step)
+    urls = re.findall(r'https?://[^\s<>"\')\]]+', text)
+    if urls:
+        seen: set[str] = set()
+        deduped = []
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                deduped.append(u)
+        return deduped
+
+    # Markdown bullet / numbered list
+    items = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*(?:[-*+]|\d+[.):]) +(.+)", line)
+        if m:
+            items.append(m.group(1).strip())
+    if items:
+        return items
+
+    # Last resort: non-empty lines
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
+def _run_map(
+    client: LLMClient, step: PlanStep, upstream: str, *,
+    budget: FanoutBudget | None,
+) -> tuple[str, int, int]:
+    """MAP: fan out one independent worker per item extracted from upstream.
+
+    Items are URLs, file paths, IDs, or any list found in the prior step's
+    output. Workers are parallel and isolated — no MessageBus, no cross-reads.
+    Falls back to SINGLE when upstream is empty or yields no parseable list.
+    """
+    items = _extract_items(upstream)
+    if not items:
+        # No list in upstream — degrade gracefully to a single call.
+        text, tok = _chat(client, _with_upstream(step.description, upstream))
+        return text, 1, tok
+
+    base = step.description
+
+    def work(item: str) -> tuple[str, int]:
+        return _chat(client, f"{base}\n\nItem: {item}")
+
+    results: list[tuple[str, int]] = _parallel_map(work, items)
+    tokens = 0
+    drafts = []
+    for text, tok in results:
+        _charge(budget, tok)
+        tokens += tok
+        drafts.append(text)
+
+    synthesis = "\n\n".join(f"[item {i + 1}] {d}" for i, d in enumerate(drafts))
+    final, rtok = _chat(
+        client,
+        f"Synthesize these per-item results into one answer:\n\n{synthesis}",
+    )
+    _charge(budget, rtok)
+    return final, len(items) + 1, tokens + rtok
+
+
 _DISPATCH = {
     SINGLE: lambda c, s, u, budget: _run_single(c, s, u),
+    MAP: lambda c, s, u, budget: _run_map(c, s, u, budget=budget),
     STAR: lambda c, s, u, budget: _run_star(c, s, u, budget=budget),
     MESH: lambda c, s, u, budget: _run_mesh(c, s, u, budget=budget),
     PIPELINE: lambda c, s, u, budget: _run_pipeline(c, s, u, budget=budget),

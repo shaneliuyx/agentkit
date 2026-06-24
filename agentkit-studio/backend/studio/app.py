@@ -221,6 +221,46 @@ async def get_run(session_id: str, requirement: str) -> EventSourceResponse:
 
 
 # ---------------------------------------------------------------------------
+# /chat
+# ---------------------------------------------------------------------------
+
+@app.post("/session/{session_id}/chat")
+def post_chat(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Follow-up chat grounded in the finished run result.
+
+    ``body`` shape: ``{message: str, history: [{role, content}]}``.
+    Returns ``{reply: str}``.
+    """
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="unknown session")
+    if session.last_run is None:
+        raise HTTPException(status_code=409, detail="no finished run in this session")
+
+    message = (body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="message is required")
+    history: list[dict[str, Any]] = body.get("history") or []
+
+    backend = resolve_backend(session.llm_spec)
+    client = build_chat_client(backend, on_usage=lambda _: None, temperature=0.3)
+
+    system = (
+        "You are a helpful research assistant. The following document was produced by a "
+        "multi-agent research system. Use it as the sole source of truth when answering "
+        "follow-up questions. Be concise and accurate.\n\n"
+        f"--- RESULT ---\n{session.last_run.result}\n--- END RESULT ---"
+    )
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    for turn in history:
+        messages.append({"role": turn["role"], "content": turn["content"]})
+    messages.append({"role": "user", "content": message})
+
+    result = client.chat(messages)
+    return {"reply": result.text}
+
+
+# ---------------------------------------------------------------------------
 # /cancel
 # ---------------------------------------------------------------------------
 

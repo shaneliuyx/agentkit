@@ -44,6 +44,15 @@
 .run-input {
   flex: 1;
   font-size: var(--text-base);
+  font-family: inherit;
+  line-height: 1.4;
+  /* Wrap long requirements across lines instead of truncating; grow to a few
+     lines then scroll. Manual vertical resize stays available. */
+  resize: vertical;
+  min-height: 2.6rem;
+  max-height: 9rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* M9: post-run actions (export-as-loop) — sits beside the run bar once done. */

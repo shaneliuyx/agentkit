@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
 from agentkit.planner.core import Plan, plan
-from agentkit.topology.core import MESH, PIPELINE, SINGLE, STAR
+from agentkit.topology.core import MAP, MESH, PIPELINE, SINGLE, STAR
 from agentkit.topology.dynamic import assign_topologies, run_plan
 from agentkit.types import LLMClient
 
@@ -130,6 +130,14 @@ def _expand_topology(
         reduce_id = agent(0, "reduce")
         for a in ps:
             edges.append({"from": a, "to": reduce_id, "kind": "reduce"})
+    elif topo == MAP:
+        # MAP fan-out: N workers (one per upstream item), then reduce.
+        # peers is a best-effort count — actual count depends on upstream list.
+        workers = [agent(i) for i in range(peers)]
+        reduce_id = agent(0, "reduce")
+        for w in workers:
+            edges.append({"from": phase_id, "to": w, "kind": "intra"})
+            edges.append({"from": w, "to": reduce_id, "kind": "reduce"})
     elif topo == PIPELINE:
         stages = [agent(i, "stage") for i in range(3)]  # mirrors _PIPELINE_STAGES
         edges.append({"from": phase_id, "to": stages[0], "kind": "intra"})

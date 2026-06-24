@@ -22,6 +22,7 @@ from agentkit.topology.config import (
 from agentkit.topology.core import (
     DURABLE_BOARD,
     GATEWAY,
+    MAP,
     MESH,
     PIPELINE,
     SINGLE,
@@ -48,7 +49,7 @@ __all__ = [
     "TopologyChoice",
     "select_topology",
     "generate_dag",
-    "SINGLE", "PIPELINE", "STAR", "TREE", "MESH", "GATEWAY", "DURABLE_BOARD",
+    "SINGLE", "PIPELINE", "MAP", "STAR", "TREE", "MESH", "GATEWAY", "DURABLE_BOARD",
     "TopologyConfig",
     "build_config",
     "to_json", "from_json", "write_config", "load_config", "to_mermaid",

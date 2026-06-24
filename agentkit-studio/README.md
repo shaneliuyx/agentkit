@@ -106,6 +106,7 @@ A complete guide to installing, configuring, and operating AgentKit Studio.
 | **agentkit checkout** | Protocol spine (installed editable) | this repo's parent `agentkit/` |
 | **agent-prep/shared** | Backend menu + token honesty | imported via `sys.path` shim, no install |
 | An **LLM endpoint** | To actually run | local oMLX, or VibeProxy→Claude, or any OpenAI-compatible URL |
+| **scrapling** (optional) | Stronger `web_fetch` on JS / anti-bot pages | `web_fetch` works without it (stdlib `urllib` fallback). Install only if pages render empty: `uv pip install "scrapling[all]" && scrapling install` (or set `SCRAPLING_BIN`) |
 
 ### 1.2 Backend
 
@@ -245,6 +246,12 @@ a path that escapes the jail (`..`, absolute, or symlink-out) is **refused**, an
 the Tools panel renders that refusal in an amber warning (driven by an explicit
 `rejected` flag, not text-guessing). A web search that falls back to a secondary
 backend shows a degradation notice rather than failing the run.
+
+`web_fetch` reads a page to clean markdown with **no required install**: it uses
+the `scrapling` CLI when present (best for JS-rendered / anti-bot pages) and
+otherwise degrades to a pure-stdlib `urllib` GET + HTML→markdown converter. The
+fallback can't run JavaScript or evade anti-bot, so if a page comes back empty,
+install scrapling (see §1.1) to upgrade that path.
 
 ### 3.5 Loop Doctor (health check)
 

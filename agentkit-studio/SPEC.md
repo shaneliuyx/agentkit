@@ -37,7 +37,7 @@ Everything below already exists — Studio is the glue + the FastAPI/React layer
 | CLI adapter | `backends.CliLLMClient` | subprocess backend (no usage → estimated) |
 | Requirement→phases | `planner.plan(task, *, decomposer=None)` → `Plan` (`steps: PlanStep[]`) | default offline; inject LLM decomposer |
 | Phase→topology | `topology.dynamic.assign_topologies(plan, *, mode, client, llm, fixed)` | `mode="auto"` 0-LLM default; `llm=True` for richer |
-| Topology classify | `topology.dynamic.classify_step_topology(desc)` → SINGLE/STAR/MESH/PIPELINE | keyword heuristic |
+| Topology classify | `topology.dynamic.classify_step_topology(desc)` → SINGLE/STAR/MAP/MESH/PIPELINE | keyword heuristic; MAP triggers on "each"/"every"/"map" — fans out one worker per upstream item |
 | Deploy/run | `topology.dynamic.run_plan(plan, client, *, budget, max_workers)` → `DynamicPlanResult` | **synchronous**, dispatches per topology |
 | Step result | `topology.dynamic.StepRun` (`step_id`, `description`, `topology`, `output`, `n_agents`, `tokens`, `wall_s`) | per-phase render data |
 | Autonomous loop | `orchestrator.run`, `OrchestratorConfig`, `assess`, `StallAssessment`, `ProgressState`, `Finding`, `init_task`, `log_event` | self-improve / re-plan events |
@@ -219,6 +219,7 @@ emits a final `done` with partial results.
 - `GET  /run/{session_id}?requirement=...` → `text/event-stream` (sse-starlette).
 - `POST /cancel/{session_id}` → `{cancelled:true}`.
 - `GET  /artifacts/{session_id}` → memory dump, GraphStore DAG, gate log (panel backfill).
+- `POST /session/{session_id}/chat` → body `{message:str, history:[{role,content}]}` — one-shot follow-up grounded in `session.last_run.result`; returns `{reply:str}`. Requires a finished run (409 otherwise). Uses the session's own LLM backend at `temperature=0.3`. History is client-side — full prior turns sent each request.
 - Phoenix link: `GET /phoenix` → `{url:"http://localhost:6006"}` if up.
 
 ### 5.5 Panels (comprehensive — each its own `panels/*.py`, fed during/after the run)
@@ -240,7 +241,7 @@ emits a final `done` with partial results.
 
 - **State:** `runStore` (Zustand) — a reducer keyed on `event.type`. Holds `phases[]`,
   `graph{nodes,edges}`, `tokens{input,output,total,estimated}`, `budget`, per-panel arrays,
-  `result`, `status`.
+  `result`, `status`, `task` (from `plan` event), `pendingContinue` (one-shot signal: `ResultWindow` sets → `RunBar` consumes + clears to fire a new run).
 - **Graph (`topologyLayout.ts`):** map each `PlanStep` to a **phase node**; expand its
   `topology` into intra-phase agent nodes/edges:
   - `SINGLE` → 1 agent node.
@@ -282,6 +283,7 @@ usage telemetry — `TokenAccounting`'s designed behavior. Never render estimate
 7. **M7 — Loop Library: catalog-seeded planning + Loops panel** (§10).
 8. **M8 — Loop Doctor: audit wired to gates/budget/verify** (§10).
 9. **M9 — agentkit skills (5 paths) + export-run-as-loop** (§10).
+10. **M10 — Chat panel + Continue run** — `POST /session/{id}/chat`; VS Code-style right-side panel; result as first assistant message; `↑ Send` for instant Q&A, `↻ Continue run` composes original-task + result context + follow-up into a new `/run`; MAP topology (fan-out one worker per upstream item).
 
 ---
 

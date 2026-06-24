@@ -31,6 +31,7 @@ import type {
   TopologyKind,
   VerifyFinding,
 } from "../api/types";
+import { toTopologyKind } from "../api/types";
 
 /** A web/tool activity entry — a tool_call optionally paired with its tool_result. */
 export interface ToolActivity {
@@ -138,6 +139,9 @@ export interface RunState {
   apply: (event: StudioEvent) => void;
   beginRun: (sessionId: string, mode: RunMode) => void;
   reset: () => void;
+  /** One-shot signal: ResultWindow sets this; RunBar consumes + clears it. */
+  pendingContinue: string | null;
+  setContinue: (req: string | null) => void;
 }
 
 const EMPTY_TOKENS: TokenState = { input: 0, output: 0, total: 0, estimated: false };
@@ -169,6 +173,7 @@ const initialState = {
   loopSeed: null as LoopSeedPayload | null,
   tools: [] as ToolActivity[],
   loopDoctor: [] as LoopDoctorCheck[],
+  pendingContinue: null as string | null,
 };
 
 // ── pure helpers (immutable phase transitions) ─────────────────────────────
@@ -215,6 +220,8 @@ export const useRunStore = create<RunState>((set) => ({
 
   reset: () => set({ ...initialState }),
 
+  setContinue: (req) => set({ pendingContinue: req }),
+
   apply: (event) =>
     set((state) => {
       switch (event.type) {
@@ -231,7 +238,7 @@ export const useRunStore = create<RunState>((set) => ({
         case "topology": {
           let phases = state.phases;
           for (const t of event.payload.steps) {
-            phases = setPhase(phases, t.id, { topology: t.topology });
+            phases = setPhase(phases, t.id, { topology: toTopologyKind(t.topology) });
           }
           return { phases };
         }
@@ -257,7 +264,7 @@ export const useRunStore = create<RunState>((set) => ({
           return {
             phases: setPhase(state.phases, event.payload.step_id, {
               state: "done",
-              topology: event.payload.topology,
+              topology: toTopologyKind(event.payload.topology),
               n_agents: event.payload.n_agents,
               tokens: event.payload.tokens,
               wall_s: event.payload.wall_s,

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 SINGLE = "single"
 PIPELINE = "pipeline"          # A→B→C ordered (lab: sequential)
 STAR = "star"                  # 1→N→reduce  (lab: parallel / hierarchical)
+MAP = "map"                    # fan-out over items from upstream (1 worker per item)
 TREE = "tree"                  # orchestrator→leaves, bounded depth (lab: hierarchical)
 MESH = "mesh"                  # peer-to-peer (approximated as fan-out + reduce)
 GATEWAY = "gateway"            # entry-point routing, upstream of fan-out

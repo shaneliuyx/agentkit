@@ -12,7 +12,14 @@
 
 // ── Shared sub-shapes referenced by multiple payloads ──────────────────────
 
-export type TopologyKind = "SINGLE" | "STAR" | "MESH" | "PIPELINE";
+export type TopologyKind = "SINGLE" | "STAR" | "MAP" | "MESH" | "PIPELINE";
+
+/** Normalize backend lowercase topology strings ("star", "map") to the frontend enum form. */
+export function toTopologyKind(raw: string): TopologyKind {
+  const upper = raw.toUpperCase() as TopologyKind;
+  const valid: TopologyKind[] = ["SINGLE", "STAR", "MAP", "MESH", "PIPELINE"];
+  return valid.includes(upper) ? upper : "SINGLE";
+}
 
 /** A planned phase (SPEC §4 `plan`). */
 export interface PlanStep {
