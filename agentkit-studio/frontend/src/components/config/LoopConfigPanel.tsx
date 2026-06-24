@@ -49,6 +49,7 @@ async function _postGoal(
   goal: GoalForm,
   setBusy: (b: boolean) => void,
   setStatus: (s: string | null) => void,
+  onSessionNotFound?: () => void,
 ) {
   setBusy(true);
   setStatus(null);
@@ -70,7 +71,13 @@ async function _postGoal(
       setStatus("✓ Goal applied");
     } else {
       const d = await res.json().catch(() => ({}));
-      setStatus(`✗ ${(d as { detail?: string }).detail ?? "Failed"}`);
+      const detail = (d as { detail?: string }).detail ?? "Failed";
+      if (res.status === 404 && detail.includes("session") && onSessionNotFound) {
+        onSessionNotFound();
+        setStatus("✓ Goal saved — session expired, will apply on next connect");
+      } else {
+        setStatus(`✗ ${detail}`);
+      }
     }
   } catch (e: unknown) {
     setStatus(`✗ ${e instanceof Error ? e.message : "Network error"}`);
@@ -133,7 +140,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
       setGoalStatus("✓ Goal saved — will apply when session connects");
       return;
     }
-    await _postGoal(sessionId, goal, setGoalBusy, setGoalStatus);
+    await _postGoal(sessionId, goal, setGoalBusy, setGoalStatus, () => { pendingApply.current = true; });
   };
 
   const handleClearGoal = async () => {
