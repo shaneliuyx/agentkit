@@ -116,12 +116,13 @@ function relProps(kind: EdgeKind): {
 }
 
 // Layout geometry — kept as named constants, not magic numbers.
-const PHASE_COL_W = 320; // horizontal gap between phases
-const PHASE_Y = 0; // phase header row
-const AGENT_ROW_Y = 130; // hub / first agent row
-const SPOKE_ROW_Y = 250; // spoke / debate / stage row
-const REDUCE_ROW_Y = 380;
-const AGENT_X_GAP = 90;
+const PHASE_COL_W = 400; // horizontal gap between phases (wider to avoid inter-phase overlap)
+const PHASE_Y = 0;        // phase header row
+const AGENT_ROW_Y = 160;  // hub / first agent row (extra clearance for 3-line clamped header)
+const SPOKE_ROW_Y = 290;  // spoke / debate / stage row
+const REDUCE_ROW_Y = 420;
+const AGENT_X_GAP = 110;  // wider agent spread so parallel nodes don't touch
+const NODE_WIDTH = 220;   // explicit width for React Flow fitView bounds calculation
 const DEFAULT_WORKERS = 3; // worker count before phase_done reports n_agents
 
 /**
@@ -194,6 +195,7 @@ function makeNode(
     id,
     type: "studio",
     position: { x, y },
+    width: NODE_WIDTH,
     data: { siblingIndex: 0, ...data },
   };
 }
