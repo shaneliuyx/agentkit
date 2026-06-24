@@ -26,6 +26,7 @@
  * This module is intentionally framework-light and side-effect free so it can be
  * unit-tested (see topologyLayout.test.ts) and so React Flow only owns rendering.
  */
+import Dagre from "@dagrejs/dagre";
 import type { Edge, Node } from "reactflow";
 import type { PhaseState } from "../../store/runStore";
 import type { TopologyKind } from "../../api/types";
@@ -153,7 +154,37 @@ function phaseNodeId(phaseId: string): string {
   return `phase:${phaseId}`;
 }
 
-/** Build all nodes + edges for a list of phases. */
+/**
+ * Run dagre over the full node/edge set to compute non-overlapping positions.
+ * Node heights vary by kind; widths use the shared NODE_WIDTH constant.
+ * rankdir=LR keeps the phase pipeline flowing left-to-right.
+ */
+function applyDagreLayout(nodes: StudioNode[], edges: StudioEdge[]): StudioNode[] {
+  const g = new Dagre.graphlib.Graph({ multigraph: true });
+  g.setDefaultEdgeLabel(() => ({}));
+  g.setGraph({ rankdir: "LR", ranksep: 80, nodesep: 30 });
+
+  for (const node of nodes) {
+    const h = node.data.kind === "phase" ? 90 : 60;
+    g.setNode(node.id, { width: NODE_WIDTH, height: h });
+  }
+  for (const edge of edges) {
+    g.setEdge(edge.source, edge.target, {}, edge.id);
+  }
+
+  Dagre.layout(g);
+
+  return nodes.map((node) => {
+    const pos = g.node(node.id);
+    const h = node.data.kind === "phase" ? 90 : 60;
+    return {
+      ...node,
+      position: { x: pos.x - NODE_WIDTH / 2, y: pos.y - h / 2 },
+    };
+  });
+}
+
+/** Build all nodes + edges for a list of phases, then apply dagre layout. */
 export function buildGraph(phases: PhaseState[]): {
   nodes: StudioNode[];
   edges: StudioEdge[];
@@ -182,7 +213,7 @@ export function buildGraph(phases: PhaseState[]): {
     }
   }
 
-  return { nodes, edges };
+  return { nodes: applyDagreLayout(nodes, edges), edges };
 }
 
 function makeNode(
