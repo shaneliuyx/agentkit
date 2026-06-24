@@ -156,7 +156,11 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   };
 
   const handleSuggest = async () => {
-    if (!sessionId || !goal.end_state.trim()) return;
+    if (!goal.end_state.trim()) return;
+    if (!sessionId) {
+      setGoalStatus("✗ Connect a session first — Suggest needs an LLM");
+      return;
+    }
     setSuggestBusy(true);
     setGoalStatus(null);
     try {
@@ -184,7 +188,12 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
         setGoalStatus("✓ Parameters suggested — review before applying");
       } else {
         const d = await res.json().catch(() => ({}));
-        setGoalStatus(`✗ ${(d as { detail?: string }).detail ?? "Suggest failed"}`);
+        const detail = (d as { detail?: string }).detail ?? "Suggest failed";
+        if (res.status === 404) {
+          setGoalStatus("✗ Session expired — click Connect session, then retry Suggest");
+        } else {
+          setGoalStatus(`✗ ${detail}`);
+        }
       }
     } catch (e: unknown) {
       setGoalStatus(`✗ ${e instanceof Error ? e.message : "Network error"}`);
