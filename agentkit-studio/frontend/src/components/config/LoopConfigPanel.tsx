@@ -156,11 +156,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   };
 
   const handleSuggest = async () => {
-    if (!goal.end_state.trim()) return;
-    if (!sessionId) {
-      setGoalStatus("✗ Connect a session first — Suggest needs an LLM");
-      return;
-    }
+    if (!sessionId || !goal.end_state.trim()) return;
     setSuggestBusy(true);
     setGoalStatus(null);
     try {
@@ -355,7 +351,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   className="btn"
                   onClick={handleSuggest}
                   disabled={suggestBusy || !sessionId || !goal.end_state.trim()}
-                  title="Ask the LLM to suggest evidence_cmd, success_pattern and limits"
+                  title={!sessionId ? "Connect a session first — Suggest calls the LLM" : "Ask the LLM to suggest parameters from your end_state"}
                 >
                   {suggestBusy ? "Thinking…" : "✨ Suggest"}
                 </button>
