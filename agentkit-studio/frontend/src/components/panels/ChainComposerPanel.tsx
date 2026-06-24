@@ -31,7 +31,7 @@ export function ChainComposerPanel() {
     setRunning(true);
     try {
       const parsed = JSON.parse(spec);
-      const res = await fetch("http://localhost:8000/chain/run", {
+      const res = await fetch("/api/chain/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(parsed),

@@ -15,7 +15,7 @@ interface LoopConfigPanelProps {
   currentTask?: string;
 }
 
-type Tab = "goal" | "scheduler" | "chain";
+type Tab = "goal" | "scheduler" | "chain" | "hill_climb";
 
 interface GoalForm {
   end_state: string;
@@ -89,6 +89,8 @@ async function _postGoal(
 
 export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanelProps) {
   const setConfiguredGoal = useRunStore((s) => s.setConfiguredGoal);
+  const setConfiguredHillClimb = useRunStore((s) => s.setConfiguredHillClimb);
+  const setSchedulerTriggers = useRunStore((s) => s.setSchedulerTriggers);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [tab, setTab] = useState<Tab>("goal");
 
@@ -103,6 +105,11 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const [triggers, setTriggers] = useState<SchedulerTrigger[]>([]);
   const [cronSpec, setCronSpec] = useState("");
   const [cronChain, setCronChain] = useState("");
+
+  // ── Hill Climb state ───────────────────────────────────────────────────
+  const [hcMetric, setHcMetric] = useState("score");
+  const [hcMinDelta, setHcMinDelta] = useState("0.01");
+  const [hcMaxEpochs, setHcMaxEpochs] = useState("10");
   const [schedStatus, setSchedStatus] = useState<string | null>(null);
 
   const open = () => {
@@ -225,7 +232,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
       // Refresh list
       fetch("/api/scheduler")
         .then((r) => r.json())
-        .then((d) => setTriggers(d.triggers ?? []))
+        .then((d) => { setTriggers(d.triggers ?? []); setSchedulerTriggers({ triggers: d.triggers ?? [] }); })
         .catch(() => null);
     } else {
       setSchedStatus("✗ Registration failed (backend stub)");
@@ -257,7 +264,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
 
           {/* Tab bar */}
           <div className="loop-config-tabs" role="tablist">
-            {(["goal", "scheduler", "chain"] as Tab[]).map((t) => (
+            {(["goal", "scheduler", "chain", "hill_climb"] as Tab[]).map((t) => (
               <button
                 key={t}
                 role="tab"
@@ -486,6 +493,62 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
               <button className="btn" onClick={close}>
                 Open Chain tab ↓
               </button>
+            </div>
+          )}
+
+          {/* ── Hill Climb tab ── */}
+          {tab === "hill_climb" && (
+            <div className="loop-config-body">
+              <p className="loop-config-hint">
+                Configure DGM hill-climbing: score metric, acceptance threshold, and epoch cap.
+              </p>
+              <div className="lc-field">
+                <label htmlFor="lc-hc-metric">Score metric</label>
+                <input
+                  id="lc-hc-metric"
+                  className="mono"
+                  placeholder="score"
+                  value={hcMetric}
+                  onChange={(e) => setHcMetric(e.target.value)}
+                />
+              </div>
+              <div className="lc-row">
+                <div className="lc-field">
+                  <label htmlFor="lc-hc-delta">Min improvement</label>
+                  <input
+                    id="lc-hc-delta"
+                    className="mono"
+                    type="number"
+                    step="0.001"
+                    value={hcMinDelta}
+                    onChange={(e) => setHcMinDelta(e.target.value)}
+                  />
+                </div>
+                <div className="lc-field">
+                  <label htmlFor="lc-hc-epochs">Max epochs</label>
+                  <input
+                    id="lc-hc-epochs"
+                    className="mono"
+                    type="number"
+                    value={hcMaxEpochs}
+                    onChange={(e) => setHcMaxEpochs(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="lc-actions">
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setConfiguredHillClimb({
+                      score_metric: hcMetric.trim() || "score",
+                      min_improvement: parseFloat(hcMinDelta) || 0.01,
+                      max_epochs: parseInt(hcMaxEpochs) || 10,
+                    });
+                  }}
+                >
+                  Apply hill climb config
+                </button>
+              </div>
             </div>
           )}
         </div>

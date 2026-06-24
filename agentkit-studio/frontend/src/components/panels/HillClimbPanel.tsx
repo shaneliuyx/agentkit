@@ -4,12 +4,26 @@ import { PanelShell } from "./PanelShell";
 
 export function HillClimbPanel() {
   const hillClimb = useRunStore((s) => s.hillClimb);
+  const configured = useRunStore((s) => s.configuredHillClimb);
 
   return (
     <PanelShell
-      empty={hillClimb.length === 0}
-      emptyHint="No hill-climbing rounds yet. Prompt evolution runs when hill_climb_from_traces() is called."
+      empty={configured === null && hillClimb.length === 0}
+      emptyHint="No hill-climb config. Open ⚙ Loop → Hill Climb tab to set score metric and thresholds."
     >
+      {configured !== null && hillClimb.length === 0 && (
+        <article className="card panel-row">
+          <div className="panel-row-head">
+            <span className="mono tag">hill climb config</span>
+            <span className="mono muted">{configured.max_epochs} epochs max</span>
+          </div>
+          <div className="panel-meta mono">
+            <span className="muted">metric:</span> {configured.score_metric}
+            {"  "}
+            <span className="muted">min Δ:</span> {configured.min_improvement}
+          </div>
+        </article>
+      )}
       {hillClimb.map((h, i) => (
         <article key={i} className="card panel-row">
           <div className="panel-row-head">

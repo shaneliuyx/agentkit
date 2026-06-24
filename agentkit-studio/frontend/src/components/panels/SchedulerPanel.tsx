@@ -8,7 +8,7 @@ export function SchedulerPanel() {
   return (
     <PanelShell
       empty={triggers.length === 0}
-      emptyHint="No scheduler triggers registered. Wire cron/webhook triggers via agentkit.runtime.scheduler.Scheduler."
+      emptyHint="No triggers yet. Open ⚙ Loop → Scheduler tab to register a cron trigger."
     >
       {triggers.map((t, i) => (
         <article key={i} className="card panel-row">

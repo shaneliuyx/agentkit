@@ -145,6 +145,9 @@ export interface RunState {
   goalMet: GoalMetPayload | null;
   configuredGoal: { end_state: string; evidence_cmd: string; success_pattern: string; constraints: string[]; max_turns: number; max_tokens: number; timeout_s: number } | null;
   setConfiguredGoal: (g: RunState["configuredGoal"]) => void;
+  configuredHillClimb: { score_metric: string; min_improvement: number; max_epochs: number } | null;
+  setConfiguredHillClimb: (c: RunState["configuredHillClimb"]) => void;
+  setSchedulerTriggers: (p: SchedulerPayload) => void;
   hillClimb: HillClimbPayload[];
   schedulerTriggers: SchedulerPayload | null;
   chainResults: ChainPayload[];
@@ -189,6 +192,7 @@ const initialState = {
   loopDoctor: [] as LoopDoctorCheck[],
   goalMet: null as GoalMetPayload | null,
   configuredGoal: null as RunState["configuredGoal"],
+  configuredHillClimb: null as RunState["configuredHillClimb"],
   hillClimb: [] as HillClimbPayload[],
   schedulerTriggers: null as SchedulerPayload | null,
   chainResults: [] as ChainPayload[],
@@ -239,6 +243,8 @@ export const useRunStore = create<RunState>((set) => ({
 
   reset: () => set({ ...initialState }),
   setConfiguredGoal: (g) => set({ configuredGoal: g }),
+  setConfiguredHillClimb: (c) => set({ configuredHillClimb: c }),
+  setSchedulerTriggers: (p) => set({ schedulerTriggers: p }),
 
   setContinue: (req) => set({ pendingContinue: req }),
 
