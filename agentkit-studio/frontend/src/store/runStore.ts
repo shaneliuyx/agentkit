@@ -143,6 +143,8 @@ export interface RunState {
 
   // ── Loop Engineering (agentkit.loop) ──
   goalMet: GoalMetPayload | null;
+  configuredGoal: { end_state: string; evidence_cmd: string; success_pattern: string; constraints: string[]; max_turns: number; max_tokens: number; timeout_s: number } | null;
+  setConfiguredGoal: (g: RunState["configuredGoal"]) => void;
   hillClimb: HillClimbPayload[];
   schedulerTriggers: SchedulerPayload | null;
   chainResults: ChainPayload[];
@@ -186,6 +188,7 @@ const initialState = {
   tools: [] as ToolActivity[],
   loopDoctor: [] as LoopDoctorCheck[],
   goalMet: null as GoalMetPayload | null,
+  configuredGoal: null as RunState["configuredGoal"],
   hillClimb: [] as HillClimbPayload[],
   schedulerTriggers: null as SchedulerPayload | null,
   chainResults: [] as ChainPayload[],
@@ -235,6 +238,7 @@ export const useRunStore = create<RunState>((set) => ({
     set({ ...initialState, sessionId, mode, status: "connecting" }),
 
   reset: () => set({ ...initialState }),
+  setConfiguredGoal: (g) => set({ configuredGoal: g }),
 
   setContinue: (req) => set({ pendingContinue: req }),
 

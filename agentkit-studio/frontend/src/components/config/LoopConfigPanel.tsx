@@ -7,6 +7,7 @@
  *   Chain     — shortcut note pointing to the Chain panel tab
  */
 import { useEffect, useRef, useState } from "react";
+import { useRunStore } from "../../store/runStore";
 import "./config.css";
 
 interface LoopConfigPanelProps {
@@ -87,6 +88,7 @@ async function _postGoal(
 }
 
 export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanelProps) {
+  const setConfiguredGoal = useRunStore((s) => s.setConfiguredGoal);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [tab, setTab] = useState<Tab>("goal");
 
@@ -139,6 +141,15 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
     // Always save locally — user gets instant feedback regardless of session state
     pendingApply.current = true;
     setGoalStatus("✓ Goal saved — will apply on next run");
+    setConfiguredGoal({
+      end_state: goal.end_state.trim(),
+      evidence_cmd: goal.evidence_cmd.trim(),
+      success_pattern: goal.success_pattern.trim(),
+      constraints: goal.constraints.split("\n").map((s) => s.trim()).filter(Boolean),
+      max_turns: Number(goal.max_turns) || 25,
+      max_tokens: Number(goal.max_tokens) || 100_000,
+      timeout_s: Number(goal.timeout_s) || 1800,
+    });
     // Best-effort push to backend if session exists
     if (sessionId) {
       void _postGoal(sessionId, goal, () => {}, (s) => {
