@@ -103,12 +103,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const [cronChain, setCronChain] = useState("");
   const [schedStatus, setSchedStatus] = useState<string | null>(null);
 
-  const open = () => {
-    if (currentTask && !goal.end_state) {
-      setGoal((g) => ({ ...g, end_state: currentTask }));
-    }
-    dialogRef.current?.showModal();
-  };
+  const open = () => dialogRef.current?.showModal();
   const close = () => dialogRef.current?.close();
 
   // Close on backdrop click
