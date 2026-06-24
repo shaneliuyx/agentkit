@@ -419,6 +419,283 @@ python examples/research_agent.py
 python examples/topology_all_demo.py
 ```
 
+
+## Loop Engineering — Goal, Chain, Scheduler
+
+The `agentkit.loop` shared library closes the gap between a task description
+("ship billing v2") and a machine-verifiable proof that it's done. Three
+orthogonal concepts:
+
+| Concept | What it does | When to use |
+|---|---|---|
+| **LoopGoal** | Verifiable stop condition — shell command + regex pattern | Any loop you want to stop on evidence, not timeouts |
+| **LoopChain** | DAG of loops — outputs flow downstream, Kahn topo-sort | Multi-step pipelines (research→verify→deploy) |
+| **Scheduler** | Cron/webhook triggers that fire a chain automatically | Nightly runs, CI webhooks, periodic self-improvement |
+
+---
+
+### LoopGoal — verifiable stop conditions
+
+`check_goal()` is a **pure subprocess**: no LLM, no network, no mutation.
+It runs `evidence_cmd` and checks the output against `success_pattern` (regex).
+The runner calls it after every phase; the loop stops when `StopVerdict.met == True`.
+
+```python
+from agentkit.loop.goal import LoopGoal, check_goal
+
+# ── Pattern 1: The Ralph Technique — grep a status file ──────────────────
+# Lifted from: while ! grep -q "DONE" STATUS.md; do ...; done
+goal = LoopGoal(
+    end_state="Agent wrote STATUS.md and marked ALL DONE",
+    evidence_cmd="grep -q 'ALL DONE' STATUS.md && echo OK",
+    success_pattern=r"OK",
+)
+
+# ── Pattern 2: Test suite passes ─────────────────────────────────────────
+goal = LoopGoal(
+    end_state="All billing tests pass",
+    evidence_cmd="pytest tests/billing -q 2>&1 | tail -1",
+    success_pattern=r"\d+ passed",          # matches "4 passed" or "12 passed, 1 warning"
+    max_turns=30,
+    max_tokens=150_000,
+)
+
+# ── Pattern 3: HTTP health check ─────────────────────────────────────────
+goal = LoopGoal(
+    end_state="Deployment is healthy",
+    evidence_cmd="curl -sf http://localhost:8080/health",
+    success_pattern=r'"status"\s*:\s*"ok"',   # JSON body contains "status": "ok"
+    timeout_s=3600,
+)
+
+# ── Pattern 4: Output file produced ──────────────────────────────────────
+goal = LoopGoal(
+    end_state="Agent wrote report.md with at least 500 chars",
+    evidence_cmd="wc -c < report.md",
+    success_pattern=r"[5-9]\d{2}|[1-9]\d{3,}",   # >= 500
+)
+
+# ── Pattern 5: Git commit exists ─────────────────────────────────────────
+goal = LoopGoal(
+    end_state="Feature branch has a commit mentioning billing",
+    evidence_cmd="git log --oneline -5",
+    success_pattern=r"billing",
+)
+
+# ── Pattern 6: No evidence_cmd — advisory (max_turns only) ───────────────
+# When there is no machine-checkable criterion, use max_turns as a hard cap.
+goal = LoopGoal(
+    end_state="Explore the codebase and produce a summary",
+    max_turns=10,          # stop after 10 turns; StopVerdict.met will be False
+    max_tokens=50_000,
+)
+
+# ── Pattern 7: Constraints + evidence ────────────────────────────────────
+# Constraints are advisory — they're shown to the LLM as invariants to respect;
+# check_goal() does not enforce them mechanically, but the evidence_cmd can.
+goal = LoopGoal(
+    end_state="Refactor complete: no test regressions, only 2 files changed",
+    evidence_cmd="pytest -q && git diff --name-only HEAD~1 | wc -l",
+    success_pattern=r"^\s*[12]\s*$",        # ≤ 2 files changed
+    constraints=(
+        "Do not change the public API surface",
+        "Do not add new dependencies",
+    ),
+    max_turns=20,
+)
+```
+
+**Run a goal check manually:**
+
+```python
+verdict = check_goal(goal, cwd=".")
+print(verdict.met)       # True / False
+print(verdict.evidence)  # raw stdout from evidence_cmd (first 4000 chars)
+print(verdict.reason)    # human-readable: "matched pattern" / "exit 0" / "pattern not found"
+```
+
+**Attach a goal to a Studio session via REST:**
+
+```bash
+# Set goal on an active session
+curl -X POST http://localhost:8000/session/{SESSION_ID}/goal \
+  -H "Content-Type: application/json" \
+  -d '{
+    "end_state": "All billing tests pass",
+    "evidence_cmd": "pytest tests/billing -q 2>&1 | tail -1",
+    "success_pattern": "\\d+ passed",
+    "max_turns": 30
+  }'
+
+# Clear goal (run until max_turns only)
+curl -X DELETE http://localhost:8000/session/{SESSION_ID}/goal
+
+# Check what goal is active
+curl http://localhost:8000/session/{SESSION_ID}/goal
+```
+
+**Or use the Studio UI:** click **⚙ Loop** in the header → **Goal** tab → fill the
+form → **Apply goal**. The runner picks it up immediately on the next phase.
+
+---
+
+### LoopChain — DAG composition
+
+A `LoopChain` is a directed acyclic graph of `LoopSpec` nodes. Each spec declares
+its `depends_on` predecessors; upstream outputs are injected into the downstream
+runner's context under the key `_<name>_output`.
+
+```python
+from agentkit.loop.chain import LoopChain, LoopSpec
+from agentkit.loop.goal import LoopGoal
+
+# ── Pattern 1: Linear pipeline ───────────────────────────────────────────
+def run_research(ctx: dict) -> dict:
+    # ctx["task"] is the initial context; use any runner here
+    return {"findings": "..."}
+
+def run_synthesize(ctx: dict) -> dict:
+    findings = ctx["_research_output"]["findings"]
+    return {"report": f"## Report\n{findings}"}
+
+def run_deploy(ctx: dict) -> dict:
+    return {"url": "http://localhost:8080"}
+
+result = (
+    LoopChain()
+    .add(LoopSpec("research",   run_research))
+    .add(LoopSpec("synthesize", run_synthesize, depends_on=("research",)))
+    .add(LoopSpec("deploy",     run_deploy,     depends_on=("synthesize",)))
+    .run(initial_ctx={"task": "ship billing v2"})
+)
+print(result.status)                        # "done"
+print(result.outputs["synthesize"]["report"])
+
+# ── Pattern 2: Parallel branches + merge ─────────────────────────────────
+# research_web and research_code run concurrently (no shared dependency)
+result = (
+    LoopChain()
+    .add(LoopSpec("research_web",  run_web_research))
+    .add(LoopSpec("research_code", run_code_research))
+    .add(LoopSpec("merge", run_merge,
+                  depends_on=("research_web", "research_code")))
+    # merge ctx has _research_web_output AND _research_code_output
+    .run()
+)
+
+# ── Pattern 3: Goal on a leaf node ───────────────────────────────────────
+deploy_goal = LoopGoal(
+    end_state="Service healthy post-deploy",
+    evidence_cmd="curl -sf http://localhost:8080/health",
+    success_pattern=r'"status"\s*:\s*"ok"',
+    timeout_s=120,
+)
+
+result = (
+    LoopChain()
+    .add(LoopSpec("build",  run_build))
+    .add(LoopSpec("deploy", run_deploy,
+                  goal=deploy_goal,
+                  depends_on=("build",)))
+    .run()
+)
+# If deploy's goal isn't met, SpecResult.verdict.met is False; inspect it:
+for r in result.results:
+    if r.verdict and not r.verdict.met:
+        print(f"{r.name} goal unmet: {r.verdict.reason}")
+```
+
+**Run a chain via REST (Studio Chain panel or curl):**
+
+```bash
+curl -X POST http://localhost:8000/chain/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "specs": [
+      { "name": "research",   "depends_on": [] },
+      { "name": "synthesize", "depends_on": ["research"] },
+      { "name": "deploy",     "depends_on": ["synthesize"] }
+    ],
+    "initial_ctx": { "task": "ship billing v2" }
+  }'
+```
+
+Results stream as `ChainEvent` SSE frames. The Studio **Chain** panel tab
+shows live per-spec status, skipped/done state, and output summary.
+
+---
+
+### Scheduler — automated triggers
+
+`agentkit.runtime.scheduler.Scheduler` registers cron expressions (and, in a
+later phase, webhooks) that fire a chain automatically.
+
+```python
+from agentkit.runtime.scheduler import Scheduler, CronRegistration
+
+scheduler = Scheduler(graph_store=gs)
+
+# ── Pattern 1: Nightly self-improvement run ───────────────────────────────
+scheduler.register(CronRegistration(
+    id="nightly-improve",
+    spec="0 2 * * *",                # 02:00 UTC daily
+    chain_id="self-improve-chain",
+))
+
+# ── Pattern 2: Hourly health check ───────────────────────────────────────
+scheduler.register(CronRegistration(
+    id="hourly-health",
+    spec="0 * * * *",
+    chain_id="health-check-chain",
+))
+
+# ── Pattern 3: Check due triggers and fire ───────────────────────────────
+due = scheduler.due()                # returns List[CronRegistration] ready to fire
+for reg in due:
+    chain_result = registered_chains[reg.chain_id].run()
+    scheduler.mark_fired(reg.id)
+```
+
+**Via REST:**
+
+```bash
+# List all registered triggers
+curl http://localhost:8000/scheduler
+
+# Register a cron trigger (full endpoint — see app.py)
+curl -X POST http://localhost:8000/scheduler/cron \
+  -H "Content-Type: application/json" \
+  -d '{ "spec": "0 2 * * *", "chain_id": "nightly-improve" }'
+```
+
+**Via Studio UI:** click **⚙ Loop** in the header → **Scheduler** tab →
+enter a cron expression + chain ID → **Register trigger**. Current triggers
+appear in the table below, and the **Scheduler** panel tab in the drawer
+streams live `scheduler` events.
+
+---
+
+### Studio Loop Config — quick reference
+
+Click **⚙ Loop** in the Studio header to open the config modal.
+
+| Tab | What you configure | Effect |
+|---|---|---|
+| **Goal** | `end_state`, `evidence_cmd`, `success_pattern`, `constraints`, `max_turns`, `max_tokens`, `timeout_s` | Runner calls `check_goal()` after each phase; stops + emits `GoalMetEvent` when met |
+| **Scheduler** | Cron expression + chain ID | Registers a `CronRegistration`; due triggers fire the chain |
+| **Chain** | — (shortcut to Chain tab) | Use the **Chain** panel tab in the drawer to compose chains via JSON editor |
+
+**Common goal recipes at a glance:**
+
+| Use case | `evidence_cmd` | `success_pattern` |
+|---|---|---|
+| pytest passes | `pytest -q 2>&1 \| tail -1` | `\d+ passed` |
+| HTTP health | `curl -sf http://host/health` | `"status".*"ok"` |
+| File exists + non-empty | `wc -c < output.md` | `[1-9]\d*` |
+| Git commit present | `git log --oneline -1` | `feat:` |
+| Status flag in file | `grep -q DONE STATUS.md && echo ok` | `ok` |
+| Max-turns only (no check) | _(leave blank)_ | _(leave blank)_ |
+
 ## Provenance
 
 All `runtime` / `memory` / `agent`-loop / `router` code is **extracted and

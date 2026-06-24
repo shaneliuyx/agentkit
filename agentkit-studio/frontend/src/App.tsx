@@ -9,6 +9,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { BackendPanel } from "./components/config/BackendPanel";
 import { RunBar } from "./components/config/RunBar";
 import { RunActions } from "./components/config/RunActions";
+import { LoopConfigPanel } from "./components/config/LoopConfigPanel";
 import { TopologyGraph } from "./components/graph/TopologyGraph";
 import { TokenMeter } from "./components/hud/TokenMeter";
 import { StreamPane } from "./components/hud/StreamPane";
@@ -71,6 +72,7 @@ export default function App() {
         <BackendPanel onSession={handleSession} mode={mode} disabled={false} />
         <RunBar sessionId={sessionId} mode={mode} onModeChange={setMode} />
         <RunActions sessionId={sessionId} />
+        <LoopConfigPanel sessionId={sessionId} />
       </header>
 
       <main className="studio-main">
