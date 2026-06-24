@@ -67,7 +67,7 @@ Phoenix `:6006` (the agent-prep smoke-test stack). Each panel degrades
 gracefully — an empty panel + a notice — when its service is down, so a run
 never crashes on a missing local service.
 
-## The 10 comprehensive panels
+## The 14 comprehensive panels
 
 The original 7 — Memory, Self-improve/Re-plan, Evolve, Security spine, DAG,
 Verification, Router — each its own `backend/studio/panels/*.py` module, fed
@@ -79,8 +79,13 @@ Studio is the glue, not a reimplementation.
 Three more landed with the Loop Library integration (M7–M8): **Loops**
 (catalog browse/find + seed a run), **Tools** (web_search + workspace-jailed
 read/write file activity), and **Loop Doctor** (the run audited against
-bounded / material-checks / safe-actions / clear-stopping). See the User Manual
-§3.3 for what each shows.
+bounded / material-checks / safe-actions / clear-stopping).
+
+Four more added with the Loop Engineering shared library (`agentkit.loop`):
+**Goal** (live stop-condition verdict after each phase), **Hill Climb** (epoch
+scores from `hill_climb_from_traces`), **Scheduler** (registered cron/webhook
+triggers), and **Chain** (JSON editor + live per-spec result stream). Configure
+all of them from the **⚙ Loop** button in the header. See §3.8 for details.
 
 ## Frontend
 
@@ -237,6 +242,10 @@ Open the panel drawer to inspect any dimension of the run:
 | **Router** | Per-phase difficulty → model tier routing |
 | **Loops** | Browse/find the loop-library catalog; seed a run from a loop |
 | **Tools** | Each web_search / read_file / write_file call: args, result summary, and any rejection or degradation notice |
+| **Goal** | Live stop-condition verdict: `met` / `not yet met`, the evidence command output, and which phase triggered the check |
+| **Hill Climb** | Epoch-by-epoch score + delta from `hill_climb_from_traces()`; status (`accept`/`reject`/`escalate`) + top weakness tags |
+| **Scheduler** | All registered cron/webhook triggers with last-fired and next-fire timestamps |
+| **Chain** | JSON editor for `LoopChain` specs + live per-spec status, skipped/done state, and output summary |
 
 ### 3.4 Tools (web + files)
 
@@ -282,6 +291,122 @@ can publish or contribute back.
   ends marked `cancelled` with the partial result, not an error.
 - If a **token ceiling** is exceeded mid-run, the run halts on `BudgetExceeded`
   and the Budget readout shows `exceeded`.
+
+
+### 3.8 Loop Engineering — Goal, Scheduler, Chain
+
+Click **⚙ Loop** in the header to open the Loop Config modal. Three tabs:
+
+#### Goal tab — verifiable stop conditions
+
+A `LoopGoal` replaces stall-based stopping with machine-checkable evidence.
+`check_goal()` runs a shell command and matches its output against a regex —
+**no LLM, no network**. The runner calls it after every phase.
+
+| Field | Required | Description |
+|---|---|---|
+| **End state** | ✓ | Human-readable description of what "done" means |
+| **Evidence command** | — | Shell command whose stdout is checked (`pytest -q`, `curl -sf …/health`) |
+| **Success pattern** | — | Regex applied to stdout. If blank, exit code 0 = met |
+| **Constraints** | — | One per line — shown to the LLM as invariants; not mechanically enforced |
+| **Max turns** | — | Hard turn cap (default 25) |
+| **Max tokens** | — | Hard token cap (default 100 000) |
+| **Timeout (s)** | — | Wall-clock limit (default 1800) |
+
+Common recipes:
+
+| Use case | Evidence command | Success pattern |
+|---|---|---|
+| pytest passes | `pytest -q 2>&1 \| tail -1` | `\d+ passed` |
+| HTTP health check | `curl -sf http://host/health` | `"status".*"ok"` |
+| File exists + non-empty | `wc -c < output.md` | `[1-9]\d*` |
+| Git commit present | `git log --oneline -1` | `feat:` |
+| Status flag in file | `grep -q DONE STATUS.md && echo ok` | `ok` |
+| Max-turns only (advisory) | *(leave blank)* | *(leave blank)* |
+
+Click **Apply goal** to `POST /session/{id}/goal`. Click **Clear** to remove it
+(`DELETE /session/{id}/goal`). The **Goal** panel tab shows the live verdict.
+
+```bash
+# Apply via curl (no UI)
+curl -X POST http://localhost:8000/session/{SESSION_ID}/goal \
+  -H "Content-Type: application/json" \
+  -d '{
+    "end_state": "All billing tests pass",
+    "evidence_cmd": "pytest tests/billing -q 2>&1 | tail -1",
+    "success_pattern": "\\d+ passed",
+    "max_turns": 30
+  }'
+
+# Remove goal
+curl -X DELETE http://localhost:8000/session/{SESSION_ID}/goal
+```
+
+#### Scheduler tab — automated triggers
+
+Register a cron expression to fire a `LoopChain` automatically:
+
+| Field | Example | Description |
+|---|---|---|
+| **Cron expression** | `0 2 * * *` | Standard 5-field cron — hourly, daily, etc. |
+| **Chain ID** | `nightly-improve` | Which chain to run when the trigger fires |
+
+The registered triggers appear in the table below the form and stream as
+`scheduler` SSE events to the **Scheduler** panel tab.
+
+Common cron patterns:
+
+| Schedule | Expression |
+|---|---|
+| Every hour | `0 * * * *` |
+| Every night at 02:00 UTC | `0 2 * * *` |
+| Every Monday 09:00 | `0 9 * * 1` |
+| Every 15 minutes | `*/15 * * * *` |
+
+```bash
+# Register via curl
+curl -X POST http://localhost:8000/scheduler/cron \
+  -H "Content-Type: application/json" \
+  -d '{"spec": "0 2 * * *", "chain_id": "nightly-improve"}'
+
+# List all triggers
+curl http://localhost:8000/scheduler
+```
+
+#### Chain tab — compose DAG pipelines
+
+Click **Chain** in the panel drawer to open the chain JSON editor. A chain
+spec declares named nodes and their `depends_on` predecessors; outputs from
+upstream nodes are injected into downstream runners.
+
+Minimal example:
+
+```json
+{
+  "specs": [
+    { "name": "research",   "depends_on": [] },
+    { "name": "synthesize", "depends_on": ["research"] },
+    { "name": "deploy",     "depends_on": ["synthesize"] }
+  ],
+  "initial_ctx": { "task": "ship billing v2" }
+}
+```
+
+Click **Run Chain** to `POST /chain/run`. Each spec fires a `ChainEvent` SSE
+frame; the panel shows per-spec status (done / skipped) and output summary.
+A spec is skipped automatically if any upstream node fails.
+
+```bash
+curl -X POST http://localhost:8000/chain/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "specs": [
+      { "name": "research",   "depends_on": [] },
+      { "name": "synthesize", "depends_on": ["research"] }
+    ],
+    "initial_ctx": { "task": "analyze agent patterns" }
+  }'
+```
 
 ## 4. Troubleshooting
 
