@@ -38,6 +38,7 @@ from studio.events import (
     GateEvent,
     GoalMetEvent,
     GraphEvent,
+    HillClimbEvent,
     LoopSeedEvent,
     PhaseDoneEvent,
     PhaseStartEvent,
@@ -155,6 +156,20 @@ def _with_upstream(description: str, upstream: str) -> str:
     return description
 
 
+#: A document is "complete" if its last non-space char closes a sentence/structure.
+#: Used to reject a truncated artifact in favor of a complete synthesis (see the
+#: result_output selection below). Markdown reports legitimately end on a period,
+#: list/table row, fence, blockquote, or heading underline — so the set is permissive;
+#: a bare cutoff mid-word/URL (the truncation symptom) fails it.
+_CLEAN_END_CHARS = frozenset(".!?)]\"'`|>*-_")
+
+
+def _ends_cleanly(text: str) -> bool:
+    """True if ``text`` ends at a sentence/structure boundary (not truncated mid-line)."""
+    stripped = text.rstrip()
+    return bool(stripped) and stripped[-1] in _CLEAN_END_CHARS
+
+
 class Runner:
     """Drives one studio run end-to-end, emitting the ordered SSE sequence.
 
@@ -265,6 +280,54 @@ class Runner:
             if _parts:
                 requirement = "\n".join(_parts) + "\n\n" + requirement
 
+        # Stash the original requirement so task_hash is stable across iterations
+        # (the seeder may rewrite requirement with "ITERATION N —..." prefix).
+        _original_requirement = requirement
+
+        # Hill climb: if auto_improve is on and a prior run exists for this task,
+        # copy its artifact into the current workspace and prefix the requirement
+        # with the prior score + weaknesses so the agent edits rather than regenerates.
+        _hc_cfg = getattr(session, "hill_climb_config", None) or {}
+        if _hc_cfg.get("auto_improve"):
+            import shutil
+            from studio.task_runs import TaskRunStore, task_hash as _task_hash
+            _thash = _task_hash(requirement)
+            _store = TaskRunStore()
+            # Prefer best-scoring run with content; fallback to latest.
+            _prior = _store.best(_thash)
+            if _prior and not (_prior.result_text or "").strip():
+                _prior = _store.latest(_thash)
+            if _prior:
+                from studio.workspace import workspace_root as _ws_root_fn3
+                _eff_ws2 = self._workspace_root or _ws_root_fn3()
+                _prior_art = _eff_ws2 / _prior.session_id / "artifact.md"
+                _artifact_copied = False
+                if _prior_art.exists():
+                    _curr_ws = Workspace(session.session_id, root=_eff_ws2)
+                    shutil.copy(_prior_art, _curr_ws.root / "artifact.md")
+                    _artifact_copied = True
+                # Accumulate weaknesses from ALL prior runs (not just the best) so
+                # every failure lesson carries forward. Deduplicate by exact string.
+                _all_prior = _store.all_runs(_thash)
+                _seen: set[str] = set()
+                _all_weaknesses: list[str] = []
+                for _run in _all_prior:
+                    for _w in _run.weaknesses:
+                        if _w not in _seen:
+                            _seen.add(_w)
+                            _all_weaknesses.append(_w)
+                _fix_rules = "\n".join(
+                    f"- OUTPUT MUST NOT exhibit: {w}" for w in _all_weaknesses
+                )
+                # Workers only have web_search/web_fetch — no file-read tool.
+                # Avoid instructing them to read artifact.md (they can't).
+                # Inject weaknesses as hard constraints on the ORIGINAL task instead.
+                if _fix_rules:
+                    requirement = (
+                        f"{requirement}\n\n"
+                        f"QUALITY CONSTRAINTS (accumulated from all prior attempts):\n{_fix_rules}"
+                    )
+
         # session frame
         self._emit(
             SessionEvent(llm=session.llm_info, embed=session.embed_info, mode=session.mode)
@@ -352,6 +415,14 @@ class Runner:
             )
             is_last = step is plan_obj.steps[-1]
             desc = step.description
+            # Inject the top-level task into every step whose description does not
+            # already contain it.  This matters especially for downstream phases
+            # (e.g. "create a research report") that are too terse to be meaningful
+            # without the original goal, and for PIPELINE stages (previously STAR)
+            # where the hub description never contained the full task text.
+            topo = step.topology or SINGLE
+            if plan_obj.task and plan_obj.task not in desc:
+                desc = f"TASK: {plan_obj.task}\n\n{desc}"
             # On the final step, if there is upstream content, prefix with an
             # explicit instruction to output the artifact rather than asking for
             # more context. Loop catalog "stop" steps are written for humans; the
@@ -457,11 +528,17 @@ class Runner:
             else final_output
         )
 
-        # Steps that write their artifact to artifact.md produce content in a
-        # file rather than in the LLM text response. Prefer the file when it
-        # exists and is longer than either the final or predecessor text output.
+        # Steps that write their artifact to artifact.md produce content in a file
+        # rather than the LLM text response, so prefer the file — BUT only when it is
+        # complete. Auto-improve copies the prior best artifact into the workspace as a
+        # seed; if the agent doesn't overwrite it, the file is a STALE (and here,
+        # truncated) seed. The old "prefer the longest text" rule then re-kept that
+        # truncated seed over the agent's fresh, complete-but-shorter synthesis — every
+        # iteration re-scored the same truncated text and the score could never climb
+        # past the "not truncated" criterion. Fix: only prefer the file when it is longer
+        # AND ends cleanly; a truncated file loses to the agent's actual final output.
         ws_artifact = self._read_workspace_artifact()
-        if ws_artifact and len(ws_artifact) > len(result_output):
+        if ws_artifact and len(ws_artifact) > len(result_output) and _ends_cleanly(ws_artifact):
             result_output = ws_artifact
 
         # verification (pure tier, always runs)
@@ -491,6 +568,92 @@ class Runner:
                 cancelled=cancelled,
             )
         )
+
+        # Hill climb post-run: score output, mine weaknesses, record, emit HillClimbEvent.
+        # Runs regardless of hill_climb_config so task_hash-based lookup always has data.
+        try:
+            from studio.task_runs import (
+                TaskRun,
+                TaskRunStore,
+                mine_weaknesses_from_outputs,
+                score_result,
+                task_hash as _task_hash,
+            )
+            _store = TaskRunStore()
+            _thash = _task_hash(_original_requirement)
+            from studio.workspace import workspace_root as _ws_root_fn
+            _effective_ws_root = self._workspace_root or _ws_root_fn()
+            _art_file = _effective_ws_root / session.session_id / "artifact.md"
+            _art_path = str(_art_file)
+            # Score the PERSISTED artifact, not the loose result_output. The final phase's
+            # returned text and the artifact.md it wrote to disk can diverge (a phase may
+            # return a short status string while the full report lives in the file). Since
+            # auto-improve seeds the NEXT run from artifact.md, scoring anything else means
+            # scoring one text and carrying forward another — the cause of phantom scores
+            # (e.g. a recorded 0.50 on a report that re-scores 0.80). Prefer the file when
+            # it is at least as substantial as the return; fall back to result_output.
+            _scored_text = result_output
+            try:
+                if _art_file.exists():
+                    _file_text = _art_file.read_text()
+                    if len(_file_text.strip()) >= len((result_output or "").strip()):
+                        _scored_text = _file_text
+            except Exception:  # noqa: BLE001 - a read failure must not break recording
+                pass
+            _score, _scorer_feedback = score_result(_scored_text, _original_requirement, client)
+            # Mine from what the run ACTUALLY produced, not the persisted artifact.
+            # The scorer uses artifact.md (to give credit for saved work), but the
+            # miner must see result_output so it can flag synthesis failures (e.g.
+            # "workers returned status only") rather than rubber-stamping the seed.
+            _mine_text = result_output if result_output else _scored_text
+            _weaknesses = mine_weaknesses_from_outputs(
+                {k: v for k, v in outputs.items()},
+                _mine_text,
+                _original_requirement,
+                client,
+                scorer_feedback=_scorer_feedback,
+            )
+            _version = _store.next_version(_thash)
+            _store.record(
+                TaskRun(
+                    task_hash=_thash,
+                    session_id=session.session_id,
+                    version=_version,
+                    score=_score,
+                    weaknesses=_weaknesses,
+                    artifact_path=_art_path,
+                    requirement=_original_requirement,
+                    result_text=result_output,
+                )
+            )
+            _prev_score = 0.0
+            if _version > 1:
+                _prev = _store.all_runs(_thash)
+                if len(_prev) >= 2:
+                    _prev_score = _prev[-2].score
+            _delta = _score - _prev_score
+            _hc_cfg2 = getattr(session, "hill_climb_config", None) or {}
+            _min_delta = float(_hc_cfg2.get("min_improvement", 0.02))
+            _max_epochs = int(_hc_cfg2.get("max_epochs", 5))
+            if _version >= _max_epochs:
+                _status = "converged"
+            elif _version > 1 and _delta < _min_delta:
+                _status = "plateau"
+            else:
+                _status = "improving"
+            self._emit(
+                HillClimbEvent(
+                    epoch=_version,
+                    score=_score,
+                    delta=_delta,
+                    status=_status,
+                    note=f"v{_version} score={_score:.2f}",
+                    weaknesses=_weaknesses,
+                    task_hash=_thash,
+                )
+            )
+        except Exception:  # noqa: BLE001 — scoring failure must never crash the run
+            pass
 
         # done
         self._emit(self._done_event(result_output, cancelled=cancelled))
