@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Callable
 
 from agentkit.types import ChatResult, Message
@@ -37,10 +38,47 @@ from studio.workspace import Workspace, WorkspaceError
 #: Default number of web results to request per tool call.
 _DEFAULT_RESULTS = 5
 #: Hard cap on tool-loop iterations so a misbehaving model cannot loop forever.
-_MAX_TOOL_ITERS = 3
+# Raised from 3→5: a worker doing search (iter 0) → plan-text (iter 1, nudged)
+# → fetch (iter 2) → plan-text (iter 3, nudged) → analysis (iter 4) needs 5.
+_MAX_TOOL_ITERS = 5
+#: Retry cap for transient rate-limit errors from the inner LLM client.
+_MAX_RATE_RETRIES = 3
+#: Character threshold at which context compaction fires inside the tool loop.
+#: ~80K chars ≈ 20K tokens (4 chars/token heuristic). Fetch results run up to
+#: 128K chars each; compaction prevents runaway context on multi-fetch loops.
+_COMPACT_CHARS = 80_000
+
+
+def _convo_chars(messages: list) -> int:
+    return sum(len(str(m.get("content") or "")) for m in messages)
+#: In-process cache for successful web_fetch results. Key: "url|selector".
+#: Only successful fetches are cached (errors are not stored so retries work).
+_fetch_cache: dict[str, tuple[str, int]] = {}
+#: Detects "narration instead of execution" — the LLM describes its plan instead
+#: of calling the tool. The tool loop injects a forcing turn when this fires.
+_PLANNING_RE = re.compile(
+    r"\b("
+    r"about\s+to\s+(?:fetch|search|retrieve|verify|check)|"
+    r"will\s+now\s+(?:fetch|search|retrieve|verify|check)|"
+    r"going\s+to\s+(?:fetch|search|retrieve|verify|check)|"
+    r"plan(?:ning)?\s+to\s+(?:fetch|search|retrieve|verify|check)|"
+    r"next[,\s]+I\s+will\b|"
+    r"I\s+will\s+(?:now\s+)?(?:fetch|search|retrieve|verify)\b|"
+    r"proceed(?:ing)?\s+to\s+(?:fetch|search|verify)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(x in msg for x in ("rate", "429", "too many", "limit exceeded", "overloaded"))
 #: Ceiling on fetched page content (chars ≈ bytes for ASCII-dominant markdown) so
-#: a huge page cannot flood the model's context; truncation is noted in the summary.
-_MAX_FETCH_CHARS = 16 * 1024
+#: a pathologically huge page cannot flood the model's context; truncation is noted
+#: in the summary. Raised 32K→128K: real source articles run 30-60KB, and cutting
+#: them at 32K starved the agent of the very content it needs to cite/quote accurately
+#: (a contributor to unverifiable-citation weaknesses). 128K still bounds a runaway page.
+_MAX_FETCH_CHARS = 128 * 1024
 
 #: The OpenAI tool schema advertised to the model.
 WEB_SEARCH_TOOL: dict[str, Any] = {
@@ -197,6 +235,7 @@ class ToolAugmentedClient:
         fetch_fn: Callable[..., Any] | None = None,
         workspace: Workspace | None = None,
         max_iters: int = _MAX_TOOL_ITERS,
+        context_compact: bool = True,
     ) -> None:
         self._inner = inner
         self._on_tool_call = on_tool_call
@@ -206,6 +245,7 @@ class ToolAugmentedClient:
         self._fetch_fn = fetch_fn
         self._workspace = workspace
         self._max_iters = max_iters
+        self._context_compact = context_compact
 
     @property
     def _schemas(self) -> list[dict[str, Any]]:
@@ -239,7 +279,7 @@ class ToolAugmentedClient:
         call_seq = 0  # globally-unique, valid-char tool_call ids across the chat
 
         for _ in range(self._max_iters):
-            result = self._inner.chat(convo, tools=merged_tools)
+            result = self._chat_inner(convo, merged_tools)
             total_tokens += getattr(result, "total_tokens", 0) or 0
             last = result
 
@@ -253,6 +293,26 @@ class ToolAugmentedClient:
                 # call as inline tagged text — parse it so tools still fire.
                 tool_calls = _parse_inline_tool_calls(result.text or "", names)
             if not tool_calls:
+                # Detect "narration instead of execution": the LLM described
+                # what it plans to do (e.g. "I will now fetch…") without
+                # actually calling the tool. Inject a forcing turn so the
+                # next iteration executes rather than plans again.
+                text_so_far = (result.text or "").strip()
+                if (
+                    text_so_far
+                    and names
+                    and _ < self._max_iters - 1
+                    and _PLANNING_RE.search(text_so_far)
+                ):
+                    convo.append({"role": "assistant", "content": text_so_far})
+                    convo.append({
+                        "role": "user",
+                        "content": (
+                            "Stop describing what you plan to do. "
+                            "Execute NOW — call the appropriate tool immediately."
+                        ),
+                    })
+                    continue
                 break
 
             # Echo the assistant turn WITH its tool_calls, then each result keyed to
@@ -280,11 +340,70 @@ class ToolAugmentedClient:
             )
             convo.extend(tool_messages)
 
+            # Context compaction: prevent runaway context when fetch results
+            # (up to 128K chars each) accumulate across iterations. compact()
+            # with keep=0 summarizes everything into a brief transcript; we
+            # re-inject the original task so the model never loses its goal.
+            if self._context_compact and _convo_chars(convo) > _COMPACT_CHARS:
+                try:
+                    from agentkit.context import compact as _ak_compact
+                    _task_msg = convo[0]
+                    _cr = _ak_compact(convo, keep=0)
+                    if _cr.text and _cr.est_tokens_after < _cr.est_tokens_before:
+                        convo = [_task_msg, {"role": "user", "content": _cr.text}]
+                except Exception:
+                    pass  # best-effort; never break the tool loop
+
         text = (last.text if last else "") or ""
+        # When the tool loop exhausts iterations with a tool-calls-only final response,
+        # last.text is None/empty and the LLM never produced synthesis prose.
+        # Force one text-only call with an explicit synthesis instruction so the
+        # model writes its complete findings rather than another tool call or phrase.
+        if not text.strip() and convo:
+            synthesis_convo = list(convo) + [{
+                "role": "user",
+                "content": (
+                    "You have gathered sufficient information. "
+                    "Write the complete, final response now — do not call any more tools "
+                    "and do not say you need more information. Produce the full output directly."
+                ),
+            }]
+            synth = self._chat_inner(synthesis_convo, [])
+            total_tokens += getattr(synth, "total_tokens", 0) or 0
+            text = (synth.text or "").strip()
         remaining = list(last.tool_calls) if last else []
         # Strip executed tool calls from the surfaced result.
         remaining = [(n, a) for (n, a) in remaining if n not in names]
         return ChatResult(text=text, total_tokens=total_tokens, tool_calls=remaining)
+
+    # -- rate-limit retry --------------------------------------------------
+
+    def _chat_inner(self, convo: list, tools: list) -> "ChatResult":
+        """Inner client call with exponential-backoff retry on rate-limit errors.
+
+        Parallel STAR/MESH workers share one API key; if two concurrent calls
+        hit the per-minute token limit, Anthropic returns 429 (or the client
+        silently returns text=None).  Retry up to _MAX_RATE_RETRIES times with
+        doubling waits (1 s, 2 s, 4 s) so the caller sees a real result instead
+        of an empty string that derails synthesis.
+        """
+        result = ChatResult(text="", total_tokens=0, tool_calls=[])
+        for attempt in range(_MAX_RATE_RETRIES + 1):
+            try:
+                result = self._inner.chat(convo, tools=tools)
+            except Exception as exc:
+                if attempt < _MAX_RATE_RETRIES and _is_rate_limit(exc):
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+            # Silent rate-limit: inner client swallowed the 429 and returned
+            # text=None with no tool_calls — nothing useful came back.
+            if result.text is None and not (getattr(result, "tool_calls", None) or []):
+                if attempt < _MAX_RATE_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+            return result
+        return result  # final attempt — return whatever we have
 
     # -- dispatch ----------------------------------------------------------
 
@@ -347,7 +466,14 @@ class ToolAugmentedClient:
         url = str(args.get("url", "")).strip()
         selector = args.get("selector")
         selector = str(selector).strip() if selector else None
-        content, n_bytes, error = self._fetch(url, selector)
+        _cache_key = f"{url}|{selector or ''}"
+        if _cache_key in _fetch_cache:
+            content, n_bytes = _fetch_cache[_cache_key]
+            error = ""
+        else:
+            content, n_bytes, error = self._fetch(url, selector)
+            if not error:
+                _fetch_cache[_cache_key] = (content, n_bytes)
         if error:
             self._emit_result(step_id, "web_fetch", f"fetch failed: {error}", 0, error)
             return self._tool_message("web_fetch", {"url": url, "error": error})
