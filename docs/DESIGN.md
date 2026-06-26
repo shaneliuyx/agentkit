@@ -543,7 +543,9 @@ same agent code runs on any of them by swapping one constructor:
   any OpenAI-compatible endpoint (local oMLX `:8000`, OpenAI, or Claude via VibeProxy `:8317`).
   Both the **model and the endpoint are constructor parameters**; env-chain defaults
   (`LLM_BASE_URL → OMLX_BASE_URL → :8000`), an `"EMPTY"` key sentinel for keyless local
-  servers, and resilient retry are ported from the lab's `shared/llm.py`. `pip install agentkit[openai]`.
+  servers, and resilient retry are ported from the lab's `shared/llm.py`. `OpenAIEmbedder.embed`
+  retries up to 3× with exponential backoff (0.5 s, 1 s) on transient connection errors —
+  guards against intermittent local oMLX unavailability. `pip install agentkit[openai]`.
 - `AnthropicChatClient(model, *, max_tokens=1024, base_url=None, …)` — the **native** Anthropic
   Messages API (system split-out, required `max_tokens`, text-block concat,
   `input_tokens + output_tokens`, `tool_use` mapping). `pip install agentkit[anthropic]`.

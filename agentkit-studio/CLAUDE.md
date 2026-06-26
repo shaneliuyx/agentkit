@@ -60,7 +60,7 @@ Tavily/DDG must be installed+configured or the agent will fabricate.
 
 ## Local services the backend assumes
 
-- **oMLX `:8000`** — local chat + BGE-M3 embeddings (the `local` embed profile).
+- **oMLX `:8000`** — local chat + BGE-M3 embeddings (the `local` embed profile). `OpenAIEmbedder` retries embed calls 3× with exponential backoff on connection errors — memory panel degrades gracefully if oMLX is persistently down.
 - **SearXNG `:8080`** — primary search backend.
 - LLM profiles resolve in `studio/backends.py::PROFILES` (`haiku` → Anthropic
   proxy / VibeProxy per env).
