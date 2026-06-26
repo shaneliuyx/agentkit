@@ -90,6 +90,11 @@ agentkit-studio/
       session.py           # Session lifecycle, run registry, interrupt flags
       runner.py            # the step-loop driver that emits events (§4, §6)
       events.py            # SSE event schema (dataclasses) — THE contract
+      task_runs.py         # cross-session hill-climb store: SQLite task_runs.db,
+                           # score_result(result, req, client) → (float, unmet_str),
+                           # mine_weaknesses(outputs, result, req, client, scorer_feedback=""),
+                           # TaskRunStore.{best,latest,all_runs} — all_runs used to
+                           # accumulate weaknesses across every prior attempt (not just best)
       panels/              # one module per comprehensive panel data-source
         memory.py  selfimprove.py  evolve.py  security.py  dag.py  verify.py  router.py
     tests/

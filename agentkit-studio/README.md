@@ -16,6 +16,7 @@ and accepts a cooperative cancel (`POST /cancel`).
 cd backend
 uv venv .venv
 uv pip install -e .          # installs agentkit (editable) + fastapi + sse-starlette + openai
+uv pip install curl_cffi     # web fetch support (tool loop page fetching)
 uv pip install pytest httpx  # dev/test deps
 
 # Offline unit tests (no API key, no local services needed):
@@ -119,6 +120,7 @@ A complete guide to installing, configuring, and operating AgentKit Studio.
 cd backend
 uv venv .venv
 uv pip install -e .          # agentkit (editable) + fastapi + sse-starlette + openai
+uv pip install curl_cffi     # web fetch support (tool loop page fetching)
 uv pip install pytest httpx  # dev/test deps
 
 # Sanity: offline unit tests (no API key, no services)
@@ -243,7 +245,7 @@ Open the panel drawer to inspect any dimension of the run:
 | **Loops** | Browse/find the loop-library catalog; seed a run from a loop |
 | **Tools** | Each web_search / read_file / write_file call: args, result summary, and any rejection or degradation notice |
 | **Goal** | Live stop-condition verdict: `met` / `not yet met`, the evidence command output, and which phase triggered the check |
-| **Hill Climb** | Epoch-by-epoch score + delta from `hill_climb_from_traces()`; status (`accept`/`reject`/`escalate`) + top weakness tags |
+| **Hill Climb** | Epoch-by-epoch score + delta; scorer surfaces unmet criteria → miner uses them as grounding; weaknesses from ALL prior runs accumulated as hard constraints for the next attempt |
 | **Scheduler** | All registered cron/webhook triggers with last-fired and next-fire timestamps |
 | **Chain** | JSON editor for `LoopChain` specs + live per-spec status, skipped/done state, and output summary |
 
