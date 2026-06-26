@@ -213,8 +213,19 @@ class OpenAIEmbedder:
         """Map a batch of texts → a batch of float vectors (input order preserved)."""
         if not texts:
             return []
-        r = self._client.embeddings.create(model=self.model, input=texts)
-        return [list(item.embedding) for item in r.data]
+        import time
+
+        _max_attempts = 3
+        last_exc: Exception | None = None
+        for attempt in range(_max_attempts):
+            try:
+                r = self._client.embeddings.create(model=self.model, input=texts)
+                return [list(item.embedding) for item in r.data]
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < _max_attempts - 1:
+                    time.sleep(0.5 * (2**attempt))  # 0.5s, 1s
+        raise last_exc  # type: ignore[misc]
 
 
 if __name__ == "__main__":  # pragma: no cover - runnable Protocol self-check
