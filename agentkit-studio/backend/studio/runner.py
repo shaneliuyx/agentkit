@@ -623,6 +623,7 @@ class Runner:
         _artifact_copied = False
         _eff_ws2 = None
         _weaknesses_block = ""  # prior-run lessons → planner/hub constraints
+        _seed_len = 0           # length of the seeded prior artifact (anti-regression)
         if _hc_cfg.get("auto_improve"):
             import shutil
             from studio.task_runs import TaskRunStore, task_hash as _task_hash
@@ -643,6 +644,15 @@ class Runner:
                     _curr_ws = Workspace(session.session_id, root=_eff_ws2)
                     shutil.copy(_prior_art, _curr_ws.root / "artifact.md")
                     _artifact_copied = True
+                    # Record the seed size: a run must never write back a SHORTER
+                    # artifact than it started from. Guarantees "worst case = no
+                    # improvement" — a failed/thin run keeps the prior good doc
+                    # instead of overwriting it (the regression that stranded the
+                    # good 28KB report behind thin "search unavailable" output).
+                    try:
+                        _seed_len = (_curr_ws.root / "artifact.md").stat().st_size
+                    except OSError:
+                        _seed_len = 0
                 # Accumulate weaknesses from this task's prior runs AND from
                 # semantically SIMILAR prior tasks (R10) — every failure lesson,
                 # including cross-task ones, carries forward. Deduplicated by
@@ -971,9 +981,13 @@ class Runner:
 
             # When the reducer received the seeded artifact as context and produced
             # an improved version, write it back to artifact.md so the scorer and
-            # the next epoch both see the improved content. Guard on length > 5000
-            # to avoid overwriting the seed with a confused short response.
-            if is_last and _artifact_copied and _eff_ws2 is not None and len(sr.output.strip()) > 5000:
+            # the next epoch both see the improved content. Anti-regression guard:
+            # only overwrite if the new output is >5000 chars AND not shorter than
+            # the seed — a thin/failed run must keep the prior good doc, never
+            # shrink it (worst case = no improvement, never regression).
+            if (is_last and _artifact_copied and _eff_ws2 is not None
+                    and len(sr.output.strip()) > 5000
+                    and len(sr.output) >= _seed_len):
                 try:
                     (_eff_ws2 / session.session_id / "artifact.md").write_text(sr.output)
                 except OSError:
@@ -1069,7 +1083,9 @@ class Runner:
                         return merged_text
 
                 _rr = reduce_patches(_cur_text, _patch_groups, llm_refine_fn=_refine_fn)
-                if _rr.text:
+                # Anti-regression guard: never replace the seed with a shorter
+                # merged doc (worst case = no improvement, never regression).
+                if _rr.text and len(_rr.text) >= _seed_len:
                     write_artifact(_art_file, _rr.text)
 
         # budget gauge

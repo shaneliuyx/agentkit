@@ -227,6 +227,12 @@ task assignment so priority is deterministic).
 
 #### Reducer prompt (CoT)
 
+> **SUPERSEDED by §11.** The "Output the COMPLETE updated artifact — every section"
+> reducer below is the source of the regression (single-call full-document
+> regeneration trends shorter than its input). §11 replaces it with an **additive
+> merger that never re-emits the whole doc**. The prompt below is retained for
+> historical context; new work follows §11.3.
+
 > **Implementation note:** in code the two phases are split. **Phase 1
 > (structural merge)** is done *mechanically* by `reduce_patches` — no LLM. Only
 > **Phase 2 (refinement)** is LLM-driven, via `_build_reducer_refine_prompt`
@@ -968,3 +974,129 @@ hill-climb (§2.1 priority 2). Empty + "Create new" → always auto-create (§2.
 | Phase-2 refine acceptance | Length guard (≥80% of merged) + best-effort | Rejects truncated/empty LLM responses; a flaky refine never corrupts a clean structural merge |
 | Worker section non-overlap (R2) | Prompt-enforced **+ code-validated** (`_dedupe_assignment`, first-claim-wins, emitted as a gate check) | Prompt sets intent; the post-phase validator makes the partition deterministic + auditable without a re-prompt round-trip (see §3.3 enforcement) |
 | Ledger seeding (R1) | Seed `all_tasks` from `plan_obj.steps` up front | Without it `remaining()` is structurally always empty; seeding makes COMPLETED/REMAINING real across phases |
+| Reducer role (§11) | Merger + editorial + gap-flagger, **never a generator** | A reducer that re-emits the whole doc truncates/summarizes it away; an additive merger cannot regress it |
+| Worker on no result (§11) | **Silent no-op** (emit no patch), never failure-prose | Prose about being blocked becomes "content" the reducer synthesizes into a thin doc — the root of the regression |
+| Search-error vs found-nothing (§11) | Distinct: found-nothing = no-op; all-error = **halt + notice** | A broken-search run must not masquerade as a finished one |
+| New/missing content (§11) | Reducer flags a **gap**; a worker (with search) fills it | Reducer has no search tool — anything it invents is ungrounded |
+| Gap routing (§11) | Non-last phase → TaskLedger (this run); last phase → **weaknesses DB** (next run) | Every gap has a destination; reducer gaps are concrete, beating LLM-mined weaknesses |
+| Create == improve (§11) | Same additive pipeline; create starts from a **skeleton**, improve from the prior doc | Removes the special-cased "one LLM writes the whole report" path that seeded the spiral |
+
+---
+
+## 11. Grounded Accumulation & Regression-Free Improvement
+
+> **Why this section exists.** A search outage produced thin "search unavailable"
+> narration that the full-rewrite reducer synthesized into the deliverable,
+> overwriting a good 28 KB grounded report; `latest_with_content` then seeded the
+> degraded doc forward — a death spiral. Root cause: the reducer **regenerates the
+> whole document in one LLM call** (§2.2 / runner.py:863 — "Output the COMPLETE
+> updated artifact"), which is bounded by output tokens and biased toward
+> summarization, so it *trends shorter than its input*. This section defines the
+> design that makes regression **impossible by construction**, not merely guarded.
+
+### 11.1 Core invariant
+
+**Content only enters the deliverable through a worker that found a real source.
+Absence of content is a tracked placeholder, never invented prose. The reducer
+applies deltas and never re-emits the whole document.** Therefore the deliverable
+is a monotone accumulation of grounded facts: it can only grow or hold, never
+shrink. "Worst case = no improvement" becomes a structural guarantee.
+
+### 11.2 Worker contract (supersedes the §5.3 prose-friendly worker)
+
+Each worker owns a non-overlapping set of sections (§3.3 assignment). Per section:
+
+```
+- Found grounded, sourced content  → emit a PATCH (op=insert_after/replace on the
+                                      section anchor; URL required).
+- Found nothing relevant           → emit NOTHING for that section (no patch).
+- Never write a sentence explaining why you couldn't. Silence = no change.
+
+Status line (machine-readable, one per worker):
+  FINDINGS: <n>            # n sourced findings this worker produced
+  SEARCH: ok | error       # 'error' iff the search tool itself failed (quota/down)
+```
+
+A worker's body is *only* `PATCHES: [...]` (possibly empty). The "blocker
+narration" failure mode is forbidden.
+
+### 11.3 Reducer contract (replaces the full-rewrite reducer)
+
+The reducer **never regenerates the document**. It:
+
+1. **Applies** worker patches to the existing doc via `reduce_patches` (additive
+   `DocPatch` merge — §2.2 Phase 1). It does not re-emit unchanged sections.
+2. **Editorial pass** runs *only on the merged result* (dedup, ordering,
+   transitions, citation formatting) — and may not delete sourced content or
+   shorten a section below its pre-merge length.
+3. **Detects gaps** — sections that are thin, placeholder, or have unsourced
+   claims — and emits them as structured, actionable items
+   (`"§Verifier: 3 claims lack source URLs"`), never filling them itself.
+
+### 11.4 Gap routing
+
+```
+gap detected in phase N:
+  N is not the last phase  → enqueue as a TaskRecord in the TaskLedger
+                             → phase N+1's workers (with search) fill it (this run)
+  N is the last phase      → record as a weakness in task_runs.db
+                             → next run's hill-climb injects it as a constraint
+                               (feeds the §2.4 accumulated_weaknesses pipeline,
+                                deduped + consolidated)
+```
+
+Reducer gaps are a **better weakness source** than `mine_weaknesses_from_outputs`:
+they are concrete and grounded in what the reducer actually saw, so the next run's
+constraints are specific and the hill-climb genuinely converges.
+
+### 11.5 Create and improve are one pipeline
+
+The only difference is the starting point; the mechanism is identical.
+
+```
+Improve:  start = prior doc (seeded)   → workers patch owned sections → reducer merges deltas
+Create:   start = empty skeleton       → workers fill owned sections  → reducer merges deltas
+
+Create, phase 1 — build the SKELETON, not content:
+  Derive section headings + a one-line intent per section FROM THE GOAL (no search
+  needed → robust to a search outage). Each heading becomes an owned, fillable
+  section with a placeholder body:  "## Results\n_(pending — needs sourced content)_"
+```
+
+**Placeholders are first-class.** A skeleton-with-placeholders is an honest partial
+deliverable: low-scored but improvable, and it doubles as the gap list. When all
+workers fail (search down) on a create run, the deliverable is the skeleton + a
+visible "search unavailable" notice — **never a fabricated report.** This is the
+discipline whose absence seeded the original spiral.
+
+### 11.6 Failure handling
+
+```
+zero patches this phase          → do NOT write; seed/skeleton preserved (no-improvement)
+all workers report SEARCH:error  → halt the phase + emit a GateEvent("search-unavailable",
+                                   outcome="fail"); do not record a degraded score
+```
+
+### 11.7 Termination (loop-until-gaps-dry)
+
+The run records `gaps_remaining` (count from §11.4). Hill-climb stops when:
+
+- `gaps_remaining == 0` (done), OR
+- two consecutive runs reduce `gaps_remaining` by zero (genuinely stuck), OR
+- `max_epochs` reached (hard cap from the Loop Config panel).
+
+### 11.8 Backstop (defense in depth)
+
+The anti-regression **write guard** remains as a belt-and-suspenders check: a
+write that would make `len(artifact) < len(seed)` is rejected (both write paths).
+With §11.1–11.5 in place this should never trigger; it exists to catch any path
+that bypasses the additive contract.
+
+### 11.9 Implementation order
+
+```
+A  worker contract: patch-or-silent + SEARCH status; skeleton-on-create        (stops the regression source)
+B  route the seeded research path through reduce_patches (retire runner.py:863) (stops full-doc regeneration)
+C  reducer gap-detection → TaskLedger (non-last) / weaknesses DB (last)         (convergence)
+D  termination on gaps-dry; placeholder-aware scoring (% sections sourced)      (bounded loop)
+```
