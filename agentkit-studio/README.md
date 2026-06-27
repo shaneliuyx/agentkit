@@ -65,6 +65,68 @@ The GUI is one client; three calls drive a run from any script (DESIGN §13):
 > run may never persist to `task_runs.db`. A browser `EventSource` is fine; a
 > script must read every line until the server closes it.
 
+**Example A — minimal headless driver (stdlib only):**
+
+```python
+import json, urllib.request, urllib.parse
+B = "http://localhost:8770"
+
+def post(path, body):
+    req = urllib.request.Request(
+        B + path, json.dumps(body).encode(),
+        {"content-type": "application/json"}, method="POST")
+    return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+sid = post("/session", {
+    "llm": {"profile": "haiku"}, "embed": {}, "mode": "llm",
+    "budget": {"ceiling": None}, "tools_enabled": True,
+    "loop_config": {"auto_improve": True, "max_agents": 5,
+                    "min_tasks_per_agent": 3, "max_tasks_per_agent": 5},
+})["session_id"]
+post(f"/session/{sid}/hill-climb",
+     {"auto_improve": True, "max_epochs": 2, "max_agents": 5})
+
+q = urllib.parse.quote("find the most popular loop engineer articles, write a report")
+with urllib.request.urlopen(f"{B}/run/{sid}?requirement={q}", timeout=1800) as r:
+    for line in r:                       # drain EVERY line or the run won't record
+        if line.startswith(b"event:"):
+            print(line.decode().strip())  # session/plan/topology/.../phase_done/done
+# result is now in task_runs.db (latest version for this requirement's task_hash)
+```
+
+**Example B — parse the SSE frames (httpx, follow the run live):**
+
+```python
+import httpx, json
+B = "http://localhost:8770"
+with httpx.Client(timeout=None) as c:
+    sid = c.post(f"{B}/session", json={
+        "llm": {"profile": "haiku"}, "mode": "llm", "tools_enabled": True,
+        "loop_config": {"auto_improve": True, "max_agents": 5}}).json()["session_id"]
+    c.post(f"{B}/session/{sid}/hill-climb", json={"auto_improve": True, "max_epochs": 2})
+    with c.stream("GET", f"{B}/run/{sid}",
+                  params={"requirement": "your task here"}) as s:
+        event = None
+        for line in s.iter_lines():       # MUST consume to completion
+            if line.startswith("event:"):
+                event = line.split(":", 1)[1].strip()
+            elif line.startswith("data:"):
+                payload = json.loads(line.split(":", 1)[1])
+                if event == "phase_done":
+                    print("phase", payload["step_id"], "→", payload["n_agents"], "agents")
+                elif event == "done":
+                    print("DONE:", payload.get("result_path"))
+```
+
+**Example C — `curl` (smoke-test the stream):**
+
+```bash
+SID=$(curl -s localhost:8770/session -H 'content-type: application/json' \
+  -d '{"llm":{"profile":"haiku"},"mode":"llm","tools_enabled":true,
+       "loop_config":{"auto_improve":true,"max_agents":5}}' | jq -r .session_id)
+curl -s "localhost:8770/run/$SID?requirement=write%20a%20short%20note"   # streams to EOF
+```
+
 ### Persistence — `task_runs.db`
 
 One SQLite file (`backend/tmp/task_runs.db`) is the entire durable state: one row
