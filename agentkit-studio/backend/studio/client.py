@@ -64,11 +64,16 @@ class StudioChatClient:
         self,
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         """One completion → ``ChatResult``; emits one ``UsageReport`` per call.
 
         ``estimated=True`` when the endpoint omits a ``usage`` object (the CLI /
         non-reporting backend case), which flips the run's sticky ``~`` flag.
+
+        ``max_tokens`` caps the completion; pass it sized to the output (the
+        reducer that reproduces a large artifact must raise it above the API
+        default or the document truncates mid-sentence — §11.10).
         """
 
         def _call() -> ChatResult:
@@ -77,6 +82,11 @@ class StudioChatClient:
                 "messages": messages,
                 "temperature": self.temperature,
             }
+            # Default a generous completion cap: the API default is low enough to
+            # truncate a large reduced artifact mid-sentence (§11.10). 8192 fits a
+            # ~32K-char document; a larger one needs the patch-based reducer (a
+            # section edit is small) rather than full regeneration.
+            kwargs["max_tokens"] = max_tokens if max_tokens is not None else 8192
             if tools:
                 kwargs["tools"] = tools
             r = self._client.chat.completions.create(**kwargs)
