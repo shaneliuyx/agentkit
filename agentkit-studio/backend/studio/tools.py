@@ -43,9 +43,14 @@ from studio.workspace import Workspace, WorkspaceError
 #: Default number of web results to request per tool call.
 _DEFAULT_RESULTS = 5
 #: Hard cap on tool-loop iterations so a misbehaving model cannot loop forever.
-# Raised from 3→5: a worker doing search (iter 0) → plan-text (iter 1, nudged)
-# → fetch (iter 2) → plan-text (iter 3, nudged) → analysis (iter 4) needs 5.
-_MAX_TOOL_ITERS = 5
+# Raised 5→8: a multi-source research spoke needs search + several fetches AND a
+# final synthesis turn. At 5, search + 4 fetches consumed every iteration and the
+# worker exhausted the budget still in tool_use — it returned only its pre-tool
+# preamble ("I'll fetch the articles now…") and emitted ZERO findings (the haiku
+# no-op that flat-lined the hill-climb). 8 leaves room for ~6 fetches plus a natural
+# tools-enabled synthesis turn; the iteration-exhaustion backstop in chat() still
+# forces one tools-disabled synthesis call if even 8 are spent fetching.
+_MAX_TOOL_ITERS = 8
 #: Retry cap for transient rate-limit errors from the inner LLM client.
 _MAX_RATE_RETRIES = 3
 #: Character threshold at which context compaction fires inside the tool loop.
@@ -59,6 +64,100 @@ def _convo_chars(messages: list) -> int:
 #: In-process cache for successful web_fetch results. Key: "url|selector".
 #: Only successful fetches are cached (errors are not stored so retries work).
 _fetch_cache: dict[str, tuple[str, int]] = {}
+
+#: A QUOTE shorter than this carries no grounding signal (e.g. "the", "agents") —
+#: it would match almost any page, so it never counts as substantiation.
+_MIN_QUOTE_CHARS = 12
+
+
+def _quote_in_cache(quote: str) -> bool:
+    """True iff ``quote`` appears verbatim in any cached fetched page (Lever 1 guard).
+
+    The fetch cache is the oracle for "did the worker actually read this?": a QUOTE
+    that is a substring of a cached page is grounded; one that is not is fabricated.
+    Whitespace is normalized on both sides (markdown re-wraps lines, so a real quote
+    split across a newline still matches). An empty/very short quote never matches —
+    it carries no grounding signal. Callers should only ACT on a False result when
+    the cache is non-empty (an empty cache means "cannot verify", not "fabricated").
+    """
+    q = " ".join((quote or "").split())
+    if len(q) < _MIN_QUOTE_CHARS:
+        return False
+    pages = [" ".join(content.split()).lower() for content, _n in _fetch_cache.values()]
+    ql = q.lower()
+    if any(ql in p for p in pages):
+        return True
+    # Fuzzy fallback: models reconstruct quotes with a dropped/added word at the edges,
+    # so exact-substring misses real quotes (live: woven verbatim quotes never survived
+    # merge — 0 in the artifact). Accept when a CONTIGUOUS run of >=70% of the quote's
+    # words appears verbatim on a fetched page — enough to prove the page was read, while
+    # a mere paraphrase (no long verbatim run) still fails.
+    toks = ql.split()
+    need = max(6, int(len(toks) * 0.7))
+    if need > len(toks):
+        return False
+    return any(
+        " ".join(toks[start:start + need]) in p
+        for start in range(0, len(toks) - need + 1)
+        for p in pages
+    )
+
+
+def _url_in_cache(url: str) -> bool:
+    """True iff ``url`` was actually fetched this run (its page is in the fetch cache).
+
+    This is the GROUNDING oracle for a finding: a URL whose page was fetched is real;
+    one that was never fetched is fabricated. It is stricter and more reliable than the
+    quote check — models reconstruct quotes imperfectly (so a verbatim-substring test
+    drops real, fetched sources), but the URL they fetched is exact. Cache keys are
+    "url|selector"; match on the url segment.
+    """
+    u = (url or "").strip().rstrip("/").lower()
+    if not u:
+        return False
+    for k in _fetch_cache:
+        ck = k.split("|", 1)[0].strip().rstrip("/").lower()
+        # Tolerant match: models emit URLs with trailing-slash / fragment / case
+        # drift vs the fetched key, so exact == discards real sources. Containment
+        # either way covers those near-misses without matching unrelated URLs.
+        if ck and (u == ck or u in ck or ck in u):
+            return True
+    return False
+
+
+def prefetch_url(url: str) -> bool:
+    """Fetch ``url`` and store its page in the fetch cache (key ``"url|"``), grounding a
+    finding that CITED a searched-but-unfetched URL. Returns True if the page is now
+    cached. Best-effort and side-effecting: a cache hit returns True with NO network
+    call (so it is test-safe when the URL is pre-cached); a 404 / unreachable / non-http
+    URL returns False and stays uncached — so a fabricated citation is still dropped.
+
+    Closes the fetch-density gap: spokes cite ~12 URLs/phase but fetch ~1, so the
+    grounding guard dropped 80-100% of real findings (instrumented). Fetching the cited
+    URL turns "cited from a snippet" into "actually fetched", and only genuinely
+    reachable pages survive."""
+    u = (url or "").strip().rstrip(".,)")
+    if not u.lower().startswith("http"):
+        return False
+    key = f"{u}|"
+    if key in _fetch_cache:
+        return True
+    try:
+        from web_toolkit import web_fetch
+    except Exception:  # noqa: BLE001 — toolkit absent → cannot ground, drop stands
+        return False
+    try:
+        res = web_fetch(u, selector=None)
+    except Exception:  # noqa: BLE001 — network/backend failure is non-fatal
+        return False
+    if not getattr(res, "ok", False):
+        return False
+    content = getattr(res, "content", "") or ""
+    if not content:
+        return False
+    n_bytes = getattr(res, "bytes", 0) or len(content.encode("utf-8"))
+    _fetch_cache[key] = (content[:_MAX_FETCH_CHARS], n_bytes)
+    return True
 #: Detects "narration instead of execution" — the LLM describes its plan instead
 #: of calling the tool. The tool loop injects a forcing turn when this fires.
 _PLANNING_RE = re.compile(
@@ -343,6 +442,12 @@ class ToolAugmentedClient:
         total_tokens = 0
         last: ChatResult | None = None
         call_seq = 0  # globally-unique, valid-char tool_call ids across the chat
+        # True only when the model STOPPED calling tools on its own (Anthropic's
+        # end_turn) — i.e. it produced a real final answer. False means the loop ran
+        # out of iterations while the model was still in tool_use, so `last.text` is
+        # only its pre-tool preamble ("I'll fetch the articles now…"), never the
+        # synthesis. See the iteration-exhaustion synthesis guard below.
+        stopped_naturally = False
 
         for _ in range(self._max_iters):
             result = self._chat_inner(convo, merged_tools)
@@ -379,6 +484,7 @@ class ToolAugmentedClient:
                         ),
                     })
                     continue
+                stopped_naturally = True  # model produced a final answer on its own
                 break
 
             # Echo the assistant turn WITH its tool_calls, then each result keyed to
@@ -421,22 +527,31 @@ class ToolAugmentedClient:
                     pass  # best-effort; never break the tool loop
 
         text = (last.text if last else "") or ""
-        # When the tool loop exhausts iterations with a tool-calls-only final response,
-        # last.text is None/empty and the LLM never produced synthesis prose.
-        # Force one text-only call with an explicit synthesis instruction so the
-        # model writes its complete findings rather than another tool call or phrase.
-        if not text.strip() and convo:
+        # Force one tools-disabled synthesis turn when the model never produced a real
+        # final answer. Two cases, BOTH bugs that left the artifact ungrounded:
+        #   1. tool-calls-only final response  → last.text is empty.
+        #   2. iteration exhaustion mid-tool_use → last.text is only the PREAMBLE
+        #      ("I'll fetch the articles now…"), non-empty but containing no findings.
+        # Anthropic's loop emits the synthesis only on the post-tool-result end_turn
+        # pass; a worker capped at _max_iters never reaches it. Guarding on empty-text
+        # alone (the old code) was bypassed by case 2's preamble, so haiku workers
+        # fetched real pages then returned narration and emitted zero RESEARCH_FINDINGs.
+        if (not text.strip() or not stopped_naturally) and convo:
             synthesis_convo = list(convo) + [{
                 "role": "user",
                 "content": (
-                    "You have gathered sufficient information. "
-                    "Write the complete, final response now — do not call any more tools "
-                    "and do not say you need more information. Produce the full output directly."
+                    "You have gathered sufficient information. Do not call any more tools "
+                    "and do not say you need more information. Produce your final answer "
+                    "for the task now, in EXACTLY the output format the task specified — if "
+                    "it asked for specific blocks or fields, emit those and nothing else. "
+                    "Do not restart, describe your process, or switch to a different format."
                 ),
             }]
             synth = self._chat_inner(synthesis_convo, [])
             total_tokens += getattr(synth, "total_tokens", 0) or 0
-            text = (synth.text or "").strip()
+            synth_text = (synth.text or "").strip()
+            if synth_text:  # keep prior text if synthesis came back empty (no worse)
+                text = synth_text
         remaining = list(last.tool_calls) if last else []
         # Strip executed tool calls from the surfaced result.
         remaining = [(n, a) for (n, a) in remaining if n not in names]

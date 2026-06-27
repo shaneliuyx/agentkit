@@ -154,6 +154,43 @@ def test_max_iters_caps_runaway_loop() -> None:
     assert inner.calls == 4
 
 
+def test_iteration_exhaustion_forces_synthesis_despite_preamble() -> None:
+    """Root-cause fix: a model that emits PREAMBLE text ("I'll fetch now…") alongside
+    a tool call every turn exhausts the iteration cap while still in tool_use. The old
+    guard forced synthesis only on EMPTY final text, so the non-empty preamble was
+    returned verbatim and ZERO findings were produced (the haiku no-op). The loop must
+    now force a tools-disabled synthesis turn on iteration exhaustion regardless of the
+    preamble — that is where Anthropic's post-tool-result answer is actually written."""
+
+    class _Narrator:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_tools: list | None = None
+
+        def chat(self, messages, tools=None) -> ChatResult:
+            self.calls += 1
+            self.last_tools = tools
+            if tools:  # tool-loop turns: narrate + keep calling the tool forever
+                return ChatResult(
+                    text="I'll fetch the articles now to substantiate the claims.",
+                    total_tokens=1,
+                    tool_calls=[("web_search", {"query": "x"})],
+                )
+            # synthesis turn (tools disabled) → the real findings finally get written
+            return ChatResult(
+                text="RESEARCH_FINDING: real synthesized output",
+                total_tokens=2, tool_calls=[],
+            )
+
+    inner = _Narrator()
+    c = ToolAugmentedClient(inner, search_fn=_fake_search, max_iters=3)
+    res = c.chat([{"role": "user", "content": "q"}])
+    assert inner.calls == 4                 # 3 loop iters + 1 forced synthesis
+    assert inner.last_tools == []           # synthesis turn ran with NO tools
+    assert "RESEARCH_FINDING" in res.text   # findings, not the preamble
+    assert "I'll fetch" not in res.text     # preamble narration replaced
+
+
 def test_search_failure_is_nonfatal_with_notice() -> None:
     """A SearchError-equivalent yields an empty result + a notice, loop continues."""
 

@@ -28,6 +28,22 @@ class FakeClient:
         return ChatResult(text=self.text, total_tokens=5)
 
 
+@pytest.fixture(autouse=True)
+def _clear_fetch_cache() -> Any:
+    """Isolate the process-global web-fetch cache between tests.
+
+    ``studio.tools._fetch_cache`` persists for the life of the process (correct in
+    production — it caches fetched pages within a run). In tests that global leaks
+    across cases: a real-fetch test populates it, and the grounding guard in
+    ``_research_findings_to_patches`` (which reads it) then drops legitimate findings
+    in a later, unrelated test. Clear it before and after every test so each starts
+    from a clean, empty cache."""
+    from studio.tools import _fetch_cache
+    _fetch_cache.clear()
+    yield
+    _fetch_cache.clear()
+
+
 @pytest.fixture
 def fake_client() -> FakeClient:
     return FakeClient()

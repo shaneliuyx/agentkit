@@ -330,10 +330,23 @@ def _build_executor_prompt(goal: str, artifact_text: str, weaknesses_block: str)
         "  URL: <the EXACT url you fetched — REQUIRED, never omit>\n"
         "  POPULARITY: <metric if stated, else n/a>\n"
         "  PATCH_TARGET: <the '## Section' heading this improves>\n"
-        "  CONTENT: <2-4 sentences of substance FROM the fetched page>\n\n"
+        "  QUOTE: <COPY-PASTE one sentence EXACTLY from the fetched page — character "
+        "for character, no paraphrase, no edits, no ellipsis. This verbatim text IS "
+        "the evidence; do not summarize or restate it.>\n"
+        "  WHY: <why this quote matters to the GOAL, one sentence in your words>\n\n"
+        "Citing without substantiating is the #1 failure: a bare URL is NOT enough. "
+        "COPY the QUOTE verbatim from the page — do NOT restate the article in your own "
+        "words, PASTE its words. The quote is checked against the fetched page (a "
+        "fabricated one is dropped); WHY only frames the quote's relevance.\n"
         "Rules: emit a RESEARCH_FINDING ONLY for a URL you actually fetched (so it "
-        "is real and verifiable); every finding MUST carry its URL; found nothing "
-        "for a weakness → emit nothing for it (no narration, no plan).\n"
+        "is real and verifiable); every finding MUST carry its URL AND a verbatim "
+        "QUOTE; found nothing for a weakness → emit nothing for it (no narration, "
+        "no plan).\n"
+        "OUTPUT FORMAT (critical): your ENTIRE response is RESEARCH_FINDING blocks and "
+        "nothing else. Do NOT write a report, executive summary, section prose, or any "
+        "'#'/'##' markdown headings — the reducer assembles the report FROM your "
+        "findings. A response that is prose instead of RESEARCH_FINDING blocks is "
+        "discarded and the document gains nothing.\n"
     )
 
 
@@ -616,65 +629,171 @@ def _weakness_score(
     return 1.0 if not total_set else round(len(total_set - on) / len(total_set), 2)
 
 
-def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
-    """Build the section-aware STAR reducer closure (DESIGN §4.5).
+#: Max cited URLs to prefetch per reduce phase (bounds added fetch latency/cost).
+_PREFETCH_LIMIT = 8
 
-    Returns a callable matching ``run_plan``'s reducer hook:
-    ``(worker_drafts: list[str]) -> (merged_text, tokens)``. It MERGES / REFINES
-    / REVIEWS each worker's per-section output into the CURRENT artifact, using
-    the section-tagged weakness list as the per-section review checklist. Additive
-    + preserve-verbatim; the runner's grow-only writeback ratchet rejects any
-    shrink. Sections are the artifact's ``##`` headings — no separate Section type
-    is threaded through core; the structure lives in the markdown + weakness tags.
+
+def _prefetch_cited(drafts: list[str], limit: int = _PREFETCH_LIMIT) -> int:
+    """Fetch cited-but-uncached URLs from the worker drafts so genuine sources pass the
+    grounding guard (the fetch-density fix). No-op when the fetch cache is empty — that
+    means no grounding drop happens (cache_active is False), so there is nothing to fix,
+    and tests stay offline. Bounded by ``limit`` to cap latency. Returns how many cited
+    URLs are now cached."""
+    from studio.tools import _fetch_cache, prefetch_url
+    if not _fetch_cache:
+        return 0
+    seen: list[str] = []
+    for d in drafts:
+        for m in _re.finditer(r'URL:\s*(https?://\S+)', d):
+            u = m.group(1).strip().rstrip('.,)')
+            if u not in seen:
+                seen.append(u)
+    fetched = sum(1 for u in seen[:limit] if prefetch_url(u))
+    _dbg(f"prefetch cited={len(seen)} fetched_ok={fetched} (cap {limit})")
+    return fetched
+
+
+def _dbg(msg: str) -> None:
+    """Append a throughput-diagnostic line to the file named by OMC_THROUGHPUT_DEBUG.
+
+    A no-op unless that env var is set, so production and tests write nothing. Used to
+    localize where findings are lost between the spokes and the artifact (raw findings →
+    grounded floor patches → patches actually applied → grow-only writeback)."""
+    import os
+    path = os.environ.get("OMC_THROUGHPUT_DEBUG")
+    if not path:
+        return
+    try:
+        with open(path, "a") as fh:
+            fh.write(msg + "\n")
+    except OSError:
+        pass
+
+
+def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
+    """Build the section-aware STAR reducer closure (DESIGN §4.5; Lever 3).
+
+    Returns ``run_plan``'s reducer hook ``(worker_drafts) -> (merged_text, tokens)``.
+
+    PATCH-BASED (Lever 3): instead of re-emitting the full ~38K document — whose
+    output a completion cap (``max_tokens``) truncates mid-section (the v29
+    truncation/incomplete weaknesses) — the reducer asks the model for a SMALL list
+    of section PATCHES and applies them MECHANICALLY via ``reduce_patches``. The
+    model never re-emits the document, so truncation is impossible and output tokens
+    drop ~10x. As a deterministic floor, the workers' own RESEARCH_FINDING blocks are
+    converted to additive patches too — so a phase always makes grounded progress even
+    if the model emits no usable PATCHES. Additive only; the runner's grow-only
+    writeback ratchet still rejects any shrink. Sections are the artifact's ``##``
+    headings — the structure lives in the markdown + weakness tags, no Section type.
     """
     wk_block = "\n".join(f"- {w}" for w in (weaknesses or [])) or "(none)"
-    art_block = artifact_text.strip() or "(empty — create the sections from worker output)"
+    art_block = artifact_text.strip()
 
     def reduce(drafts: list[str]) -> tuple[str, int]:
         workers = "\n\n".join(f"[worker {i + 1}]\n{d}" for i, d in enumerate(drafts))
         prompt = (
             _today_note() +
             "You are the section-aware reducer of a multi-worker research phase.\n"
-            "MERGE / REFINE / REVIEW each worker output into the CURRENT ARTIFACT, "
-            "section by section (sections are the '##' headings).\n\n"
+            "Do NOT re-emit the document. Emit a SMALL JSON list of PATCHES that fold "
+            "each worker's SOURCED finding into the CURRENT ARTIFACT, section by "
+            "section (sections are the '##' headings).\n\n"
+            "Each patch is one object:\n"
+            '  {"op": "insert_after", "anchor": "## <exact section heading from the '
+            'artifact>", "content": "<a substantiating SENTENCE woven from the '
+            'finding: its central claim + a short verbatim quote + the source URL>"}\n'
+            '  - op is "insert_after" (add prose under a heading) or "replace" (swap a '
+            "placeholder line for grounded prose).\n"
+            "  - anchor MUST be text that already exists in the CURRENT ARTIFACT.\n"
+            "  - content ADDS grounded prose and keeps every source URL.\n\n"
             "RULES — violating these REGRESSES the deliverable:\n"
-            "  - PRESERVE every existing section VERBATIM; only ADD sourced content "
-            "from a worker output. Output length MUST be >= the current artifact.\n"
-            "  - Every claim you ADD MUST keep its source URL from the worker's "
-            "RESEARCH_FINDING (fetched content always has a URL) — never add a "
-            "sourced claim without its URL.\n"
-            "  - Treat each section's weaknesses below as a review checklist: if a "
-            "worker resolves one (with a real source/URL), fold it in.\n"
-            "  - No worker content for a section -> leave that section exactly as-is.\n\n"
+            "  - Additive only: a patch may ADD substance, never delete or shorten "
+            "existing sourced content.\n"
+            "  - Every added claim keeps its source URL from the worker's "
+            "RESEARCH_FINDING.\n"
+            "  - A weakness below resolved by a worker (with a real URL) → weave it in "
+            "as a sentence, not a bare citation line.\n"
+            "  - No worker content for a section → emit no patch for it.\n\n"
             f"SECTION WEAKNESSES (review checklist):\n{wk_block}\n\n"
-            f"CURRENT ARTIFACT:\n--- BEGIN ---\n{art_block}\n--- END ---\n\n"
+            f"CURRENT ARTIFACT:\n--- BEGIN ---\n{art_block or '(empty)'}\n--- END ---\n\n"
             f"WORKER OUTPUTS:\n{workers}\n\n"
-            "Output ONLY the full updated artifact markdown, beginning at its very "
-            "first heading. Do NOT prepend any preamble, status line, review summary, "
-            "weakness checklist, or commentary about what you changed or verified — "
-            "emit the document itself and nothing else. Keep every original section "
-            "intact. Do NOT include the '--- BEGIN ---' / '--- END ---' delimiter "
-            "lines — they frame the input only."
+            "Output ONLY:\nPATCHES:\n```json\n[ ... ]\n```\n"
+            "Nothing else — no document, no preamble, no commentary."
         )
         res = client.chat([{"role": "user", "content": prompt}])
-        return (res.text or "").strip(), int(getattr(res, "total_tokens", 0) or 0)
+        tokens = int(getattr(res, "total_tokens", 0) or 0)
+        llm_patches = _parse_patches_from_output(res.text or "")
+        # Deterministic floor: convert the workers' own RESEARCH_FINDING blocks to
+        # additive patches. Guarantees grounded progress when the model emits no
+        # usable PATCHES, and folds in any finding it skipped. The reduce_patches
+        # duplicate-guard makes the overlap idempotent.
+        # Fetch-density fix: spokes cite ~12 URLs/phase but fetch ~1, so the grounding
+        # guard dropped 80-100% of real findings. Fetch the cited-but-uncached URLs now
+        # so genuine sources survive grounding (a 404/fabricated URL still drops).
+        _prefetch_cited(drafts)
+        floor_patches: list = []
+        raw_findings = 0
+        for d in drafts:
+            raw_findings += len(_re.findall(r'#{0,6}\s*RESEARCH_FINDING', d))
+            floor_patches += _research_findings_to_patches(d)
+        patches = llm_patches + floor_patches
+        if not patches:
+            _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
+                 f"llm={len(llm_patches)} floor=0 → NO PATCHES (no findings survived)")
+            return art_block, tokens  # nothing to add → unchanged (no truncation)
+        # Resolve anchors before merging: a finding's PATCH_TARGET that is not a real
+        # heading in the doc would otherwise become a '<!-- conflict -->' marker that
+        # pollutes the artifact (the throughput fix surfaced 13 such markers in one
+        # phase). Demote any insert_after with a missing anchor to a clean append.
+        for p in patches:
+            if getattr(p, "op", "") == "insert_after" and p.anchor and p.anchor not in art_block:
+                p.op, p.anchor = "append", None
+        from agentkit.artifacts.patcher import reduce_patches
+        rr = reduce_patches(art_block, [patches])
+        _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
+             f"llm={len(llm_patches)} floor={len(floor_patches)} "
+             f"applied_delta={len(rr.text) - len(art_block)} conflicts={len(rr.conflicts)}")
+        return rr.text.strip(), tokens
 
     return reduce
 
 
 def _research_findings_to_patches(text: str) -> list:
-    """Convert RESEARCH_FINDING blocks → ADDITIVE DocPatches (DESIGN §11.3).
+    """Convert RESEARCH_FINDING blocks → additive, WOVEN DocPatches (§11.3; Levers 1-2).
 
-    Each finding with a real URL becomes an `insert_after` its PATCH_TARGET (or an
-    `append` if no target) — a citation line. Additive only: it can add content but
-    never remove or shorten the existing doc, so the merge cannot regress. Findings
-    without a real URL are dropped (§11 grounding: content needs a source).
+    Each finding with a real URL becomes an ``insert_after`` its PATCH_TARGET (or an
+    ``append`` if no target) carrying a SUBSTANTIATING SENTENCE — the article's
+    central CLAIM, a short verbatim QUOTE, and the source URL — woven into prose
+    rather than a bare citation line (Lever 2: citations → grounded prose, the
+    scorer's "evidence" criterion). Additive only: it can add content but never
+    remove or shorten the existing doc, so the merge cannot regress.
+
+    Grounding guards (Lever 1):
+      - URL not http(s) → dropped (no real source → not content; §11 grounding).
+      - URL never fetched this run (not in the fetch cache, when the cache holds
+        pages) → dropped as a fabricated source. The URL is the grounding oracle, NOT
+        the quote: a fetched page is real, whereas models reconstruct quotes
+        imperfectly — so an exact-quote-substring DROP discards real, fetched sources
+        (observed live: a genuine Martin Fowler finding dropped on a 1-word mismatch).
+        The check is SKIPPED when the cache is empty (offline/test).
+      - QUOTE only decides whether to weave the VERBATIM quote into the prose:
+        included when it is a real substring of a fetched page, omitted (finding still
+        kept on its claim + URL) when it is not verbatim-verifiable.
+
+    CLAIM is the substance; older findings used CONTENT/KEY_INSIGHT, kept as fallbacks
+    so prior-shape outputs still weave a sentence.
     """
     from agentkit.artifacts.patcher import DocPatch
+    from studio.tools import _fetch_cache, _quote_in_cache, _url_in_cache
 
+    cache_active = bool(_fetch_cache)
     patches: list = []
+    # The executor schema emits a BARE ``RESEARCH_FINDING:`` (no leading ``##``), so the
+    # ``##``-required pattern matched nothing on real worker output and the deterministic
+    # patch-floor silently produced zero patches (the load-bearing parse mismatch behind
+    # the live no-op). Make the heading optional so both bare and ``## RESEARCH_FINDING``
+    # forms parse; a spurious prose mention without a URL is dropped harmlessly below.
     for m in _re.finditer(
-        r'##\s*RESEARCH_FINDING(.*?)(?=##\s*RESEARCH_FINDING|\Z)', text, _re.DOTALL
+        r'#{0,6}\s*RESEARCH_FINDING(.*?)(?=#{0,6}\s*RESEARCH_FINDING|\Z)', text, _re.DOTALL
     ):
         block = m.group(1)
 
@@ -685,15 +804,36 @@ def _research_findings_to_patches(text: str) -> list:
         url = _f('URL')
         if not url.lower().startswith('http'):
             continue  # not a sourced finding → not content
+        quote = _f('QUOTE').strip().strip('"')
+        quote_verified = bool(quote) and _quote_in_cache(quote)
+        # Dual grounding oracle (Lever 1): a finding is grounded if EITHER its URL was
+        # fetched OR its verbatim quote appears on a fetched page. Drop only when BOTH
+        # fail — a true fabrication (invented URL AND invented quote). Either signal
+        # alone proves the page was read; requiring both (or exact URL match) discarded
+        # real findings on trivial string drift (the live 0-patch regressions).
+        if cache_active and not (_url_in_cache(url) or quote_verified):
+            continue
         title, target = _f('ARTICLE_TITLE'), _f('PATCH_TARGET')
-        insight, pop = _f('KEY_INSIGHT'), _f('POPULARITY')
-        line = (f"\n- [{title or url}]({url})"
-                + (f" — {insight}" if insight else "")
-                + (f" ({pop})" if pop else ""))
+        pop = _f('POPULARITY')
+        # WHY frames the quote's relevance; CLAIM/CONTENT are legacy fallbacks. The
+        # schema dropped the rephrased CLAIM — the verbatim QUOTE, COPY-PASTED, is the
+        # evidence now (a model paraphrase can fabricate; the source's own words can't).
+        framing = _f('WHY') or _f('CLAIM') or _f('CONTENT') or _f('KEY_INSIGHT')
+
+        cite = f"[{title or url}]({url})"
+        has_pop = bool(pop and pop.lower() != 'n/a')
+        pop_clause = f", {pop}" if has_pop else ""
+        lead = f"{framing.rstrip('.')}: " if framing else ""
+        if quote_verified:  # COPY-PASTE: the verbatim source excerpt IS the evidence (Lever 2)
+            content = f'\n\n{lead}"{quote}" ({cite}{pop_clause}).\n'
+        elif framing:       # no verifiable quote → grounded by URL; framing + citation
+            content = f"\n\n{framing.rstrip('.')} ({cite}{pop_clause}).\n"
+        else:               # nothing to weave → bare citation line
+            content = f"\n- {cite}{(' (' + pop + ')') if has_pop else ''}\n"
         if target:
-            patches.append(DocPatch(op="insert_after", anchor=target, content=line, source="finding"))
+            patches.append(DocPatch(op="insert_after", anchor=target, content=content, source="finding"))
         else:
-            patches.append(DocPatch(op="append", anchor=None, content=line, source="finding"))
+            patches.append(DocPatch(op="append", anchor=None, content=content, source="finding"))
     return patches
 
 
@@ -1438,9 +1578,13 @@ class Runner:
                     and len(_clean_out) >= _seed_len):
                 try:
                     (_eff_ws2 / session.session_id / "artifact.md").write_text(_clean_out)
+                    _dbg(f"writeback ACCEPT step={step.id} seed_len {_seed_len}→{len(_clean_out)}")
                     _seed_len = len(_clean_out)   # ratchet up for the next phase
                 except OSError:
                     pass
+            elif _artifact_copied and _eff_ws2 is not None:
+                _dbg(f"writeback REJECT step={step.id} clean_len={len(_clean_out)} "
+                     f"seed_len={_seed_len} (grow-only: not longer than seed)")
 
             # Reconcile tokens run_plan counted that on_usage did not capture.
             # A StudioChatClient fires on_usage per call (with the in/out split);

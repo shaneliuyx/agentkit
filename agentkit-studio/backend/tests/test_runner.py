@@ -195,10 +195,10 @@ def test_seeded_run_emits_loop_seed(fake_client_factory) -> None:
     assert [s["id"] for s in plan_evt.steps] == ["s1", "s2"]
 
 
-def test_section_reducer_merges_with_artifact_and_weaknesses() -> None:
-    """_make_section_reducer (DESIGN §4.5) builds a run_plan reducer hook that
-    feeds the current artifact + section weaknesses + worker drafts to the LLM
-    and returns its merged output + token count."""
+def test_section_reducer_emits_patches_no_full_regen() -> None:
+    """Lever 3: the reducer asks for PATCHES (not a full-document regen) and applies
+    them MECHANICALLY via reduce_patches, so a completion cap cannot truncate the
+    artifact. The seed is preserved verbatim and the patch content is woven in."""
     from agentkit.types import ChatResult
     from studio.runner import _make_section_reducer
 
@@ -207,19 +207,285 @@ def test_section_reducer_merges_with_artifact_and_weaknesses() -> None:
     class _C:
         def chat(self, messages, tools=None) -> ChatResult:
             captured["prompt"] = messages[-1]["content"]
-            return ChatResult(text="  MERGED ARTIFACT  ", total_tokens=12)
+            return ChatResult(
+                text='PATCHES:\n```json\n'
+                     '[{"op":"insert_after","anchor":"## Intro",'
+                     '"content":"\\n\\nNew grounded sentence (https://x.example)."}]\n```',
+                total_tokens=12,
+            )
 
     reduce = _make_section_reducer(
         _C(), "## Intro\nseed text", ["## Intro: missing citation"]
     )
-    text, tok = reduce(["worker found source X", "worker found source Y"])
+    text, tok = reduce(["worker found source X"])
 
-    assert text == "MERGED ARTIFACT"        # stripped
     assert tok == 12
+    # seed preserved (the patch weaves content BETWEEN heading and body — Lever 2)
+    assert "## Intro" in text and "seed text" in text
+    assert "New grounded sentence" in text                # patch applied mechanically
     p = captured["prompt"]
-    assert "## Intro" in p and "missing citation" in p   # artifact + weakness checklist
-    assert "worker found source X" in p                  # worker drafts included
-    assert "PRESERVE every existing section" in p        # additive contract present
+    assert "Do NOT re-emit" in p                           # patch contract, not full regen
+    assert "PATCHES" in p
+    assert "## Intro" in p and "missing citation" in p     # artifact + weakness checklist
+    assert "worker found source X" in p                    # worker drafts included
+
+
+def test_section_reducer_deterministic_floor_from_findings() -> None:
+    """Lever 3 floor: even when the model emits NO usable PATCHES, the reducer still
+    folds the workers' own RESEARCH_FINDING blocks in as additive patches — a phase
+    always makes grounded progress, never a no-op."""
+    from agentkit.types import ChatResult
+    from studio.runner import _make_section_reducer
+
+    class _Empty:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(text="no patches here", total_tokens=3)
+
+    reduce = _make_section_reducer(_Empty(), "## Sources\n_(pending)_", [])
+    draft = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Loop\nURL: https://addy.example/loop\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: Verifier is the bottleneck.\n"
+    )
+    text, _ = reduce([draft])
+    assert "## Sources" in text and "_(pending)_" in text  # seed kept (woven between)
+    assert "addy.example/loop" in text                     # finding woven in (no LLM patch)
+    assert "Verifier is the bottleneck" in text
+
+
+def test_section_reducer_demotes_missing_anchor_no_conflict_marker() -> None:
+    """The throughput fix lands findings whose PATCH_TARGET heading isn't in the doc;
+    reduce_patches would emit '<!-- conflict -->' markers (live: 13 in one phase). The
+    reducer demotes a missing-anchor insert to a clean append — no markers leak in."""
+    from agentkit.types import ChatResult
+    from studio import tools
+    from studio.runner import _make_section_reducer
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://real.example|"] = ("agents loop until done", 20)
+
+    class _Empty:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(text="no patches", total_tokens=1)
+
+    seed = "# Doc\n\n## Intro\nbody"
+    draft = (
+        "RESEARCH_FINDING:\nARTICLE_TITLE: R\nURL: https://real.example\n"
+        "PATCH_TARGET: ## Nonexistent Section\nWHY: it matters.\n"
+        "QUOTE: agents loop until done\n"
+    )
+    try:
+        text, _ = _make_section_reducer(_Empty(), seed, [])([draft])
+        assert "conflict" not in text.lower()        # no conflict marker leaked
+        assert "real.example" in text                # finding appended cleanly
+        assert "## Intro\nbody" in text              # seed intact
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_quote_in_cache_substring_and_whitespace() -> None:
+    """Lever 1 guard: a verbatim substring of a cached fetched page is grounded
+    (whitespace differences from markdown re-wrap still match); an absent quote and
+    a too-short quote are not grounded."""
+    from studio import tools
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://a|"] = ("Agents loop until a goal is met,\nthen stop.", 40)
+    try:
+        assert tools._quote_in_cache("Agents loop until a goal is met, then stop.")
+        assert tools._quote_in_cache("loop until a goal is met")
+        assert not tools._quote_in_cache("this sentence is nowhere on the page")
+        assert not tools._quote_in_cache("tiny")          # < _MIN_QUOTE_CHARS → no signal
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_quote_in_cache_fuzzy_edge_words() -> None:
+    """Fuzzy match: a quote with a dropped/added word at the edges still verifies (a
+    >=70% contiguous verbatim run proves the page was read), but a pure paraphrase with
+    no long verbatim run does not. This is why Lever-2 verbatim quotes can survive merge
+    despite the model's imperfect reconstruction."""
+    from studio import tools
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://p|"] = (
+        "Rather than personally inspecting what the agents produce, we make them better.", 80
+    )
+    try:
+        # extra leading word + dropped trailing word — core run still verbatim
+        assert tools._quote_in_cache(
+            "So rather than personally inspecting what the agents produce"
+        )
+        # pure paraphrase, no long verbatim run → not verified
+        assert not tools._quote_in_cache(
+            "instead of reviewing agent output ourselves we improve the agents"
+        )
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_drops_unfetched_url() -> None:
+    """Lever 1 (URL is the grounding oracle): with the fetch cache populated, a finding
+    whose URL was never fetched is dropped as fabricated; a finding whose URL IS in the
+    cache is kept, its CLAIM woven, and its verbatim QUOTE included when the quote really
+    appears on the fetched page."""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://real.example|"] = (
+        "The real article says agents self-improve over runs.", 60
+    )
+    real = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Real\nURL: https://real.example\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: Agents improve.\n"
+        "QUOTE: agents self-improve over runs\n"
+    )
+    fake = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Fake\nURL: https://fake.example\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: Made up.\n"
+        "QUOTE: this text is nowhere in any fetched page\n"
+    )
+    try:
+        patches = _research_findings_to_patches(real + fake)
+        assert len(patches) == 1                              # fake URL (unfetched) dropped
+        assert "real.example" in patches[0].content
+        assert "Agents improve" in patches[0].content         # CLAIM woven (Lever 2)
+        assert "agents self-improve over runs" in patches[0].content  # verbatim quote woven
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_keeps_fetched_url_omits_unverifiable_quote() -> None:
+    """Lever 1: a fetched URL with an imperfectly-reconstructed QUOTE is KEPT (URL is
+    the oracle, not the quote — the live Martin Fowler regression where a 1-word
+    mismatch dropped a real source), but the verbatim quote clause is omitted because
+    that exact text is not on the page."""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://fowler.example|"] = (
+        "The human in the loop must verify the output and understand the change.", 70
+    )
+    finding = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Fowler\nURL: https://fowler.example\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: Humans verify agent output.\n"
+        "QUOTE: the human in the loop needs to verify what the AI is doing\n"  # paraphrased
+    )
+    try:
+        patches = _research_findings_to_patches(finding)
+        assert len(patches) == 1                              # kept on URL grounding
+        assert "fowler.example" in patches[0].content
+        assert "Humans verify agent output" in patches[0].content
+        assert "The source states" not in patches[0].content  # unverifiable quote omitted
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_prefetch_url_rejects_non_http_and_hits_cache() -> None:
+    """Fetch-density helper: a non-http URL is never fetched; a URL already cached
+    returns True with NO network call (so prefetch is test-safe when pre-cached)."""
+    from studio import tools
+    tools._fetch_cache.clear()
+    try:
+        assert tools.prefetch_url("(none)") is False
+        assert tools.prefetch_url("") is False
+        tools._fetch_cache["https://cached.example|"] = ("page text", 9)
+        assert tools.prefetch_url("https://cached.example") is True   # cache hit, no net
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_prefetch_cited_extracts_dedups_and_caps() -> None:
+    """The reducer prefetch step extracts cited URLs from drafts, dedups them, and is
+    bounded by the limit. No-op when the cache is empty (nothing to ground → offline)."""
+    from studio import tools
+    from studio.runner import _prefetch_cited
+    tools._fetch_cache.clear()
+    drafts = ["RESEARCH_FINDING:\nURL: https://x.example\nURL: https://y.example\n"]
+    assert _prefetch_cited(drafts) == 0                    # empty cache → no-op (offline)
+    # pre-cache the URLs so prefetch is a cache-hit (no network), then count
+    for u in ("https://x.example", "https://y.example", "https://z.example"):
+        tools._fetch_cache[f"{u}|"] = ("p", 1)
+    drafts = [
+        "RESEARCH_FINDING:\nURL: https://x.example\nURL: https://y.example\n",
+        "RESEARCH_FINDING:\nURL: https://z.example\nURL: https://x.example\n",  # dup x
+    ]
+    try:
+        assert _prefetch_cited(drafts, limit=2) == 2       # 3 unique, capped at 2
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_parses_bare_finding_without_heading() -> None:
+    """Parse mismatch fix: the executor emits a BARE 'RESEARCH_FINDING:' (no '##'),
+    which the old '##'-required regex never matched — so the deterministic patch-floor
+    silently produced zero patches (the load-bearing live no-op). Both bare and headed
+    forms must parse."""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://x.example/p|"] = ("a sentence that is on the page here", 30)
+    bare = (
+        "Let me emit the findings.\n\nRESEARCH_FINDING:\nARTICLE_TITLE: P\n"
+        "URL: https://x.example/p\nPATCH_TARGET: ## Sources\nCLAIM: A point.\n"
+        "QUOTE: a sentence that is on the page here\n"
+    )
+    try:
+        patches = _research_findings_to_patches(bare)
+        assert len(patches) == 1                       # bare heading now parses
+        assert "x.example/p" in patches[0].content
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_keeps_on_verified_quote_despite_url_miss() -> None:
+    """Lever 1 dual oracle: a finding whose URL is NOT in the cache is still KEPT when
+    its verbatim QUOTE appears on a fetched page — a verified quote proves the page was
+    read. (The live regression: both probe findings had verified quotes but were dropped
+    on brittle URL exact-match; either grounding signal must suffice.)"""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://realpage.example/x|"] = (
+        "Ralph is a technique. In its purest form, Ralph is a Bash loop.", 60
+    )
+    finding = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Ralph\nURL: https://elsewhere.example/y\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: Ralph is a bash loop technique.\n"
+        "QUOTE: Ralph is a technique. In its purest form, Ralph is a Bash loop.\n"
+    )
+    try:
+        patches = _research_findings_to_patches(finding)
+        assert len(patches) == 1                              # kept on verified quote alone
+        # the verbatim source excerpt is pasted as the evidence (copy-paste, Lever 2)
+        assert '"Ralph is a technique. In its purest form, Ralph is a Bash loop."' in patches[0].content
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_skips_quote_check_when_cache_empty() -> None:
+    """Lever 1 is conservative: with no fetch cache (offline/test), the quote check
+    is skipped — it can only remove a PROVEN fabrication, never block the additive
+    path entirely."""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    finding = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: T\nURL: https://x.example\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: A claim.\nQUOTE: some quote text here\n"
+    )
+    patches = _research_findings_to_patches(finding)
+    assert len(patches) == 1
+    assert "x.example" in patches[0].content
+
+
+def test_executor_prompt_requires_copied_quote_and_why() -> None:
+    """Lever 1/2: the executor schema demands a COPY-PASTED verbatim QUOTE (the
+    evidence) + WHY (relevance) per source, and explicitly forbids paraphrase — the
+    rephrased CLAIM was dropped because a model paraphrase can fabricate."""
+    from studio.runner import _build_executor_prompt
+    p = _build_executor_prompt("find popular articles", "# Doc\n## Sources\nx",
+                               "- [## Sources] missing url")
+    assert "QUOTE:" in p and "verbatim" in p.lower()
+    assert "COPY" in p and "WHY:" in p
+    assert "CLAIM:" not in p                              # rephrase field removed
+    assert "PASTE its words" in p                         # copy-paste, not restate
 
 
 def test_strip_preamble_removes_reducer_commentary() -> None:
