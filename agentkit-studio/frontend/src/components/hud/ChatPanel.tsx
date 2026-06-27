@@ -35,6 +35,9 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
   const status = useRunStore((s) => s.status);
   const apply = useRunStore((s) => s.apply);
   const beginRun = useRunStore((s) => s.beginRun);
+  // Live streamed model output (was the separate StreamPane) — now rendered
+  // inside the running assistant bubble so chat + output are one panel.
+  const streamText = useRunStore((s) => s.streamText);
 
   const isRunning = status === "running" || status === "connecting";
   const canSend = !!sessionId && input.trim().length > 0 && !isRunning;
@@ -71,6 +74,14 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
     setMessages((prev) => [...prev, userMsg, asstMsg]);
     setInput("");
 
+    // Prior completed turns become multi-turn context (DESIGN §6.2). `messages`
+    // here is the pre-update state (the new user/assistant pair is not appended
+    // yet), so it is exactly the history preceding this request. Drop empty /
+    // still-running placeholders.
+    const history = messages
+      .filter((m) => m.content.trim() && m.status !== "running")
+      .map((m) => ({ role: m.role, content: m.content }));
+
     streamRef.current?.close();
     beginRun(sessionId, mode);
     streamRef.current = openRunStream(sessionId, req, {
@@ -90,7 +101,7 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
           });
         }
       },
-    });
+    }, history);
   };
 
   return (
@@ -106,7 +117,11 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
             ) : (
               <span className={msg.status === "error" ? "chat-error" : ""}>
                 {msg.status === "running" ? (
-                  <span className="chat-spinner" aria-label="Running">●●●</span>
+                  streamText ? (
+                    <span className="chat-stream mono">{streamText}</span>
+                  ) : (
+                    <span className="chat-spinner" aria-label="Running">●●●</span>
+                  )
                 ) : (
                   msg.content || <em>Run complete — see result panel.</em>
                 )}
@@ -165,7 +180,31 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
           <button
             type="button"
             className="btn btn-danger"
-            onClick={() => { if (sessionId) cancelRun(sessionId).catch(() => {}); }}
+            onClick={() => {
+              // Close the SSE stream FIRST so the UI stops immediately — the
+              // backend cancel is cooperative (only checked at phase boundaries),
+              // so without closing the stream the in-flight phase keeps emitting
+              // and the button looks dead. Then POST the cooperative cancel,
+              // mark the running message, and apply a terminal event to clear
+              // the running status (re-enables Send).
+              streamRef.current?.close();
+              if (sessionId) cancelRun(sessionId).catch(() => {});
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.status === "running"
+                    ? { ...m, content: m.content || "⊘ Run cancelled.", status: "error" }
+                    : m
+                )
+              );
+              if (sessionId) {
+                apply({
+                  type: "error",
+                  session_id: sessionId,
+                  ts: Date.now() / 1000,
+                  payload: { message: "Run cancelled by user", where: "cancel" },
+                });
+              }
+            }}
             disabled={!isRunning}
           >
             Cancel

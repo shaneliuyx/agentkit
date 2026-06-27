@@ -12,7 +12,6 @@ import { RunActions } from "./components/config/RunActions";
 import { LoopConfigPanel } from "./components/config/LoopConfigPanel";
 import { TopologyGraph } from "./components/graph/TopologyGraph";
 import { TokenMeter } from "./components/hud/TokenMeter";
-import { StreamPane } from "./components/hud/StreamPane";
 import { PanelDrawer } from "./components/panels/PanelDrawer";
 import { useRunStore } from "./store/runStore";
 
@@ -70,7 +69,6 @@ export default function App() {
           ) : null}
         </div>
         <BackendPanel onSession={handleSession} mode={mode} disabled={false} />
-        <ChatPanel sessionId={sessionId} mode={mode} onModeChange={setMode} />
         <RunActions sessionId={sessionId} />
         <LoopConfigPanel sessionId={sessionId} />
       </header>
@@ -97,7 +95,7 @@ export default function App() {
         </section>
         <aside className="studio-side">
           <TokenMeter />
-          <StreamPane />
+          <ChatPanel sessionId={sessionId} mode={mode} onModeChange={setMode} />
         </aside>
       </main>
 

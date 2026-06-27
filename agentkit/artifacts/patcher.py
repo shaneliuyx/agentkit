@@ -87,21 +87,29 @@ def reduce_patches(
     current_text: str,
     patch_groups: list[list[DocPatch]],
     llm_merge_fn=None,
+    llm_refine_fn=None,
 ) -> ReduceResult:
-    """Collect all patches, detect conflicts, resolve, return final text.
+    """Two-phase reduce (DESIGN §2.2): structural merge, then document refinement.
 
     ``patch_groups`` — list-of-lists, one per worker in task-assignment order
     (earlier assignments win on destructive conflicts).
 
-    Conflict rules:
+    Phase 1 — structural merge. Conflict rules:
       - Anchor missing (destroyed by prior patch): append with conflict marker,
         or call ``llm_merge_fn(working_text, patch)`` if provided.
       - Content already present (duplicate insert): skip.
       - All other patches: applied in order.
+
+    Phase 2 — document refinement. When ``llm_refine_fn`` is provided, the merged
+    text is passed through it for a full-document editorial polish (coherence,
+    flow, gap-filling, conflict-marker cleanup). Refinement is best-effort: any
+    failure or empty result leaves the structurally-merged text untouched, so a
+    flaky LLM never corrupts a clean merge.
     """
     working = current_text
     conflicts: list[ConflictNote] = []
 
+    # Phase 1 — structural merge
     for patches in patch_groups:
         for p in patches:
             if p.op in ("append", "prepend") or p.anchor is None:
@@ -125,6 +133,15 @@ def reduce_patches(
                 continue
 
             working = _apply_one(working, p)
+
+    # Phase 2 — document refinement (optional LLM editorial pass)
+    if llm_refine_fn is not None:
+        try:
+            refined = llm_refine_fn(working)
+            if refined and refined.strip():
+                working = refined
+        except Exception:  # noqa: BLE001 — refine is best-effort polish
+            pass
 
     return ReduceResult(text=working, conflicts=conflicts)
 

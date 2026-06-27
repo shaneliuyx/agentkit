@@ -67,17 +67,28 @@ def latest_with_content(self, task_hash: str) -> TaskRun | None:
 ### 2.2 Patch-Based Modification
 
 **Workers are stateless suggesters — they never write to disk.**
-Each worker emits a `PATCHES:` JSON block as suggestions.
-A dedicated **Reducer** step (the final step of each phase) collects all
-workers' suggestions, resolves conflicts, and performs one atomic write.
+The hub assigns each worker a non-overlapping set of document sections so patches
+commute by default.  Each worker emits a `PATCHES:` JSON block targeting only its
+assigned sections.  A dedicated **Reducer** step (the final step of each phase)
+collects all patches, resolves structural conflicts, then does a full-document
+refinement pass before one atomic write.
 
 ```
+Hub assigns workers by section (non-overlapping anchors):
+  Worker 1 → "## Introduction", "## Background"
+  Worker 2 → "## Results",      "## Analysis"
+  Worker 3 → "## References",   "## Appendix"
+
 Phase N
-  ├── Worker 1  →  PATCHES suggestion block (no file write)
-  ├── Worker 2  →  PATCHES suggestion block (no file write)
-  ├── Worker 3  →  PATCHES suggestion block (no file write)
-  └── Reducer   →  collect all → resolve conflicts → atomic write → artifact.md
+  ├── Worker 1  →  PATCHES for assigned sections (no file write)
+  ├── Worker 2  →  PATCHES for assigned sections (no file write)
+  ├── Worker 3  →  PATCHES for assigned sections (no file write)
+  └── Reducer   →  collect → reduce_patches() → LLM refine pass → atomic write → artifact.md
 ```
+
+**Section-assignment rule:** prefer `insert_after` / `append` ops over `replace` — additive
+patches on distinct anchors are conflict-free by construction.  Reserve `replace` for cases
+where a section must be wholly rewritten and no other worker touches that anchor.
 
 #### DocPatch model (`agentkit.artifacts.DocPatch`)
 
@@ -115,18 +126,24 @@ class ReduceResult:
 def reduce_patches(
     current_text: str,
     patch_groups: list[list[DocPatch]],  # one list per worker, in assignment order
-    llm_merge_fn=None,                   # optional: LLM call for complex conflicts
+    llm_merge_fn=None,                   # optional: LLM call for per-conflict resolution
+    llm_refine_fn=None,                  # optional: LLM call on final merged text (full-doc polish)
 ) -> ReduceResult:
     """
-    Collect all patches, detect conflicts, resolve, return final text.
+    Collect all patches, detect conflicts, resolve, then refine the merged document.
 
+    Phase 1 — structural merge:
     1. Flatten patches preserving worker order (respects task assignment priority).
     2. For each patch: attempt apply on working_text.
        - Anchor found → apply, advance working_text.
        - Anchor missing → conflict: try llm_merge_fn if provided,
          else append with conflict marker.
     3. Deduplicate: skip patch if its content already exists verbatim in working_text.
-    4. Return ReduceResult with final text and conflict log.
+
+    Phase 2 — document refinement:
+    4. If llm_refine_fn provided: pass final merged text through it for a full-document
+       polish (coherence, flow, gap-filling, conflict-marker cleanup).
+    5. Return ReduceResult with refined text and conflict log.
     """
     working = current_text
     conflicts: list[ConflictNote] = []
@@ -210,8 +227,19 @@ task assignment so priority is deterministic).
 
 #### Reducer prompt (CoT)
 
+> **Implementation note:** in code the two phases are split. **Phase 1
+> (structural merge)** is done *mechanically* by `reduce_patches` — no LLM. Only
+> **Phase 2 (refinement)** is LLM-driven, via `_build_reducer_refine_prompt`
+> (`studio/runner.py`), whose numbered-step CoT (Steps 1–8) covers coherence,
+> gap-filling, `<!-- conflict -->` cleanup, dedup, consistency, and quality. It
+> is passed as `llm_refine_fn` into `reduce_patches`; an output shorter than 80%
+> of the merged text is rejected (keeps the clean merge). The conceptual
+> single-prompt version below remains a useful description of the whole job.
+
 ```
 You are the Reducer for this phase. All worker agents have completed their tasks.
+Your job is two-phase: first merge all patches structurally, then refine the
+full document as an editor.
 
 Step 1 — Read the current deliverable at {artifact_path}.
 
@@ -223,14 +251,26 @@ Step 2 — Read each worker's PATCHES suggestions (provided below).
 Step 3 — Detect conflicts.
   For each patch, check if its anchor exists in the current text.
   For same-anchor patches from different workers, decide:
-    - Both additive (inserts)? Concatenate.
+    - Both additive (inserts)? Concatenate in worker-assignment order.
     - One replaces, one inserts same anchor? Apply replace first, then re-check insert.
     - Anchor already removed? Note as conflict, append content with conflict marker.
 
-Step 4 — Produce the final merged text.
-  Apply all non-conflicting patches. For conflicts, append with a clear marker.
+Step 4 — Produce the merged text.
+  Apply all non-conflicting patches in worker-assignment order.
+  For conflicts, append with a `<!-- conflict -->` marker for visibility.
 
-Step 5 — Emit the complete merged document as your output.
+Step 5 — Refine and review the merged document.
+  Read the full merged text as a document editor. Check and fix:
+    - Coherence: does the document flow logically section to section?
+    - Gaps: missing transitions, incomplete sentences, orphaned headings?
+    - Conflict markers: resolve any `<!-- conflict -->` tags left from Step 4.
+    - Redundancy: deduplicate content that multiple workers inserted identically.
+    - Consistency: uniform terminology, citation style, heading hierarchy.
+    - Quality: tighten prose, correct factual inconsistencies, improve clarity.
+  This is a full editorial pass — produce the best possible document, not just
+  a mechanical merge.
+
+Step 6 — Emit the final refined document as your output.
   The system will write it to {artifact_path} atomically.
 ```
 
@@ -347,26 +387,65 @@ unless those words genuinely describe what the goal requires.
 
 #### Runner integration
 
-```python
-# runner.py: parse EPIC_PLAN from planner output
-epics = _parse_epic_plan(planner_output)
+`_parse_epic_plan(planner_output)` parses the `EPIC_PLAN` JSON block. In the
+**live runner**, the phase loop is driven by `plan_obj.steps` (the plan
+decomposition); the `TaskLedger` is seeded **up front from those steps** so
+`remaining()` reflects real pending work from the very first phase (see §3.2).
 
-# Convert each epic to a Plan.step; branches become the TaskLedger seed
-for epic in epics:
-    step = Step(
-        id=epic["id"],
-        description=epic["description"],
-        depends_on=tuple(epic["depends_on"]),
-        topology=STAR,        # always fan-out within an epic
-    )
-    ledger.all_tasks.extend(
-        TaskRecord(id=b["id"], description=b["description"])
-        for b in epic["branches"]
-    )
+```python
+# runner.py — seed the ledger with every planned phase BEFORE the loop
+_ledger = TaskLedger()
+for _s in plan_obj.steps:
+    _ledger.add_task(TaskRecord(id=_s.id, description=_s.description[:120]))
 ```
 
-The hub for each epic receives `ledger.to_context_block()` showing which branches
-were completed in prior epics and which remain for this epic.
+The hub for each phase receives `_ledger.to_context_block()` showing which
+phases completed earlier (COMPLETED) and which remain (REMAINING), with an
+explicit "do not duplicate" instruction. Seeding up front is what makes the
+REMAINING half non-empty — without it `remaining()` is structurally always empty.
+
+---
+
+### 2.4 Cross-Task Context Retrieval (R10)
+
+`task_hash = sha256(requirement)` is an **exact** key — `latest`/`best`/`all_runs`
+only find history for the *identical* requirement. To also carry lessons across
+*similar* tasks, `TaskRunStore` embeds each run's requirement and retrieves the
+most cosine-similar prior tasks.
+
+```python
+# studio/task_runs.py
+class TaskRunStore:
+    def __init__(self, db_path=None, embedder=None): ...   # embedder optional
+
+    def similar_runs(self, requirement, embedder, k=5,
+                     min_similarity=0.35, exclude_hash=None
+                     ) -> list[tuple[TaskRun, float]]:
+        """Embed `requirement`, cosine-rank every prior task's requirement,
+        return the best-scoring run per distinct task_hash above threshold
+        (excluding the current task's own exact history)."""
+
+    def accumulated_weaknesses(self, requirement, exact_hash, embedder=None,
+                               k_similar=5, min_similarity=0.35,
+                               consolidate_threshold=0.85) -> list[str]:
+        """Exact-task lessons first → similar-task lessons → exact-string dedup
+        → semantic consolidation. This is the list fed to the hub prompt."""
+```
+
+- **Schema:** a `requirement_embedding BLOB` column on `task_runs` (float32
+  vector). Existing rows are NULL; `_backfill_embeddings(embedder)` embeds them
+  lazily on first similarity query. New runs are embedded on `record()` when an
+  embedder is wired.
+- **Consolidation (dedup + merge):** `_consolidate_weaknesses` drops a weakness
+  when it is `>= consolidate_threshold` cosine-similar to one already kept, so
+  "no citations" and "sources lack URLs" collapse to one lesson — not just
+  exact-string dedup.
+- **Wiring:** the runner builds `TaskRunStore(embedder=self._embedder)` and calls
+  `accumulated_weaknesses(requirement, _thash, embedder=...)` when assembling the
+  hub's weakness block. Degrades to exact-string-deduped exact-task lessons when
+  no embedder is available.
+- **Graceful failure:** embedding/backfill/consolidation are best-effort
+  (`try/except`); a down embedder never breaks a run.
 
 ---
 
@@ -398,6 +477,13 @@ class TaskLedger:
             self.completed.append(rec)
         self.in_flight.discard(task_id)
 
+    def mark_in_flight(self, task_id: str) -> None:
+        self.in_flight.add(task_id)          # collision guard while a phase runs
+
+    def add_task(self, record: TaskRecord) -> None:
+        if not any(t.id == record.id for t in self.all_tasks):
+            self.all_tasks.append(record)    # used to seed all_tasks up front
+
     def to_context_block(self) -> str:
         """Serialised as human+machine readable block for injection into hub prompt."""
         done = "\n".join(f"- [{t.id}] {t.description}" for t in self.completed)
@@ -410,30 +496,44 @@ class TaskLedger:
 
 ### 3.2 Runner Phase Loop
 
-`runner.py` carries one `TaskLedger` across all phases:
+`runner.py` carries one `TaskLedger` across all phases. It is **seeded up front**
+from the planned phases, then each phase is marked in-flight while it runs and
+done after — so `remaining()` and the COMPLETED/REMAINING context block are
+always accurate:
 
 ```python
-ledger = TaskLedger(all_tasks=[], completed=[], in_flight=set())
+ledger = TaskLedger()
+for s in plan_obj.steps:                       # seed BEFORE the loop
+    ledger.add_task(TaskRecord(id=s.id, description=s.description[:120]))
 
 for step in plan_obj.steps:
-    # inject ledger + deliverable path into hub description
-    desc = _inject_ledger_and_artifact(step.description, ledger, artifact_path)
+    # hub CoT prompt (with ledger.to_context_block() + artifact_path) is built
+    # for STAR/MAP fan-out phases and prepended to the step description.
 
-    result = run_plan(sub_plan_with(desc), client, ...)
+    # worker count is derived from remaining work (DESIGN §4):
+    n_remaining = max(1, len(ledger.remaining()))
+    max_workers = compute_n_agents(n_remaining, sizing_cfg)
 
-    # extract DONE markers and TASK_LIST from hub output
-    new_tasks, done_ids = _parse_hub_output(sr.output)
-    for t in new_tasks:
-        if t not in ledger.all_tasks:
-            ledger.all_tasks.append(t)
-    for tid in done_ids:
-        ledger.mark_done(tid)
+    ledger.mark_in_flight(step.id)             # collision guard during the phase
+    result = run_plan(sub_plan, client, max_workers=max_workers)
+    ledger.mark_done(step.id)                  # completed → carried to next phase
 
-    # extract and apply patches to artifact
-    patches = _parse_patches(sr.output)
-    if patches:
-        apply_patches(artifact_path, patches)
+# After workers finish, the Reducer collects PATCHES blocks from the phase
+# outputs and applies them in ONE pass (two-phase: structural merge + LLM refine):
+patch_groups = [_parse_patches_from_output(o) for o in outputs.values()]
+patch_groups = [g for g in patch_groups if g]
+if patch_groups:
+    refine_fn = _make_refine_fn(base_client, goal, art_path) if use_llm else None
+    rr = reduce_patches(current_text, patch_groups, llm_refine_fn=refine_fn)
+    if rr.text:
+        write_artifact(art_file, rr.text)      # atomic tmp+rename
 ```
+
+> **Note on sub-task DONE reconciliation:** completion is tracked at **phase
+> granularity** (`step.id`). The hub's `DONE:` JSON block (§3.3) is an
+> agent-facing instruction; the runner does not parse it back into the ledger —
+> a finished phase is marked done by id. This keeps the ledger simple and is
+> sufficient for the "don't redo a completed phase" guarantee.
 
 ### 3.3 Hub Output Protocol
 
@@ -466,6 +566,20 @@ DONE:
 ````
 
 Runner parses these blocks via regex; text outside the blocks is ignored.
+
+> **Enforcement (R2 — non-overlapping assignment):** the hub CoT prompt mandates
+> non-overlapping, one-section-per-agent assignment (§5.1 Step 5), the `in_flight`
+> set guards a phase from re-entry while running, AND the runner now **validates
+> the `ASSIGNED` block in code**: `_parse_assigned` extracts agent→sections and
+> `_dedupe_assignment` detects any section claimed by ≥2 agents, deterministically
+> reassigning it **first-claim-wins** (the earliest agent in assignment order
+> keeps it; within-agent repeats collapse too). The result is surfaced as a
+> `GateEvent(name="worker-assignment", outcome="pass"|"warn", …)` so violations
+> are visible in the gate panel / Loop Doctor, not silent. The dedupe runs
+> post-phase (the hub + workers execute inside one `run_plan` call); it makes the
+> partition deterministic and auditable rather than re-prompting (which would add
+> a round-trip). Pure-function core in `studio/runner.py`, tested in
+> `test_m8_m9_helpers.py`.
 
 ---
 
@@ -516,18 +630,21 @@ def assign_tasks(
 
 ### 4.2 Integration
 
-`topology/core.py` STAR/MESH/MAP branches: remove explicit `n` parameter.
-Receive `task_list` from hub output; call `compute_n_agents`:
+The explicit `n` parameter is removed; the worker count is **derived**. In the
+live runner the count comes from the ledger's remaining work for the phase
+(seeded up front, §3.2), capped into `run_plan`'s `max_workers`:
 
 ```python
-# Before (old):
-return TopologyChoice(STAR, EXPLICIT, n=user_specified_n, ...)
-
-# After (new):
+# runner.py — derive worker count, never hard-code n
 from agentkit.topology.sizing import compute_n_agents
-n = compute_n_agents(len(task_list), cfg=session.loop_config.sizing())
-return TopologyChoice(STAR, DERIVED, n=n, ...)
+n_remaining = max(1, len(ledger.remaining()))
+max_workers = compute_n_agents(n_remaining, cfg=session.loop_config.sizing())
+result = run_plan(sub_plan, client, max_workers=max_workers)
 ```
+
+`assign_tasks` partitions an explicit task list when one is in hand; the runner
+path above sizes from the remaining count. Either way the rule is identical:
+≥`min`/≤`max` tasks per agent, last agent may be smaller, no caller-specified `n`.
 
 ### 4.3 Configuration
 
@@ -593,11 +710,16 @@ Step 4 — Define this phase's work items.
     - Completable in one LLM call with web tools
   Do NOT include items already in COMPLETED TASKS.
 
-Step 5 — Assign work items to agents.
+Step 5 — Assign work items to agents by document section.
   Rules:
-    - Max {max_tasks_per_agent} items per agent
+    - Each agent owns a non-overlapping set of sections (e.g. "## Results", "## Analysis").
+      Assign by section heading, NOT by topic — "improve Section X" not "cover Topic Y".
+      Section-scoped assignment guarantees non-overlapping anchors so patches commute.
+    - Max {max_tasks_per_agent} sections per agent
     - Last agent may receive fewer
-    - No item assigned to more than one agent
+    - No section assigned to more than one agent
+    - Tell each agent its exact section headings (verbatim from the document) so its
+      PATCHES anchors are unambiguous.
   Emit TASK_LIST, ASSIGNED, and DONE blocks (JSON, as specified in §3.3).
 
 Step 6 — Emit DELIVERABLE_PATH: {artifact_path}
@@ -611,9 +733,9 @@ Same structure except Step 1 becomes:
 ```
 Step 1 — No existing deliverable found.
   You will plan the creation of the first draft.
-  Define the document structure: sections, their purpose, and the
-  information needed to populate each section.
-  List each section as a work item for Step 5 assignment.
+  Define the document structure: section headings and their purpose.
+  Assign one or more sections to each agent (Step 5 rules still apply).
+  Each agent will create its sections from scratch via PATCHES with op=append.
   After this phase the deliverable will be created at: {artifact_path}
 ```
 
@@ -644,18 +766,20 @@ Step 3 — Assess completeness.
 
 Step 4 — Draft your patch suggestions.
   Rules:
-    - Use exact anchor text from the CURRENT DELIVERABLE CONTENT above.
+    - Use the exact section heading string as your anchor (e.g. "## Results").
+      Copy the heading verbatim from CURRENT DELIVERABLE CONTENT — do not paraphrase.
     - Each patch targets only sections you were assigned.
-    - Do NOT rewrite sections assigned to other agents.
-    - Prefer insert_after/append over replace — less conflict risk.
+    - Do NOT write patches for sections assigned to other agents.
+    - Prefer insert_after/append over replace — additive patches on distinct
+      anchors commute; replace patches on the same anchor conflict.
     - Use the PATCHES JSON format exactly (see §2.2).
 
 Step 5 — Emit DONE markers for each task you completed.
   Format: DONE: ["task-id-1", "task-id-2"]
 
 Step 6 — Emit your PATCHES block.
-  The Reducer will collect all workers' patches, resolve conflicts,
-  and perform the single atomic write.
+  The Reducer will: (1) collect all workers' patches, (2) resolve conflicts,
+  (3) perform a full editorial refinement pass, then (4) atomic write to disk.
 ```
 
 ---
@@ -664,26 +788,44 @@ Step 6 — Emit your PATCHES block.
 
 ### 6.1 Frontend change
 
-Remove `<textarea id="task-input">`. Add `<ChatPanel>` component:
-- Multi-turn message thread (user + assistant messages)
-- Submit sends full chat history as requirement context
-- Assistant messages: goal suggestions, clarifying questions, confirmations
-- `POST /session/goal` accepts `message_history: list[{role, content}]`
+The main task `<textarea>` is replaced by the `<ChatPanel>` component
+(`frontend/src/components/hud/ChatPanel.tsx`, mounted in `App.tsx`):
+- Multi-turn message thread (`role: "user" | "assistant"`)
+- On submit, prior completed turns are forwarded as `history` (the new
+  user/assistant pair is appended locally, not sent in `history`)
+- `openRunStream(sessionId, req, callbacks, history)` (`api/sse.ts`) appends
+  `&history=<json>` to the SSE URL when history is non-empty
 
 ### 6.2 Backend flattening
 
 ```python
+# studio/session.py
 def flatten_chat_to_requirement(messages: list[dict]) -> str:
     """Concatenate messages into structured requirement context for the planner."""
     return "\n\n".join(
         f"[{m['role'].upper()}]: {m['content']}"
         for m in messages
-        if m["role"] in ("user", "assistant")
+        if m.get("role") in ("user", "assistant")
     )
 ```
 
-The planner receives this flattened string as its task description.
-All prior refinements are visible to the planner, not just the last user message.
+Wiring is on **`GET /run/{session_id}`** (`studio/app.py`), which accepts an
+optional JSON-encoded `history` query param:
+
+```python
+@app.get("/run/{session_id}")
+async def get_run(session_id, requirement, history=None):
+    if history:
+        turns = json.loads(history)                       # untrusted → guarded
+        flat = flatten_chat_to_requirement(turns)
+        if flat:
+            requirement = f"{flat}\n\n[CURRENT REQUEST]: {requirement}"
+    ...
+```
+
+Malformed `history` falls back to the bare `requirement` (single-textarea
+contract). All prior refinements are visible to the planner, not just the last
+user message.
 
 ---
 
@@ -698,6 +840,7 @@ All prior refinements are visible to the planner, not just the last user message
 | TaskRunStore | `studio/task_runs.py` | `agentkit.improvement.store` |
 | score_result | `studio/task_runs.py` | `agentkit.improvement.scorer` |
 | mine_weaknesses_from_outputs | `studio/task_runs.py` | `agentkit.improvement.miner` |
+| similar_runs / accumulated_weaknesses (R10 cross-task retrieval) | `studio/task_runs.py` | `agentkit.improvement.store` |
 | Context compaction | `agentkit/context.py` | already there |
 | OpenAIEmbedder retry | `agentkit/backends/openai_compat.py` | already there |
 | InFlightRegistry (URL dedup) | `studio/tools.py` | `agentkit.tools.fetch_cache` |
@@ -750,27 +893,39 @@ class InFlightRegistry:
 ## 8. Implementation Order
 
 ```
-M1  agentkit.topology.sizing          compute_n_agents, assign_tasks, SizingConfig
-M2  agentkit.orchestrator.ledger      TaskRecord, TaskLedger, to_context_block
-M3  agentkit.artifacts.patcher        DocPatch, reduce_patches, write_artifact,
+M1  agentkit.topology.sizing          compute_n_agents, assign_tasks, SizingConfig          ✓ DONE
+M2  agentkit.orchestrator.ledger      TaskRecord, TaskLedger, to_context_block               ✓ DONE
+M3  agentkit.artifacts.patcher        DocPatch, reduce_patches, write_artifact,              ✓ DONE
                                       cleanup_orphaned_tmp
-M4  agentkit.artifacts.store          resolve_deliverable, latest_with_content
+M4  agentkit.artifacts.store          resolve_deliverable, latest_with_content               ✓ DONE
          depends on: M3
-M5  agentkit.improvement.*            port TaskRunStore, score_result, mine_weaknesses
+M5  agentkit.improvement.*            port TaskRunStore, score_result, mine_weaknesses       ✓ DONE
          depends on: M4
-M6  agentkit.tools.fetch_cache        InFlightRegistry (phase-level URL dedup)
-M7  studio/workspace.py               integrate M4; add resolve_deliverable
+M6  agentkit.tools.fetch_cache        InFlightRegistry (phase-level URL dedup)               ✓ DONE
+M7  studio/workspace.py               integrate M4; add resolve_deliverable wrapper          ✓ DONE
          depends on: M4, M5
-M8  studio/runner.py                  epic plan parsing; phase loop: TaskLedger (M2),
+M8  studio/runner.py                  epic plan parsing; phase loop: TaskLedger (M2),        ✓ DONE
                                       Reducer + patch apply (M3), deliverable resolve (M7),
                                       dynamic sizing (M1), InFlightRegistry (M6)
          depends on: M1, M2, M3, M6, M7
-M9  studio/runner.py                  CoT hub + worker + Reducer prompts (§5, §2.2)
-         depends on: M8
-M10 studio/models.py                  LoopConfig with deliverable_path + sizing params
-M11 frontend: ChatPanel               replace task textarea with multi-turn chat
-M12 frontend: Loop config panel       deliverable_path field + sizing sliders
+M9  studio/runner.py                  CoT hub + worker + Reducer prompts (§5, §2.2)          ✓ DONE
+         depends on: M8                 _parse_epic_plan, _build_planner_cot_prompt,
+                                        _build_hub_cot_prompt, _parse_patches_from_output
+M10 studio/models.py                  LoopConfig with deliverable_path + sizing params       ✓ DONE
+M11 frontend: ChatPanel               replace task textarea with multi-turn chat              ✓ DONE
+M12 frontend: Loop config panel       deliverable_path field + sizing sliders                 ✓ DONE
          depends on: M10
+M13 studio/session.py + app.py        flatten_chat_to_requirement; GET /run?history=          ✓ DONE
+    frontend: sse.ts + ChatPanel        forward prior turns as history (R9 end-to-end)
+         depends on: M11
+M14 studio/task_runs.py               R10 cross-task retrieval: requirement_embedding column, ✓ DONE
+                                      similar_runs, accumulated_weaknesses (dedup +
+                                      semantic consolidation); runner wires the embedder
+         depends on: M5
+M15 studio/runner.py                  R1/R2 fixes: seed TaskLedger from plan_obj.steps        ✓ DONE
+                                      up front; mark_in_flight per phase (live collision
+                                      guard); reducer refine prompt → numbered-step CoT (R7)
+         depends on: M8, M9
 ```
 
 ---
@@ -807,3 +962,9 @@ hill-climb (§2.1 priority 2). Empty + "Create new" → always auto-create (§2.
 | Weakness generalization | Hub CoT step (LLM) | Avoids brittle code heuristics; LLM generalizes naturally |
 | Requirement input | Chat (multi-turn) | Captures refinements; full context visible to planner |
 | Shared library boundary | agentkit for reusable primitives | Studio = orchestration shell; agentkit = reusable engine |
+| Context history scope (R10) | Exact task **+ similar tasks** (cosine over requirement embeddings) | A brand-new requirement has no exact history; similar prior tasks still carry transferable lessons |
+| Weakness list to agent (R10) | Dedup (exact) **+ consolidate** (semantic near-dup merge) | Different phrasings of the same lesson would otherwise bloat the prompt and dilute signal |
+| Deliverable seed embedding | Lazy backfill of legacy rows | Avoids a blocking migration over the whole DB; embeds on first similarity query |
+| Phase-2 refine acceptance | Length guard (≥80% of merged) + best-effort | Rejects truncated/empty LLM responses; a flaky refine never corrupts a clean structural merge |
+| Worker section non-overlap (R2) | Prompt-enforced **+ code-validated** (`_dedupe_assignment`, first-claim-wins, emitted as a gate check) | Prompt sets intent; the post-phase validator makes the partition deterministic + auditable without a re-prompt round-trip (see §3.3 enforcement) |
+| Ledger seeding (R1) | Seed `all_tasks` from `plan_obj.steps` up front | Without it `remaining()` is structurally always empty; seeding makes COMPLETED/REMAINING real across phases |

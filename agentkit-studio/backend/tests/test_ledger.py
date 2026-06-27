@@ -66,6 +66,37 @@ def test_to_context_block_format():
     assert "[t2] task 2" in block
 
 
+def test_runner_seed_then_track_flow_R1():
+    """R1: the runner seeds all_tasks up front, then marks each phase in-flight
+    while running and done after — so remaining() reflects REAL pending work and
+    completed work syncs forward (no re-doing). This mirrors runner.run()."""
+    phases = [_rec(1), _rec(2), _rec(3)]
+    ledger = TaskLedger()
+    for p in phases:  # seed up front (the fix)
+        ledger.add_task(p)
+
+    # Before any phase runs: all three are pending, none completed.
+    assert {t.id for t in ledger.remaining()} == {"t1", "t2", "t3"}
+    assert ledger.completed == []
+
+    # Phase 1 runs: in-flight excludes it from remaining; done moves it forward.
+    ledger.mark_in_flight("t1")
+    assert "t1" not in {t.id for t in ledger.remaining()}
+    ledger.mark_done("t1")
+
+    # At phase 2, the context block shows t1 COMPLETED and t2/t3 REMAINING —
+    # the cross-phase 'do not duplicate' signal is now real (was always empty).
+    block = ledger.to_context_block()
+    assert "[t1] task 1" in block.split("REMAINING")[0]  # t1 in COMPLETED half
+    assert "[t2] task 2" in block.split("REMAINING")[1]  # t2 in REMAINING half
+    assert {t.id for t in ledger.remaining()} == {"t2", "t3"}
+
+    ledger.mark_in_flight("t2"); ledger.mark_done("t2")
+    ledger.mark_in_flight("t3"); ledger.mark_done("t3")
+    assert ledger.remaining() == []
+    assert {t.id for t in ledger.completed} == {"t1", "t2", "t3"}
+
+
 def test_to_context_block_empty():
     ledger = TaskLedger()
     block = ledger.to_context_block()

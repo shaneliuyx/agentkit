@@ -18,6 +18,7 @@ CORS is open for localhost dev (Vite on :5173).
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from typing import Any
 
@@ -40,7 +41,7 @@ from studio.export import run_to_loop
 from studio.loops import CatalogClient
 from studio.models import LoopConfig
 from studio.runner import Runner
-from studio.session import SessionRegistry
+from studio.session import SessionRegistry, flatten_chat_to_requirement
 from studio.skills_paths import build_path_skills
 from studio.workspace import workspace_root
 
@@ -172,16 +173,33 @@ def _seed_session(session_id: str, loop_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.get("/run/{session_id}")
-async def get_run(session_id: str, requirement: str) -> EventSourceResponse:
+async def get_run(
+    session_id: str, requirement: str, history: str | None = None
+) -> EventSourceResponse:
     """Stream the ordered SSE event sequence for ``requirement``.
 
     The runner runs on a worker thread; events are pushed onto an ``asyncio``
     queue from that thread (thread-safe via ``call_soon_threadsafe``) and yielded
     here as SSE frames.
+
+    ``history`` (optional, JSON-encoded ``[{role, content}]``): when the ChatPanel
+    (DESIGN §6) sends a multi-turn thread, the backend flattens it via
+    ``flatten_chat_to_requirement`` and PREPENDS it so the planner sees every
+    refinement, not just the final message. Absent/blank → ``requirement`` is used
+    verbatim (unchanged single-textarea contract).
     """
     session = registry.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="unknown session")
+
+    if history:
+        try:
+            _turns = json.loads(history)
+            _flat = flatten_chat_to_requirement(_turns) if isinstance(_turns, list) else ""
+            if _flat:
+                requirement = f"{_flat}\n\n[CURRENT REQUEST]: {requirement}"
+        except (ValueError, TypeError):
+            pass  # malformed history → fall back to bare requirement
     try:
         registry.begin_run(session_id)
     except RuntimeError as exc:

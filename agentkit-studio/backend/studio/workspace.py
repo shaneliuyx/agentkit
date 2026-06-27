@@ -31,6 +31,19 @@ def workspace_root() -> Path:
     return Path(os.getenv("STUDIO_WORKSPACE_ROOT", _DEFAULT_ROOT))
 
 
+def resolve_deliverable(session: object, store: object, task_hash_str: str) -> Path:
+    """Resolve the artifact.md path for *session* using the three-source priority
+    chain from DESIGN §2.1 (explicit path → hill-climb seed → auto-create).
+
+    M7 integration: thin wrapper over ``agentkit.artifacts.store.resolve_deliverable``
+    that supplies the studio workspace root automatically so callers don't need to
+    import the store function and the root helper separately.
+    """
+    from agentkit.artifacts.store import resolve_deliverable as _resolve
+
+    return _resolve(session, workspace_root(), store, task_hash_str)
+
+
 class WorkspaceError(Exception):
     """A containment violation or file error — surfaced as a tool error result."""
 

@@ -20,13 +20,15 @@ asyncio bridge). Here the runner just calls an injected ``emit(event)`` sink.
 
 from __future__ import annotations
 
+import json as _json
+import re as _re
 import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
-from agentkit.planner.core import Plan, plan
+from agentkit.planner.core import Plan, PlanStep, plan
 from agentkit.topology.core import MAP, MESH, PIPELINE, SINGLE, STAR
 from agentkit.topology.dynamic import assign_topologies, run_plan
 from agentkit.types import LLMClient
@@ -64,6 +66,325 @@ from studio.session import RunSnapshot, Session
 from studio.shared_bridge import TokenAccounting, UsageReport
 from studio.tools import ToolAugmentedClient, web_toolkit_available
 from studio.workspace import Workspace
+
+# ---------------------------------------------------------------------------
+# M8 / M9 — Epic plan parsing and CoT prompt builders (DESIGN §3, §5)
+# ---------------------------------------------------------------------------
+
+def _parse_epic_plan(text: str) -> list[dict]:
+    """Extract epics list from an EPIC_PLAN JSON block in LLM planner output.
+
+    Returns empty list on missing block or invalid JSON so the caller can
+    fall through to the standard agentkit plan() path.
+    """
+    m = _re.search(r"EPIC_PLAN:\s*```json\s*(\{.*?\})\s*```", text, _re.DOTALL)
+    if not m:
+        # Unfenced: LLMs may emit compact single-line JSON; greedy without DOTALL
+        # so `.` stops at newline boundaries and captures the full line-level object.
+        m = _re.search(r"EPIC_PLAN:\s*(\{.*\})", text)
+    if not m:
+        return []
+    try:
+        data = _json.loads(m.group(1))
+        return data.get("epics", [])
+    except (ValueError, KeyError):
+        return []
+
+
+def _build_planner_cot_prompt(
+    goal: str,
+    artifact_path: str,
+    artifact_summary: str,
+    weaknesses_block: str,
+) -> str:
+    """Strategic planner CoT prompt (DESIGN §3 — Planner CoT Prompt).
+
+    Returned string is passed as the sole user message to the LLM; the model
+    must emit an EPIC_PLAN JSON block that _parse_epic_plan() can extract.
+    """
+    return (
+        "You are the strategic planner for a multi-phase agent system.\n"
+        "The goal can be any type of task — research, writing, analysis, design,\n"
+        "code generation, data processing, or a mix. Do not assume a specific domain.\n"
+        "Think step by step.\n\n"
+        f"GOAL: {goal}\n"
+        f"DELIVERABLE PATH: {artifact_path}\n"
+        f"EXISTING DELIVERABLE: {artifact_summary or 'none'}\n"
+        f"ACCUMULATED WEAKNESSES:\n{weaknesses_block or '(none)'}\n\n"
+        "Step 1 — Understand the goal and the form of its deliverable.\n\n"
+        "Step 2 — Identify 2–5 major work phases (epics).\n"
+        "  Do not default to Research→Analysis→Writing unless those phases\n"
+        "  genuinely fit. Derive phase names from the goal itself.\n\n"
+        "Step 3 — For each epic enumerate 6–15 parallel branches.\n"
+        "  Branches within an epic run in parallel — no inter-branch dependencies.\n"
+        "  Each branch must be completable by one agent with available tools.\n\n"
+        "Step 4 — Account for existing deliverable and weaknesses.\n"
+        "  If a deliverable exists: branches must address gaps only, not reconstruct.\n"
+        "  If no deliverable: Epic 1 branches should establish the initial structure.\n\n"
+        "Step 5 — Emit the plan:\n\n"
+        "EPIC_PLAN:\n"
+        "```json\n"
+        '{"epics": [{"id": "epic-1", "title": "...", "description": "...",\n'
+        '  "depends_on": [], "branches": [{"id": "b-1a", "description": "..."}]}]}\n'
+        "```\n"
+    )
+
+
+def _plan_from_epics(
+    requirement: str,
+    client,
+    weaknesses_block: str = "",
+    artifact_summary: str = "",
+) -> Plan:
+    """Epic-based planner (DESIGN §2.3) — replaces the flat cold decomposer.
+
+    The planner LLM is prompted with the CoT planner prompt and must emit an
+    EPIC_PLAN JSON block. Each epic becomes one phase (`PlanStep` with STAR
+    fan-out); `depends_on` sequences the phases. Falls back to the deterministic
+    `plan()` only when the LLM returns no parseable epics, so a malformed plan
+    never breaks a run.
+    """
+    prompt = _build_planner_cot_prompt(
+        goal=requirement,
+        artifact_path="artifact.md",
+        artifact_summary=artifact_summary,
+        weaknesses_block=weaknesses_block,
+    )
+    try:
+        resp = client.chat([{"role": "user", "content": prompt}])
+        epics = _parse_epic_plan(getattr(resp, "text", "") or "")
+    except Exception:  # noqa: BLE001 — any planner failure → deterministic fallback
+        epics = []
+    if not epics:
+        return plan(requirement)
+
+    epic_ids = {str(e.get("id")) for e in epics if e.get("id")}
+    steps = tuple(
+        PlanStep(
+            id=str(e["id"]),
+            description=str(e.get("description") or e.get("title") or e["id"]),
+            # keep only deps that resolve to a sibling epic (no self/dangling deps)
+            depends_on=tuple(
+                str(d) for d in e.get("depends_on", ())
+                if str(d) in epic_ids and str(d) != str(e["id"])
+            ),
+            topology=STAR,
+        )
+        for e in epics
+        if e.get("id")
+    )
+    if not steps:
+        return plan(requirement)
+    try:
+        return Plan(task=requirement, steps=steps)
+    except Exception:  # noqa: BLE001 — bad DAG → deterministic fallback
+        return plan(requirement)
+
+
+def _build_hub_cot_prompt(
+    goal: str,
+    artifact_path: str,
+    ledger_block: str,
+    weaknesses_block: str,
+    artifact_text: str,
+    max_tasks_per_agent: int,
+) -> str:
+    """Hub planning CoT prompt for one epic phase (DESIGN §5.1 / §5.2).
+
+    Injected as the step description so the hub LLM sees it as its task.
+    """
+    if artifact_text:
+        step1 = (
+            "Step 1 — Read the existing deliverable structure.\n"
+            "  Identify sections, coverage depth, and citation quality.\n"
+            "  List what is present and what is thin or missing.\n"
+        )
+    else:
+        step1 = (
+            "Step 1 — No existing deliverable found.\n"
+            "  Define the document structure: sections, purpose, and\n"
+            "  information needed to populate each section.\n"
+            f"  Deliverable will be created at: {artifact_path}\n"
+        )
+    return (
+        "You are the planning hub for a multi-phase agent system.\n"
+        "Think through each step carefully before acting.\n\n"
+        "CONTEXT:\n"
+        f"  Goal: {goal}\n"
+        f"  Deliverable: {artifact_path}\n"
+        f"  {ledger_block}\n"
+        f"  Accumulated weaknesses:\n{weaknesses_block or '(none)'}\n\n"
+        f"{step1}\n"
+        "Step 2 — Compare against the goal. State gaps specifically.\n\n"
+        "Step 3 — Generalize weaknesses into universal requirements.\n\n"
+        "Step 4 — Define this phase's work items (additive/corrective only;\n"
+        "  no items from COMPLETED TASKS).\n\n"
+        "Step 5 — Assign work items to agents BY DOCUMENT SECTION.\n"
+        "  Rules:\n"
+        "    - Each agent owns a non-overlapping set of sections (e.g. \"## Results\",\n"
+        "      \"## Analysis\"). Assign by section heading, NOT by topic —\n"
+        "      \"improve Section X\" not \"cover Topic Y\". Section-scoped assignment\n"
+        "      guarantees non-overlapping anchors so worker PATCHES commute.\n"
+        f"    - Max {max_tasks_per_agent} sections per agent; last agent may receive fewer.\n"
+        "    - No section assigned to more than one agent.\n"
+        "    - Tell each agent its exact section headings (verbatim from the document)\n"
+        "      so its PATCHES anchors are unambiguous.\n"
+        "  Emit TASK_LIST, ASSIGNED, and DONE blocks (JSON).\n\n"
+        f"Step 6 — Emit DELIVERABLE_PATH: {artifact_path}\n"
+        "  Workers write PATCHES blocks targeting only their assigned sections —\n"
+        "  no direct file writes.\n"
+    )
+
+
+def _build_worker_cot_prompt(
+    task_list_for_agent: str,
+    artifact_current_text: str,
+) -> str:
+    """Worker (stateless suggester) CoT prompt (DESIGN §5.3).
+
+    Workers emit PATCHES suggestions only — they never write to disk. The anchor
+    rule is the crux: copy the assigned section heading VERBATIM from the current
+    deliverable so the Reducer can locate it unambiguously.
+    """
+    return (
+        "You are a worker agent. You will suggest changes to a shared document.\n"
+        "Do NOT write to any file — emit patch suggestions only. Think step by step.\n\n"
+        f"TASK ASSIGNMENTS:\n{task_list_for_agent}\n\n"
+        f"CURRENT DELIVERABLE CONTENT:\n{artifact_current_text}\n\n"
+        "Step 1 — For each assigned task, state what you need to find or verify.\n\n"
+        "Step 2 — Execute: use web_search and web_fetch to gather evidence.\n"
+        "  For each source: note the URL, title, and key facts extracted.\n\n"
+        "Step 3 — Assess completeness. One more search if any task is thin.\n\n"
+        "Step 4 — Draft your patch suggestions.\n"
+        "  Rules:\n"
+        "    - Use the exact section heading string as your anchor (e.g. \"## Results\").\n"
+        "      Copy the heading verbatim from CURRENT DELIVERABLE CONTENT — do not paraphrase.\n"
+        "    - Each patch targets ONLY sections you were assigned.\n"
+        "    - Do NOT write patches for sections assigned to other agents.\n"
+        "    - Prefer insert_after/append over replace — additive patches on distinct\n"
+        "      anchors commute; replace patches on the same anchor conflict.\n"
+        "    - Use the PATCHES JSON format exactly (see the patch schema).\n\n"
+        "Step 5 — Emit DONE markers: DONE: [\"task-id-1\", \"task-id-2\"]\n\n"
+        "Step 6 — Emit your PATCHES block. The Reducer will collect all workers'\n"
+        "  patches, resolve conflicts, perform a full editorial refinement pass,\n"
+        "  then atomic-write to disk.\n"
+    )
+
+
+def _build_reducer_refine_prompt(goal: str, artifact_path: str) -> str:
+    """Reducer Phase-2 editorial refinement prompt (DESIGN §2.2 Step 5).
+
+    Phase 1 (structural merge) is done mechanically by ``reduce_patches``; this
+    prompt drives the Phase-2 full-document polish. The merged text is appended
+    by the caller after this header (the ``{merged_text}`` slot)."""
+    return (
+        "You are the Reducer for this phase. All worker patches have been merged\n"
+        "into the document below. Your job is the SECOND phase: a full editorial\n"
+        "pass — not a mechanical merge. Think through each step in order.\n\n"
+        f"GOAL: {goal}\n"
+        f"DELIVERABLE PATH: {artifact_path}\n\n"
+        "Step 1 — Read the full merged document below as a document editor,\n"
+        "  forming an overall sense of its structure and intent.\n\n"
+        "Step 2 — Assess coherence: does the document flow logically section to\n"
+        "  section? Note every place the flow breaks.\n\n"
+        "Step 3 — Find and fix gaps: missing transitions, incomplete sentences,\n"
+        "  orphaned headings with no body.\n\n"
+        "Step 4 — Resolve every `<!-- conflict -->` marker by integrating or\n"
+        "  removing the marked content cleanly; no conflict markers may remain.\n\n"
+        "Step 5 — Remove redundancy: deduplicate content multiple workers inserted\n"
+        "  identically.\n\n"
+        "Step 6 — Enforce consistency: uniform terminology, citation style, and\n"
+        "  heading hierarchy throughout.\n\n"
+        "Step 7 — Improve quality: tighten prose, correct factual inconsistencies,\n"
+        "  improve clarity.\n\n"
+        "Step 8 — Emit the best possible COMPLETE document. Output the full refined\n"
+        "  document only — every section, no truncation, no commentary. Your output\n"
+        "  length must be >= the merged input length.\n\n"
+        "--- BEGIN MERGED DOCUMENT ---\n"
+    )
+
+
+def _parse_assigned(text: str) -> dict[str, list[str]]:
+    """Extract the hub's ASSIGNED block: agent → [section/branch ids] (DESIGN §3.3).
+
+    Returns {} when no parseable block is present (the validation then no-ops).
+    """
+    m = _re.search(r'ASSIGNED:\s*```json\s*(\{.*?\})\s*```', text, _re.DOTALL)
+    if not m:
+        m = _re.search(r'ASSIGNED:\s*(\{.*?\})', text, _re.DOTALL)
+    if not m:
+        return {}
+    try:
+        data = _json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(agent): [str(s) for s in sections]
+        for agent, sections in data.items()
+        if isinstance(sections, list)
+    }
+
+
+def _dedupe_assignment(
+    assigned: dict[str, list[str]],
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Deterministically resolve overlapping section assignments (R2 enforcement).
+
+    The hub CoT prompt mandates non-overlapping, one-section-per-agent assignment,
+    but that is LLM-enforced. This validates the emitted ASSIGNED block in code:
+    the FIRST agent (in assignment order) to claim a section keeps it; any later
+    agent claiming the same section loses the duplicate. Returns
+    ``(clean_assignment, overlapping_ids)`` — overlapping_ids is empty on a clean
+    partition. Within-agent repeats are also collapsed.
+    """
+    seen: set[str] = set()
+    clean: dict[str, list[str]] = {}
+    overlaps: list[str] = []
+    for agent, sections in assigned.items():
+        kept: list[str] = []
+        for s in sections:
+            if s in seen:
+                if s not in overlaps:
+                    overlaps.append(s)
+                continue  # claimed by an earlier agent (or earlier in this list)
+            seen.add(s)
+            kept.append(s)
+        clean[agent] = kept
+    return clean, overlaps
+
+
+def _parse_patches_from_output(text: str) -> list:
+    """Extract DocPatch list from a worker's PATCHES JSON block (DESIGN §2.2).
+
+    Returns empty list when no block is present — the caller falls through to
+    the RESEARCH_FINDING reducer path unchanged.
+    """
+    from agentkit.artifacts.patcher import DocPatch
+
+    m = _re.search(r'PATCHES:\s*```json\s*(\[.*?\])\s*```', text, _re.DOTALL)
+    if not m:
+        m = _re.search(r'"patches"\s*:\s*(\[.*?\])', text, _re.DOTALL)
+    if not m:
+        return []
+    try:
+        items = _json.loads(m.group(1))
+        return [
+            DocPatch(
+                op=item.get("op", "append"),
+                anchor=item.get("anchor"),
+                content=item.get("content", ""),
+                source=item.get("source", ""),
+            )
+            for item in items
+            if isinstance(item, dict)
+        ]
+    except (ValueError, TypeError):
+        return []
+
+
+# ---------------------------------------------------------------------------
 
 #: Emit sink: the runner calls this for every event; app.py wires it to a queue.
 Emit = Callable[[StudioEvent], None]
@@ -305,7 +626,9 @@ class Runner:
             import shutil
             from studio.task_runs import TaskRunStore, task_hash as _task_hash
             _thash = _task_hash(requirement)
-            _store = TaskRunStore()
+            # Pass the embedder so each run's requirement is embedded for R10
+            # cross-task similarity retrieval (no-op when embedder is None).
+            _store = TaskRunStore(embedder=self._embedder)
             # Use latest run with actual artifact content — LLM self-eval scores
             # are noisy; the most recent non-empty artifact has accumulated the
             # most incremental work and is the best hill-climb seed.
@@ -319,16 +642,14 @@ class Runner:
                     _curr_ws = Workspace(session.session_id, root=_eff_ws2)
                     shutil.copy(_prior_art, _curr_ws.root / "artifact.md")
                     _artifact_copied = True
-                # Accumulate weaknesses from ALL prior runs (not just the best) so
-                # every failure lesson carries forward. Deduplicate by exact string.
-                _all_prior = _store.all_runs(_thash)
-                _seen: set[str] = set()
-                _all_weaknesses: list[str] = []
-                for _run in _all_prior:
-                    for _w in _run.weaknesses:
-                        if _w not in _seen:
-                            _seen.add(_w)
-                            _all_weaknesses.append(_w)
+                # Accumulate weaknesses from this task's prior runs AND from
+                # semantically SIMILAR prior tasks (R10) — every failure lesson,
+                # including cross-task ones, carries forward. Deduplicated by
+                # exact string; exact-task lessons rank first. Degrades to
+                # exact-task-only when no embedder is available.
+                _all_weaknesses = _store.accumulated_weaknesses(
+                    requirement, _thash, embedder=self._embedder,
+                )
                 _fix_items = "\n".join(
                     f"  {i+1}. {w}" for i, w in enumerate(_all_weaknesses)
                 )
@@ -381,12 +702,19 @@ class Runner:
         )
         client = self._maybe_tool_augment(base_client, artifact_path=_art_for_tools)
 
-        # plan → emit plan. A seeded session pre-seeds decomposition from a
-        # chosen loop-library loop (emit loop_seed); else cold decomposition.
+        # plan → emit plan. Three paths:
+        #   1. Seeded session  → pre-seed decomposition from a loop-library loop.
+        #   2. LLM mode        → EPIC-BASED planning (DESIGN §2.3): the planner
+        #                        LLM emits an EPIC_PLAN; each epic is one phase.
+        #   3. Offline/auto    → deterministic plan() (no LLM available; tests).
         seed_steps = session.seed_steps
+        use_llm = session.mode == "llm"
         if seed_steps:
             plan_obj = plan(requirement, decomposer=make_seeded_decomposer(seed_steps))
             self._emit(LoopSeedEvent(loop_id=session.seed_loop_id, steps=seed_steps))
+        elif use_llm:
+            # Planner runs on base_client (no tool loop — planning needs no web).
+            plan_obj = _plan_from_epics(requirement, base_client)
         else:
             plan_obj = plan(requirement)
         # Capture the plan-as-dicts once: the PlanEvent payload AND the input the
@@ -403,8 +731,8 @@ class Runner:
         ]
         self._emit(PlanEvent(task=plan_obj.task, steps=plan_step_dicts))
 
-        # assign topologies (auto; llm path only when mode=='llm' AND client given)
-        use_llm = session.mode == "llm"
+        # assign topologies (auto; llm path only when mode=='llm' AND client given).
+        # use_llm already computed above for the epic-planning branch.
         plan_obj = assign_topologies(
             plan_obj, mode="auto", client=client, llm=use_llm
         )
@@ -428,6 +756,21 @@ class Runner:
             if session.budget_ceiling is not None
             else None
         )
+
+        # M8: cross-phase TaskLedger and dynamic sizing (DESIGN §3, §5)
+        from agentkit.orchestrator.ledger import TaskRecord, TaskLedger
+        _ledger = TaskLedger()
+        # Seed the ledger with every planned phase UP FRONT (DESIGN §2.3 / §3.2).
+        # Without this, all_tasks stayed empty and remaining() was structurally
+        # always empty — the REMAINING block printed "(none)" and worker sizing
+        # saw max(1,0)=1 every phase. Seeding makes remaining() reflect real
+        # pending work; mark_done() (end of loop) moves each finished phase to
+        # completed, so later hubs see an accurate COMPLETED-vs-REMAINING split
+        # and never re-assign prior-phase work.
+        for _s in plan_obj.steps:
+            _ledger.add_task(TaskRecord(id=_s.id, description=_s.description[:120]))
+        _lc = getattr(session, "loop_config", None)
+        _sizing_cfg = _lc.sizing() if _lc is not None else None
 
         outputs: dict[str, str] = {}
         cancelled = False
@@ -517,8 +860,58 @@ class Runner:
             )
             sub_plan = Plan(task=plan_obj.task, steps=(sub_step,))
 
+            # M9: inject hub CoT prompt when loop_config active and phase fans out.
+            # The step description becomes the hub's system prompt inside run_plan.
+            if _lc is not None and topo in (STAR, MAP):
+                _hub_art_text = ""
+                if _eff_ws2 is not None:
+                    _hub_art_file = _eff_ws2 / session.session_id / "artifact.md"
+                    if _hub_art_file.exists():
+                        _hub_art_text = _hub_art_file.read_text()[:3000]
+                _hub_wk_lines = "\n".join(
+                    f"- {w}" for w in getattr(session, "weaknesses", []) or []
+                )
+                _hub_desc = _build_hub_cot_prompt(
+                    goal=plan_obj.task or requirement,
+                    artifact_path=str(_eff_ws2 / session.session_id / "artifact.md")
+                    if _eff_ws2 else "artifact.md",
+                    ledger_block=_ledger.to_context_block(),
+                    weaknesses_block=_hub_wk_lines,
+                    artifact_text=_hub_art_text,
+                    max_tasks_per_agent=_lc.max_tasks_per_agent,
+                )
+                # Prepend hub CoT; append worker §5.3 patch-emission rules so the
+                # fanned-out execution agents know to anchor PATCHES on verbatim
+                # section headings (DESIGN §5.3). Hub plans the assignment, workers
+                # emit section-scoped suggestions the Reducer later merges + refines.
+                _worker_rules = _build_worker_cot_prompt(
+                    task_list_for_agent="(your assigned sections — see ASSIGNED above)",
+                    artifact_current_text=_hub_art_text or "(deliverable will be created this phase)",
+                )
+                sub_step = replace(
+                    sub_step,
+                    description=(
+                        _hub_desc + "\n\n" + sub_step.description
+                        + "\n\nWORKER PATCH RULES (apply when executing an assigned section):\n"
+                        + _worker_rules
+                    ),
+                )
+                sub_plan = replace(sub_plan, steps=(sub_step,))
+
+            # M8: dynamic worker count from LoopConfig sizing (DESIGN §3).
+            _max_workers = 4
+            if _sizing_cfg is not None:
+                from agentkit.topology.sizing import compute_n_agents
+                _n_remaining = max(1, len(_ledger.remaining()))
+                _max_workers = compute_n_agents(_n_remaining, _sizing_cfg)
+
+            # Collision guard (DESIGN §3.1): mark this phase in-flight before it
+            # runs so remaining() excludes it; mark_done() clears it after. Keeps
+            # the same task from appearing as "remaining" while it is executing.
+            _ledger.mark_in_flight(step.id)
+
             try:
-                result = run_plan(sub_plan, client, budget=budget, max_workers=4)
+                result = run_plan(sub_plan, client, budget=budget, max_workers=_max_workers)
             except BudgetExceeded as exc:
                 self._emit(
                     BudgetEvent(spent=exc.spent, ceiling=session.budget_ceiling, exceeded=True)
@@ -529,6 +922,33 @@ class Runner:
             sr = result.runs[0]
             outputs[step.id] = sr.output
             final_output = sr.output
+
+            # R2 enforcement: validate the hub's ASSIGNED block in CODE (not just
+            # prompt). Parse agent→sections, detect any section claimed by >1
+            # agent, and deterministically reassign (first-claim-wins). Surface
+            # the result as a gate check so violations are visible, not silent.
+            _assigned = _parse_assigned(sr.output)
+            if _assigned:
+                _clean, _overlaps = _dedupe_assignment(_assigned)
+                if _overlaps:
+                    _gate = GateEvent(
+                        name="worker-assignment",
+                        outcome="warn",
+                        detail=(
+                            f"{len(_overlaps)} section(s) assigned to >1 agent: "
+                            f"{', '.join(_overlaps[:8])}"
+                            f"{'…' if len(_overlaps) > 8 else ''}. "
+                            f"Deterministically reassigned first-claim-wins."
+                        ),
+                    )
+                else:
+                    _gate = GateEvent(
+                        name="worker-assignment",
+                        outcome="pass",
+                        detail="Section partition non-overlapping (1 section ≤ 1 agent).",
+                    )
+                gate_events.append(_gate)
+                self._emit(_gate)
 
             # When the reducer received the seeded artifact as context and produced
             # an improved version, write it back to artifact.md so the scorer and
@@ -557,6 +977,10 @@ class Runner:
                     output=sr.output,
                 )
             )
+
+            # M8: record this phase as completed (all_tasks was seeded up front,
+            # so mark_done moves it from remaining/in-flight to completed).
+            _ledger.mark_done(step.id)
 
             # post-phase panels
             mem.record(step.id, sr.output)
@@ -587,6 +1011,47 @@ class Runner:
                         break
                 except Exception:  # noqa: BLE001
                     pass  # agentkit.loop not installed → skip silently
+
+        # M8: if any worker output contained PATCHES blocks, apply them atomically
+        # via reduce_patches() + write_artifact() (DESIGN §2.2).  Workers that
+        # emit RESEARCH_FINDING text instead produce no patches — the existing
+        # reducer prompt path runs unchanged for those phases.
+        if _eff_ws2 is not None and outputs:
+            _patch_groups: list[list] = []
+            for _out in outputs.values():
+                _patches = _parse_patches_from_output(_out)
+                if _patches:
+                    _patch_groups.append(_patches)
+            if _patch_groups:
+                from agentkit.artifacts.patcher import reduce_patches, write_artifact
+                _art_file = _eff_ws2 / session.session_id / "artifact.md"
+                _cur_text = _art_file.read_text() if _art_file.exists() else ""
+                # Phase 2 (DESIGN §2.2 Step 5): a full-document editorial refine pass
+                # over the structurally-merged text. Only with a real LLM (mode=='llm');
+                # offline/canned backends would corrupt the artifact, so refine is None.
+                # The closure guards output length so a short/confused response cannot
+                # clobber a clean merge (mirrors the >5000-char guard above).
+                _refine_fn = None
+                if use_llm:
+                    _refine_goal = plan_obj.task or requirement
+                    _refine_path = str(_art_file)
+
+                    def _refine_fn(merged_text: str) -> str:
+                        prompt = (
+                            _build_reducer_refine_prompt(_refine_goal, _refine_path)
+                            + merged_text
+                            + "\n--- END MERGED DOCUMENT ---\n"
+                        )
+                        res = base_client.chat([{"role": "user", "content": prompt}])
+                        out = (getattr(res, "text", "") or "").strip()
+                        # Reject truncated/empty refinements: keep the clean merge.
+                        if len(out) >= int(len(merged_text) * 0.8):
+                            return out
+                        return merged_text
+
+                _rr = reduce_patches(_cur_text, _patch_groups, llm_refine_fn=_refine_fn)
+                if _rr.text:
+                    write_artifact(_art_file, _rr.text)
 
         # budget gauge
         if budget is not None:
@@ -664,7 +1129,9 @@ class Runner:
                 score_result,
                 task_hash as _task_hash,
             )
-            _store = TaskRunStore()
+            # Embedder wired so this run's requirement is embedded on record()
+            # → future runs can find it via similar_runs() (R10).
+            _store = TaskRunStore(embedder=self._embedder)
             _thash = _task_hash(_original_requirement)
             from studio.workspace import workspace_root as _ws_root_fn
             _effective_ws_root = self._workspace_root or _ws_root_fn()

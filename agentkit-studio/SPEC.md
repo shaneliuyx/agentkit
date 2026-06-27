@@ -221,7 +221,7 @@ emits a final `done` with partial results.
 ### 5.4 Endpoints
 - `GET  /backends` → `{profiles:[{name,label,kind,model,endpoint}], embedders:[...]}` (from `PROFILES`).
 - `POST /session` → body `{llm:{profile|raw{base_url,model,api_key}}, embed:{...}, mode:'auto'|'llm', budget:{ceiling|null}}`; builds `StudioChatClient` + embedder, runtime-checks `isinstance(c, LLMClient)`, returns `{session_id}`.
-- `GET  /run/{session_id}?requirement=...` → `text/event-stream` (sse-starlette).
+- `GET  /run/{session_id}?requirement=...[&history=<json>]` → `text/event-stream` (sse-starlette). Optional `history` is a JSON-encoded `[{role,content}]` chat thread; the backend flattens it via `flatten_chat_to_requirement` and prepends it so the planner sees every prior turn (DESIGN §6.2). Malformed/absent → bare `requirement`.
 - `POST /cancel/{session_id}` → `{cancelled:true}`.
 - `GET  /artifacts/{session_id}` → memory dump, GraphStore DAG, gate log (panel backfill).
 - `POST /session/{session_id}/chat` → body `{message:str, history:[{role,content}]}` — one-shot follow-up grounded in `session.last_run.result`; returns `{reply:str}`. Requires a finished run (409 otherwise). Uses the session's own LLM backend at `temperature=0.3`. History is client-side — full prior turns sent each request.

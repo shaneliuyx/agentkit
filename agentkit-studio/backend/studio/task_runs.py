@@ -38,6 +38,32 @@ def task_hash(requirement: str) -> str:
     return hashlib.sha256(requirement.strip().lower().encode()).hexdigest()[:12]
 
 
+# --- similarity retrieval helpers (R10: cross-task context history) -----------
+# task_hash is an EXACT key — only the identical requirement's history is found.
+# To also retrieve context from SIMILAR prior tasks we embed each run's
+# requirement and rank by cosine, mirroring agentkit.memory.store's pattern.
+
+def _vec_to_blob(vec: list[float]) -> bytes:
+    import numpy as np
+    return np.asarray(vec, dtype=np.float32).tobytes()
+
+
+def _blob_to_vec(blob: bytes):
+    import numpy as np
+    return np.frombuffer(blob, dtype=np.float32)
+
+
+def _cosine(a, b) -> float:
+    import numpy as np
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0 or a.shape != b.shape:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
 @dataclass
 class TaskRun:
     task_hash: str
@@ -53,8 +79,13 @@ class TaskRun:
 class TaskRunStore:
     """SQLite store for cross-session task run history."""
 
-    def __init__(self, db_path: Path | None = None) -> None:
+    def __init__(self, db_path: Path | None = None, embedder: Any = None) -> None:
         self._path = db_path or _db_path()
+        # ``embedder`` (optional, agentkit.types.Embedder): when supplied, each
+        # recorded run's requirement is embedded so similar_runs() can do
+        # cosine-ranked cross-task retrieval (R10). Without it the store works
+        # exactly as before (exact task_hash retrieval only).
+        self._embedder = embedder
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS task_runs (
@@ -70,10 +101,13 @@ class TaskRunStore:
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
-        # Migrate existing DBs that lack result_text column
+        # Migrate existing DBs that lack newer columns.
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(task_runs)").fetchall()}
         if "result_text" not in cols:
             self._conn.execute("ALTER TABLE task_runs ADD COLUMN result_text TEXT NOT NULL DEFAULT ''")
+        if "requirement_embedding" not in cols:
+            # NULL for existing rows; backfilled lazily by similar_runs().
+            self._conn.execute("ALTER TABLE task_runs ADD COLUMN requirement_embedding BLOB")
         self._conn.commit()
 
     def next_version(self, task_hash_str: str) -> int:
@@ -83,11 +117,18 @@ class TaskRunStore:
         return (row[0] or 0) + 1
 
     def record(self, run: TaskRun) -> None:
+        emb_blob = None
+        if self._embedder is not None and run.requirement.strip():
+            try:
+                vec = self._embedder.embed([run.requirement])[0]
+                emb_blob = _vec_to_blob(vec)
+            except Exception:  # noqa: BLE001 — embedding is best-effort enrichment
+                emb_blob = None
         self._conn.execute(
             """INSERT INTO task_runs
                (task_hash, session_id, version, score, weaknesses_json,
-                artifact_path, requirement, result_text)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                artifact_path, requirement, result_text, requirement_embedding)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run.task_hash,
                 run.session_id,
@@ -97,6 +138,7 @@ class TaskRunStore:
                 run.artifact_path,
                 run.requirement,
                 run.result_text,
+                emb_blob,
             ),
         )
         self._conn.commit()
@@ -150,6 +192,138 @@ class TaskRunStore:
             (task_hash_str,),
         ).fetchall()
         return [self._row_to_run(r) for r in rows]
+
+    def _backfill_embeddings(self, embedder: Any) -> None:
+        """Embed any rows whose requirement_embedding is NULL (lazy migration).
+
+        Existing rows predate the embedding column; embed them once on first
+        similarity query so cross-task retrieval works over historical data too.
+        """
+        rows = self._conn.execute(
+            "SELECT id, requirement FROM task_runs "
+            "WHERE requirement_embedding IS NULL AND requirement != ''"
+        ).fetchall()
+        if not rows:
+            return
+        try:
+            vecs = embedder.embed([r[1] for r in rows])
+        except Exception:  # noqa: BLE001 — backfill is best-effort
+            return
+        for (row_id, _req), vec in zip(rows, vecs):
+            self._conn.execute(
+                "UPDATE task_runs SET requirement_embedding = ? WHERE id = ?",
+                (_vec_to_blob(vec), row_id),
+            )
+        self._conn.commit()
+
+    def similar_runs(
+        self,
+        requirement: str,
+        embedder: Any,
+        k: int = 5,
+        min_similarity: float = 0.35,
+        exclude_hash: str | None = None,
+    ) -> list[tuple[TaskRun, float]]:
+        """Retrieve context history from SIMILAR prior tasks (R10).
+
+        Unlike exact-key methods (latest/best/all_runs filter on task_hash), this
+        embeds ``requirement`` and cosine-ranks every prior task's requirement,
+        returning up to ``k`` representative runs (the best-scoring run per
+        distinct task_hash) above ``min_similarity``. ``exclude_hash`` drops the
+        current task's own exact history (already covered by all_runs).
+
+        Returns ``[(TaskRun, similarity), ...]`` sorted by similarity desc.
+        Empty list when no embedder/embeddings or nothing clears the threshold.
+        """
+        if embedder is None or not requirement.strip():
+            return []
+        try:
+            qvec = embedder.embed([requirement])[0]
+        except Exception:  # noqa: BLE001
+            return []
+        self._backfill_embeddings(embedder)
+
+        # One representative row per distinct task_hash: the best-scoring one
+        # (its weaknesses are the most informative). Exclude the current task.
+        rows = self._conn.execute(
+            """SELECT task_hash, session_id, version, score, weaknesses_json,
+                      artifact_path, requirement, result_text, requirement_embedding
+               FROM task_runs
+               WHERE requirement_embedding IS NOT NULL AND task_hash != ?
+               ORDER BY score DESC""",
+            (exclude_hash or "",),
+        ).fetchall()
+
+        best_by_hash: dict[str, tuple[TaskRun, float]] = {}
+        for row in rows:
+            thash = row[0]
+            if thash in best_by_hash:  # already kept the top-scoring row (ORDER BY score DESC)
+                continue
+            sim = _cosine(qvec, _blob_to_vec(row[8]))
+            if sim >= min_similarity:
+                best_by_hash[thash] = (self._row_to_run(row[:8]), sim)
+
+        ranked = sorted(best_by_hash.values(), key=lambda t: t[1], reverse=True)
+        return ranked[:k]
+
+    def _consolidate_weaknesses(
+        self, weaknesses: list[str], embedder: Any, sim_threshold: float = 0.85,
+    ) -> list[str]:
+        """Semantic near-duplicate consolidation (beyond exact-string dedup).
+
+        Two weaknesses mined from different runs/tasks often say the same thing
+        in different words ("no citations" vs "sources lack URLs"). Exact-string
+        dedup keeps both; this drops a weakness when it is >= ``sim_threshold``
+        cosine-similar to one already kept, preserving the earlier (higher-
+        priority — exact-task-first) phrasing. No-op without an embedder.
+        """
+        if embedder is None or len(weaknesses) <= 1:
+            return weaknesses
+        try:
+            vecs = embedder.embed(weaknesses)
+        except Exception:  # noqa: BLE001 — consolidation is best-effort
+            return weaknesses
+        kept: list[str] = []
+        kept_vecs: list[Any] = []
+        for w, v in zip(weaknesses, vecs):
+            if any(_cosine(v, kv) >= sim_threshold for kv in kept_vecs):
+                continue  # near-duplicate of an already-kept lesson
+            kept.append(w)
+            kept_vecs.append(v)
+        return kept
+
+    def accumulated_weaknesses(
+        self,
+        requirement: str,
+        exact_hash: str,
+        embedder: Any = None,
+        k_similar: int = 5,
+        min_similarity: float = 0.35,
+        consolidate_threshold: float = 0.85,
+    ) -> list[str]:
+        """Merge, dedup, and CONSOLIDATE weaknesses for the agent (R10).
+
+        Pipeline: exact-task lessons first (most relevant), then lessons from
+        semantically similar prior tasks → exact-string dedup → semantic
+        consolidation (near-duplicate phrasings collapsed). With no embedder this
+        degrades to exact-string-deduped exact-task weaknesses (prior behaviour).
+        """
+        seen: set[str] = set()
+        merged: list[str] = []
+        for run in self.all_runs(exact_hash):
+            for w in run.weaknesses:
+                if w not in seen:
+                    seen.add(w)
+                    merged.append(w)
+        for run, _sim in self.similar_runs(
+            requirement, embedder, k=k_similar,
+            min_similarity=min_similarity, exclude_hash=exact_hash,
+        ):
+            for w in run.weaknesses:
+                if w not in seen:
+                    seen.add(w)
+                    merged.append(w)
+        return self._consolidate_weaknesses(merged, embedder, consolidate_threshold)
 
 
 def score_result(

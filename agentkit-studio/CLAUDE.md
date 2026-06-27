@@ -68,10 +68,18 @@ Tavily/DDG must be installed+configured or the agent will fabricate.
 ## Hill-climb / cross-session improvement
 
 - Run history is SQLite at `backend/tmp/task_runs.db`
-  (`task_runs(task_hash, session_id, version, score, weaknesses_json, ...)`).
+  (`task_runs(task_hash, session_id, version, score, weaknesses_json,
+  requirement, result_text, requirement_embedding, ...)`).
 - `task_hash = sha256(requirement.strip().lower())[:12]` — same requirement
-  across sessions shares a hash, so `auto_improve` picks the prior **best**
-  (`TaskRunStore.best()`, not `latest()`) and carries its `artifact.md` forward.
+  across sessions shares a hash, so `auto_improve` carries the prior artifact
+  forward via `TaskRunStore.latest_with_content()` (the **latest** run with a
+  non-empty `artifact.md`, NOT best-score — LLM self-eval scores are noisy and
+  the latest run has the most accumulated work; see DESIGN §2.1 / §10).
+- Cross-task context (R10): `TaskRunStore.similar_runs()` /
+  `accumulated_weaknesses()` retrieve + dedup + consolidate lessons from
+  *semantically similar* prior tasks (cosine over `requirement_embedding`), not
+  only the exact `task_hash`. Wired with `TaskRunStore(embedder=self._embedder)`;
+  no-op without an embedder. See DESIGN §2.4.
 - Scorer (`studio/task_runs.py::score_result`) shows the LLM the **full** output
   up to 20K chars (was 3K — a small window hid tail citations and gave falsely
   high scores). `mine_weaknesses_from_outputs` uses a 6K window.

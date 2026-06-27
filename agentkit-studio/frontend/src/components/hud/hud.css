@@ -138,12 +138,34 @@
 }
 
 /* ── chat panel ── */
-.chat-panel {
+/* HUD chat lives INSIDE the right side column (merged with the output stream).
+   Scoped under .studio-side to override result.css's `.chat-panel` fixed-sidebar
+   rule (same class name) — without this it floats over the token meter. */
+.studio-side .chat-panel {
+  position: static;
+  width: auto;
+  z-index: auto;
+  inset: auto;
+  box-shadow: none;
+  border-left: none;
+  border-bottom: none;
+  max-height: none;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--color-surface-1);
-  border-bottom: 1px solid var(--color-border);
-  max-height: 320px;
+}
+
+/* Live streamed output rendered inside the running assistant bubble. */
+.chat-stream {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--text-sm);
+  max-height: 16rem;
+  overflow-y: auto;
+  opacity: 0.92;
 }
 
 .chat-thread {

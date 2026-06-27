@@ -120,19 +120,35 @@ export interface RunStreamCallbacks {
   onOpen?: () => void;
 }
 
+/** One prior chat turn forwarded as multi-turn context (DESIGN §6.2). */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 /**
  * Open the run stream. The backend emits one JSON frame per `message` event.
  * Returns a handle whose `close()` detaches the source (does NOT cancel the
  * server run — use `cancelRun` for cooperative cancel).
+ *
+ * `history` (optional): prior chat turns. When present they are forwarded to the
+ * backend which flattens + prepends them so the planner sees the full thread.
  */
 export function openRunStream(
   sessionId: string,
   requirement: string,
   callbacks: RunStreamCallbacks,
+  history?: ChatTurn[],
 ): RunStreamHandle {
-  const url = `${API_BASE}/run/${sessionId}?requirement=${encodeURIComponent(
+  let url = `${API_BASE}/run/${sessionId}?requirement=${encodeURIComponent(
     requirement,
   )}`;
+  // Multi-turn context (DESIGN §6.2): forward prior turns so the backend's
+  // flatten_chat_to_requirement prepends them and the planner sees every
+  // refinement, not just the last message. Omitted → single-message contract.
+  if (history && history.length > 0) {
+    url += `&history=${encodeURIComponent(JSON.stringify(history))}`;
+  }
   const source = new EventSource(url);
 
   source.onopen = () => callbacks.onOpen?.();

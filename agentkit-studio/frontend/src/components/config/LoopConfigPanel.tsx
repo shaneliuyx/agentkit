@@ -596,9 +596,16 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                 </div>
               </div>
               {hcStatus && <p className="loop-config-hint">{hcStatus}</p>}
+              {!sessionId && (
+                <p className="loop-config-hint">
+                  Connect a session first — hill-climb config is sent to the live
+                  session (applying before connect would silently not persist).
+                </p>
+              )}
               <div className="lc-actions">
                 <button
                   className="btn btn-primary"
+                  disabled={!sessionId}
                   onClick={async () => {
                     const cfg = {
                       score_metric: hcMetric.trim() || "score",

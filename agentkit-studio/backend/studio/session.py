@@ -21,6 +21,22 @@ from studio.models import LoopConfig
 from studio.shared_bridge import InterruptStateSnapshot, get_interrupt_disposition
 
 
+def flatten_chat_to_requirement(messages: list[dict]) -> str:
+    """Concatenate a multi-turn chat history into one requirement string (DESIGN §6.2).
+
+    The ChatPanel (DESIGN §6) replaces the single task textarea with a turn-based
+    thread; the planner still wants one requirement string. Flattening preserves
+    every refinement (user + assistant turns) so the planner sees the full context,
+    not just the last user message. Non user/assistant roles (system, tool) are
+    dropped — they are runtime scaffolding, not requirement content.
+    """
+    return "\n\n".join(
+        f"[{m['role'].upper()}]: {m['content']}"
+        for m in messages
+        if m.get("role") in ("user", "assistant")
+    )
+
+
 @dataclass(frozen=True)
 class RunSnapshot:
     """An immutable snapshot of a finished run — the input to loop export (M9).

@@ -85,6 +85,55 @@ def test_empty_patch_groups():
     assert result.conflicts == []
 
 
+def test_refine_fn_output_replaces_merged_text():
+    """Phase 2: when llm_refine_fn returns polished text, it becomes the result."""
+    called = {}
+
+    def refine(text: str) -> str:
+        called["input"] = text
+        return "POLISHED: " + text
+
+    result = reduce_patches(
+        "foo bar",
+        [[DocPatch(op="replace", anchor="foo", content="baz")]],
+        llm_refine_fn=refine,
+    )
+    assert called["input"] == "baz bar"  # refine sees the Phase-1 merged text
+    assert result.text == "POLISHED: baz bar"
+
+
+def test_refine_fn_exception_falls_back_to_merged():
+    """A flaky refine LLM must never corrupt a clean structural merge."""
+    def refine(text: str) -> str:
+        raise RuntimeError("LLM down")
+
+    result = reduce_patches(
+        "foo bar",
+        [[DocPatch(op="replace", anchor="foo", content="baz")]],
+        llm_refine_fn=refine,
+    )
+    assert result.text == "baz bar"  # merged text preserved
+
+
+def test_refine_fn_empty_output_falls_back_to_merged():
+    """An empty/whitespace refine result is ignored — keep the merge."""
+    result = reduce_patches(
+        "foo bar",
+        [[DocPatch(op="replace", anchor="foo", content="baz")]],
+        llm_refine_fn=lambda _t: "   ",
+    )
+    assert result.text == "baz bar"
+
+
+def test_refine_fn_none_is_noop():
+    """Default (no refine_fn) leaves Phase-1 behaviour identical."""
+    result = reduce_patches(
+        "foo bar",
+        [[DocPatch(op="replace", anchor="foo", content="baz")]],
+    )
+    assert result.text == "baz bar"
+
+
 def test_write_artifact_atomic(tmp_path: Path):
     dest = tmp_path / "artifact.md"
     write_artifact(dest, "hello world")
