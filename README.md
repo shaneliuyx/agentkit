@@ -31,6 +31,8 @@ config-driven **self-improving layer** — seventeen small modules, one philosop
 | `agentkit.skills` | Skill library (propose→gate→save, semantic retrieve) + `optimize_skill` — the SkillOpt loop; deploys a best artifact + a baseline→optimized delta. |
 | `agentkit.planner` | Task → subtask DAG → emitted runtime graph **config** (self-plan as a file, not code). |
 | `agentkit.codegen` | Agent-authored tools: query→schema→code→sandbox-validate→debugger-repair→gate→register. |
+| `agentkit.artifacts` | Deliverable lifecycle — `reduce_patches` (worker-emit → atomic reducer), `write_artifact`, and **OCC concurrent writes** (`read_artifact` / `patch_artifact` with per-path `threading.Lock` + MD5 hash check). |
+| `agentkit.tools` | Reusable OpenAI tool schemas — `FS_TOOL_SCHEMAS` (read/write file, workspace-jailed) and `ARTIFACT_TOOL_SCHEMAS` (`read_artifact` + `patch_artifact` OCC tools backed by `agentkit.artifacts.occ`). |
 | `agentkit.selfimproving` | `SelfImprovingAgent` — the facade wiring it all: `.run` / `.improve` (gated self-edit; writes the better role back to its config file) / `.skills` / `.forge_tool`. |
 
 ## The deterministic-first thesis

@@ -373,6 +373,7 @@ class HillClimbEvent(StudioEvent):
     status: str = "reject"
     note: str = ""
     weaknesses: list = field(default_factory=list)
+    task_hash: str = ""
 
 
 @dataclass(frozen=True)

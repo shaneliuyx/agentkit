@@ -29,8 +29,13 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable
 
+from agentkit.artifacts.occ import patch_artifact as _occ_patch
+from agentkit.artifacts.occ import read_artifact as _occ_read
+from agentkit.tools.artifact import ARTIFACT_TOOL_SCHEMAS
+from agentkit.tools.fetch_cache import InFlightRegistry
 from agentkit.types import ChatResult, Message
 
 from studio.workspace import Workspace, WorkspaceError
@@ -167,6 +172,11 @@ WRITE_FILE_TOOL: dict[str, Any] = {
     },
 }
 
+#: Artifact OCC tool schemas sourced from agentkit.tools.artifact.
+#: Re-exported here for callers that import from studio.tools directly.
+READ_ARTIFACT_TOOL = ARTIFACT_TOOL_SCHEMAS[0]
+PATCH_ARTIFACT_TOOL = ARTIFACT_TOOL_SCHEMAS[1]
+
 #: Callbacks: (step_id, tool, args) and (step_id, tool, summary, n_results, notice).
 OnToolCall = Callable[[str, str, dict[str, Any]], None]
 OnToolResult = Callable[[str, str, str, int, str, bool], None]
@@ -234,6 +244,7 @@ class ToolAugmentedClient:
         search_fn: Callable[..., list[Any]] | None = None,
         fetch_fn: Callable[..., Any] | None = None,
         workspace: Workspace | None = None,
+        artifact_path: Path | None = None,
         max_iters: int = _MAX_TOOL_ITERS,
         context_compact: bool = True,
     ) -> None:
@@ -244,16 +255,22 @@ class ToolAugmentedClient:
         self._search_fn = search_fn
         self._fetch_fn = fetch_fn
         self._workspace = workspace
+        self._artifact_path = artifact_path
         self._max_iters = max_iters
         self._context_compact = context_compact
+        #: Per-instance registry — blocks concurrent threads from fetching the
+        #: same URL simultaneously (dog-pile prevention within one run).
+        self._in_flight = InFlightRegistry()
 
     @property
     def _schemas(self) -> list[dict[str, Any]]:
         """The tool schemas advertised this run. File tools appear only when a
-        workspace is wired (no workspace → no file tools offered)."""
+        workspace is wired; artifact tools only when artifact_path is set."""
         schemas = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL]
         if self._workspace is not None:
             schemas += [READ_FILE_TOOL, WRITE_FILE_TOOL]
+        if self._artifact_path is not None:
+            schemas += [READ_ARTIFACT_TOOL, PATCH_ARTIFACT_TOOL]
         return schemas
 
     @property
@@ -420,6 +437,10 @@ class ToolAugmentedClient:
             return self._run_read(step_id, args)
         if name == "write_file":
             return self._run_write(step_id, args)
+        if name == "read_artifact":
+            return self._run_read_artifact(step_id, args)
+        if name == "patch_artifact":
+            return self._run_patch_artifact(step_id, args)
         # Unknown tool: report it back so the model can recover.
         return self._tool_message(name, {"error": f"unknown tool {name!r}"})
 
@@ -471,7 +492,11 @@ class ToolAugmentedClient:
             content, n_bytes = _fetch_cache[_cache_key]
             error = ""
         else:
-            content, n_bytes, error = self._fetch(url, selector)
+            # Block concurrent threads from fetching the same URL simultaneously.
+            # The first caller fetches; concurrent callers wait and share the result.
+            content, n_bytes, error = self._in_flight.get_or_fetch(
+                _cache_key, lambda: self._fetch(url, selector)
+            )
             if not error:
                 _fetch_cache[_cache_key] = (content, n_bytes)
         if error:
@@ -552,6 +577,51 @@ class ToolAugmentedClient:
         summary = f"wrote {_fmt_bytes(n_bytes)} to {shown}"
         self._emit_result(step_id, "write_file", summary, 1, "")
         return self._tool_message("write_file", {"path": shown, "bytes": n_bytes})
+
+    # -- artifact tools (OCC + file locking) ------------------------------
+
+    def _run_read_artifact(self, step_id: str, args: dict[str, Any]) -> Message:  # noqa: ARG002
+        """Read artifact.md under the per-path lock (blocks while a patch is in progress)."""
+        if self._artifact_path is None:
+            return self._tool_message("read_artifact", {"error": "no artifact_path configured"})
+        try:
+            result = _occ_read(self._artifact_path)
+        except OSError as exc:
+            return self._tool_message("read_artifact", {"error": str(exc)})
+        self._emit_result(
+            step_id, "read_artifact",
+            f"read {len(result.content)} chars hash={result.hash}", len(result.content), ""
+        )
+        return self._tool_message("read_artifact", {"content": result.content, "hash": result.hash})
+
+    def _run_patch_artifact(self, step_id: str, args: dict[str, Any]) -> Message:
+        """Atomically apply a find/replace patch with OCC hash check (via agentkit.artifacts.occ).
+
+        Returns success+new_hash on match, or hash_mismatch+fresh-content on conflict.
+        The caller (worker) uses the returned content+hash to re-analyze and retry.
+        """
+        if self._artifact_path is None:
+            return self._tool_message("patch_artifact", {"error": "no artifact_path configured"})
+        find = str(args.get("find", ""))
+        replace = str(args.get("replace", ""))
+        expected_hash = str(args.get("expected_hash", ""))
+        if not find:
+            return self._tool_message("patch_artifact", {"error": "find must not be empty"})
+        try:
+            result = _occ_patch(self._artifact_path, find, replace, expected_hash)
+        except OSError as exc:
+            return self._tool_message("patch_artifact", {"error": str(exc)})
+        if not result.success:
+            notice = "conflict" if result.reason == "hash_mismatch" else "not found"
+            self._emit_result(step_id, "patch_artifact", f"{result.reason} — retry", 0, notice)
+            payload: dict[str, Any] = {"success": False, "reason": result.reason, "new_hash": result.new_hash}
+            if result.content is not None:
+                payload["content"] = result.content
+            if result.reason == "find_not_matched":
+                payload["hint"] = f"'{find[:60]}' not found in artifact"
+            return self._tool_message("patch_artifact", payload)
+        self._emit_result(step_id, "patch_artifact", f"patched {len(find)} chars hash={result.new_hash}", 1, "")
+        return self._tool_message("patch_artifact", {"success": True, "new_hash": result.new_hash})
 
     def _search(self, query: str, n: int) -> tuple[list[Any], str]:
         """Run the injected search_fn (or web_toolkit.web_search); never raises.

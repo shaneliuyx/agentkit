@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, Callable
 
 from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
@@ -165,9 +166,19 @@ _CLEAN_END_CHARS = frozenset(".!?)]\"'`|>*-_")
 
 
 def _ends_cleanly(text: str) -> bool:
-    """True if ``text`` ends at a sentence/structure boundary (not truncated mid-line)."""
+    """True if ``text`` ends at a sentence/structure boundary (not truncated mid-line).
+
+    Research reports end with reference lines like "- Author. 'Title.' https://url"
+    where the last WORD is a URL, not the line itself. Check last word for URL prefix.
+    """
     stripped = text.rstrip()
-    return bool(stripped) and stripped[-1] in _CLEAN_END_CHARS
+    if not stripped:
+        return False
+    last_line = stripped.split("\n")[-1].strip()
+    last_word = last_line.split()[-1] if last_line.split() else ""
+    if last_word.startswith("http://") or last_word.startswith("https://"):
+        return True
+    return stripped[-1] in _CLEAN_END_CHARS
 
 
 class Runner:
@@ -288,18 +299,20 @@ class Runner:
         # copy its artifact into the current workspace and prefix the requirement
         # with the prior score + weaknesses so the agent edits rather than regenerates.
         _hc_cfg = getattr(session, "hill_climb_config", None) or {}
+        _artifact_copied = False
+        _eff_ws2 = None
         if _hc_cfg.get("auto_improve"):
             import shutil
             from studio.task_runs import TaskRunStore, task_hash as _task_hash
             _thash = _task_hash(requirement)
             _store = TaskRunStore()
-            # Prefer best-scoring run with content; fallback to latest.
-            _prior = _store.best(_thash)
-            if _prior and not (_prior.result_text or "").strip():
-                _prior = _store.latest(_thash)
+            # Use latest run with actual artifact content — LLM self-eval scores
+            # are noisy; the most recent non-empty artifact has accumulated the
+            # most incremental work and is the best hill-climb seed.
+            from studio.workspace import workspace_root as _ws_root_fn3
+            _eff_ws2 = self._workspace_root or _ws_root_fn3()
+            _prior = _store.latest_with_content(_thash, ws_root=_eff_ws2)
             if _prior:
-                from studio.workspace import workspace_root as _ws_root_fn3
-                _eff_ws2 = self._workspace_root or _ws_root_fn3()
                 _prior_art = _eff_ws2 / _prior.session_id / "artifact.md"
                 _artifact_copied = False
                 if _prior_art.exists():
@@ -316,16 +329,38 @@ class Runner:
                         if _w not in _seen:
                             _seen.add(_w)
                             _all_weaknesses.append(_w)
-                _fix_rules = "\n".join(
-                    f"- OUTPUT MUST NOT exhibit: {w}" for w in _all_weaknesses
+                _fix_items = "\n".join(
+                    f"  {i+1}. {w}" for i, w in enumerate(_all_weaknesses)
                 )
-                # Workers only have web_search/web_fetch — no file-read tool.
-                # Avoid instructing them to read artifact.md (they can't).
-                # Inject weaknesses as hard constraints on the ORIGINAL task instead.
-                if _fix_rules:
+                # Workers use web_search/web_fetch only — no write_file tool. Multiple
+                # workers run concurrently; writing a shared artifact.md would cause
+                # conflicts. Each worker's TEXT OUTPUT is its "temp file": the runner
+                # collects outputs[step.id] = sr.output and the reducer receives all
+                # of them via upstream context. RESEARCH_FINDING blocks let the reducer
+                # apply each finding independently.
+                #
+                # Prompt structure: imperative tool-call instruction FIRST, schema
+                # SECOND. "FIND AND OUTPUT" framing causes narration (model says "I'll
+                # search" but never calls the tool). "Use web_search tool right now"
+                # triggers actual tool_call responses the loop can execute.
+                if _fix_items:
+                    _finding_schema = (
+                        "## RESEARCH_FINDING\n"
+                        "ARTICLE_TITLE: <exact title>\n"
+                        "URL: https://<exact URL — required>\n"
+                        "POPULARITY: <verifiable signal: top-N result, N shares, N citations>\n"
+                        "PUBLICATION: <date or unknown>\n"
+                        "KEY_INSIGHT: <one sentence relevant to the task>\n"
+                        "PATCH_TARGET: <exact article name or section heading in the artifact>\n"
+                    )
                     requirement = (
                         f"{requirement}\n\n"
-                        f"QUALITY CONSTRAINTS (accumulated from all prior attempts):\n{_fix_rules}"
+                        f"Use the web_search tool right now to find the following missing data:\n"
+                        f"{_fix_items}\n\n"
+                        f"For each item found, output a RESEARCH_FINDING block:\n"
+                        f"{_finding_schema}\n"
+                        f"Call web_search immediately. Do not narrate — output RESEARCH_FINDING "
+                        f"blocks only. URL is required in every block."
                     )
 
         # session frame
@@ -337,7 +372,14 @@ class Runner:
         base_client = self._build_client()
         # Wrap in a web_search tool loop when tools are enabled (run_plan stays
         # unchanged — it sees a plain LLMClient that happens to run a tool loop).
-        client = self._maybe_tool_augment(base_client)
+        # When a prior artifact was seeded, also offer read_artifact/patch_artifact
+        # so concurrent workers can apply OCC patches directly to artifact.md.
+        _art_for_tools = (
+            _eff_ws2 / session.session_id / "artifact.md"
+            if _artifact_copied and _eff_ws2 is not None
+            else None
+        )
+        client = self._maybe_tool_augment(base_client, artifact_path=_art_for_tools)
 
         # plan → emit plan. A seeded session pre-seeds decomposition from a
         # chosen loop-library loop (emit loop_seed); else cold decomposition.
@@ -429,14 +471,47 @@ class Runner:
             # LLM needs an imperative framing to produce the artifact, not a
             # meta-decision about whether to continue.
             if is_last and upstream:
-                desc = (
-                    f"You are the final step of a multi-step agent workflow. "
-                    f"The prior steps have already produced the following output. "
-                    f"Your job: return the complete, final artifact exactly as produced "
-                    f"by the prior steps (optionally refining it). "
-                    f"Do NOT ask for more context or input — all necessary work is already done.\n\n"
-                    f"Workflow instruction: {desc}"
-                )
+                if _artifact_copied:
+                    # Prior artifact seeded into workspace. The reducer has no read_file
+                    # tool, so inject the seeded content directly into the prompt.
+                    # Workers produced RESEARCH_FINDING blocks in their text output;
+                    # the reducer applies each block to the artifact independently.
+                    # After the step runs we write sr.output back to artifact.md.
+                    _seed_text = ""
+                    if _eff_ws2 is not None:
+                        try:
+                            _seed_text = (_eff_ws2 / session.session_id / "artifact.md").read_text()
+                        except OSError:
+                            pass
+                    _art_ctx = (
+                        f"CURRENT ARTIFACT (from prior run — base to improve):\n"
+                        f"--- BEGIN ARTIFACT ---\n{_seed_text}\n--- END ARTIFACT ---\n\n"
+                        if _seed_text else ""
+                    )
+                    desc = (
+                        f"You are the reducer in a multi-worker research pipeline.\n\n"
+                        f"Workers searched the web and produced RESEARCH_FINDING blocks above "
+                        f"(each has ARTICLE_TITLE / URL / POPULARITY / PATCH_TARGET fields).\n\n"
+                        f"Your job — apply every RESEARCH_FINDING block to the artifact:\n"
+                        f"1. Find PATCH_TARGET in the artifact.\n"
+                        f"2. If URL is missing inline → add it next to the citation.\n"
+                        f"3. If POPULARITY is missing → add it in parentheses.\n"
+                        f"4. If the article is new (not in artifact) → add a summary paragraph "
+                        f"   and a References entry with the URL.\n"
+                        f"5. Output the COMPLETE updated artifact — every section, no truncation.\n"
+                        f"   Your output length must be >= the input artifact length.\n\n"
+                        f"{_art_ctx}"
+                        f"Workflow instruction: {desc}"
+                    )
+                else:
+                    desc = (
+                        f"You are the final step of a multi-step agent workflow. "
+                        f"The prior steps have already produced the following output. "
+                        f"Your job: return the complete, final artifact exactly as produced "
+                        f"by the prior steps (optionally refining it). "
+                        f"Do NOT ask for more context or input — all necessary work is already done.\n\n"
+                        f"Workflow instruction: {desc}"
+                    )
             sub_step = replace(
                 step, description=_with_upstream(desc, upstream), depends_on=()
             )
@@ -454,6 +529,16 @@ class Runner:
             sr = result.runs[0]
             outputs[step.id] = sr.output
             final_output = sr.output
+
+            # When the reducer received the seeded artifact as context and produced
+            # an improved version, write it back to artifact.md so the scorer and
+            # the next epoch both see the improved content. Guard on length > 5000
+            # to avoid overwriting the seed with a confused short response.
+            if is_last and _artifact_copied and _eff_ws2 is not None and len(sr.output.strip()) > 5000:
+                try:
+                    (_eff_ws2 / session.session_id / "artifact.md").write_text(sr.output)
+                except OSError:
+                    pass
 
             # Reconcile tokens run_plan counted that on_usage did not capture.
             # A StudioChatClient fires on_usage per call (with the in/out split);
@@ -600,17 +685,50 @@ class Runner:
                         _scored_text = _file_text
             except Exception:  # noqa: BLE001 - a read failure must not break recording
                 pass
-            _score, _scorer_feedback = score_result(_scored_text, _original_requirement, client)
-            # Mine from what the run ACTUALLY produced, not the persisted artifact.
-            # The scorer uses artifact.md (to give credit for saved work), but the
-            # miner must see result_output so it can flag synthesis failures (e.g.
-            # "workers returned status only") rather than rubber-stamping the seed.
-            _mine_text = result_output if result_output else _scored_text
+            # Scoring and weakness mining must use the RAW client (base_client), not the
+            # ToolAugmentedClient. When the scorer has web_search available, it calls it
+            # to verify citations — fabricated or paywalled articles score 0.0 even when
+            # the output quality is genuinely good. The scorer is an LLM judge, not a
+            # research agent; it must not make live web calls.
+            _judge_client = base_client
+            # Check scored text URLs against web cache — real (cached) URLs get marked
+            # as verified so the judge doesn't penalise genuine citations as fabricated.
+            _verified_urls: list[str] = []
+            try:
+                import json as _json
+                import os as _os
+                import re as _re
+                _cache_file = ".web_cache.json"
+                if _os.path.exists(_cache_file):
+                    with open(_cache_file) as _cf:
+                        _cache_data = _json.load(_cf)
+                    _cached_set: set[str] = set()
+                    for _cv in _cache_data.values():
+                        if isinstance(_cv, list):
+                            for _cr in _cv:
+                                if isinstance(_cr, dict) and "url" in _cr:
+                                    _cached_set.add(_cr["url"])
+                    _raw_urls = _re.findall(r"https?://\S+", _scored_text or "")
+                    _verified_urls = [u.rstrip(".,)") for u in _raw_urls if u.rstrip(".,)") in _cached_set]
+            except Exception:  # noqa: BLE001
+                pass
+            _score, _scorer_feedback = score_result(
+                _scored_text, _original_requirement, _judge_client,
+                verified_urls=_verified_urls or None,
+            )
+            # Mine against the full artifact so the miner sees real content (URLs,
+            # citations, conclusions). Pass result_output in the outputs dict to let
+            # the miner still catch synthesis failures like "workers returned status
+            # only". Without this, the miner saw the 3K reducer response instead of
+            # the 28K artifact and reported "no URLs" when 8 real URLs already existed.
+            _mine_outputs = {k: v for k, v in outputs.items()}
+            if result_output:
+                _mine_outputs["reducer_response"] = result_output
             _weaknesses = mine_weaknesses_from_outputs(
-                {k: v for k, v in outputs.items()},
-                _mine_text,
+                _mine_outputs,
+                _scored_text,
                 _original_requirement,
-                client,
+                _judge_client,
                 scorer_feedback=_scorer_feedback,
             )
             _version = _store.next_version(_thash)
@@ -668,15 +786,18 @@ class Runner:
         # session info may be filled lazily; ensure label/model present
         return build_chat_client(backend, self._on_usage)
 
-    def _maybe_tool_augment(self, client: LLMClient) -> LLMClient:
+    def _maybe_tool_augment(
+        self, client: LLMClient, *, artifact_path: Path | None = None
+    ) -> LLMClient:
         """Wrap ``client`` in the tool loop (web_search + jailed file tools) when
         tools are enabled.
 
         Gated on ``session.tools_enabled`` AND web_toolkit being importable; in
         tests an injected ``search_fn`` (set via ``self._search_fn``) bypasses the
         import so no network is hit. The file tools are confined to a per-session
-        :class:`~studio.workspace.Workspace` (realpath jail). Returns the bare
-        client when tools are off.
+        :class:`~studio.workspace.Workspace` (realpath jail). When ``artifact_path``
+        is provided, the artifact OCC tools (read_artifact / patch_artifact) are
+        also offered. Returns the bare client when tools are off.
         """
         enabled = self._session.tools_enabled and (
             self._search_fn is not None or web_toolkit_available()
@@ -703,6 +824,7 @@ class Runner:
             search_fn=self._search_fn,
             fetch_fn=self._fetch_fn,
             workspace=workspace,
+            artifact_path=artifact_path,
         )
 
     def _gate_event_for(self, step_id: str, output: str) -> GateEvent:

@@ -128,6 +128,20 @@ class TaskRunStore:
         ).fetchone()
         return self._row_to_run(row) if row else None
 
+    def latest_with_content(self, task_hash_str: str, ws_root: Path | None = None) -> TaskRun | None:
+        """Return most recent run whose artifact.md exists and is non-empty.
+
+        Prefers *latest* over *best-score*: LLM self-eval scores are noisy and
+        the latest run has accumulated the most incremental work.
+        """
+        from studio.workspace import workspace_root as _ws_root  # noqa: PLC0415
+        root = ws_root or _ws_root()
+        for run in reversed(self.all_runs(task_hash_str)):
+            art = root / run.session_id / "artifact.md"
+            if art.exists() and art.stat().st_size > 0:
+                return run
+        return None
+
     def all_runs(self, task_hash_str: str) -> list[TaskRun]:
         rows = self._conn.execute(
             """SELECT task_hash, session_id, version, score, weaknesses_json,
@@ -138,7 +152,12 @@ class TaskRunStore:
         return [self._row_to_run(r) for r in rows]
 
 
-def score_result(result: str, requirement: str, client: Any) -> tuple[float, str]:
+def score_result(
+    result: str,
+    requirement: str,
+    client: Any,
+    verified_urls: list[str] | None = None,
+) -> tuple[float, str]:
     """LLM 0-1 quality score for the session result.
 
     Returns ``(score, unmet_feedback)`` where ``unmet_feedback`` is a newline-joined
@@ -158,6 +177,14 @@ def score_result(result: str, requirement: str, client: Any) -> tuple[float, str
     _cap = min(len(result), 20_000)
     _label = "full output" if len(result) <= _cap else f"first {_cap} chars"
     _today = datetime.date.today().isoformat()
+    _url_note = ""
+    if verified_urls:
+        _url_note = (
+            "VERIFIED SOURCES: the following URLs were confirmed real via actual web "
+            "search (not fabricated) — treat them as genuine citations:\n"
+            + "\n".join(f"  - {u}" for u in verified_urls[:20])
+            + "\n"
+        )
     prompt = (
         f"Today's date is {_today}. "
         "Score how well the OUTPUT fulfills the TASK, using a rubric you derive from the "
@@ -167,6 +194,7 @@ def score_result(result: str, requirement: str, client: Any) -> tuple[float, str
         "evidence/grounding, structure, directly answering the ask, etc.).\n"
         "Step 2: award 0.2 for EACH criterion the OUTPUT FULLY meets (partial = 0). Be "
         "strict: an incomplete, truncated, unsubstantiated, or off-task output loses points.\n"
+        f"{_url_note}"
         f"TASK: {requirement[:400]}\n"
         f"OUTPUT ({_label}): {result[:_cap]}\n"
         "Reply with exactly this format:\n"

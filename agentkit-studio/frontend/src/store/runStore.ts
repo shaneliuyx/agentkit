@@ -145,10 +145,11 @@ export interface RunState {
   goalMet: GoalMetPayload | null;
   configuredGoal: { end_state: string; evidence_cmd: string; success_pattern: string; constraints: string[]; max_turns: number; max_tokens: number; timeout_s: number } | null;
   setConfiguredGoal: (g: RunState["configuredGoal"]) => void;
-  configuredHillClimb: { score_metric: string; min_improvement: number; max_epochs: number } | null;
+  configuredHillClimb: { score_metric: string; min_improvement: number; max_epochs: number; auto_improve?: boolean } | null;
   setConfiguredHillClimb: (c: RunState["configuredHillClimb"]) => void;
   setSchedulerTriggers: (p: SchedulerPayload) => void;
   hillClimb: HillClimbPayload[];
+  currentTaskHash: string | null;
   schedulerTriggers: SchedulerPayload | null;
   chainResults: ChainPayload[];
 
@@ -194,6 +195,7 @@ const initialState = {
   configuredGoal: null as RunState["configuredGoal"],
   configuredHillClimb: null as RunState["configuredHillClimb"],
   hillClimb: [] as HillClimbPayload[],
+  currentTaskHash: null as string | null,
   schedulerTriggers: null as SchedulerPayload | null,
   chainResults: [] as ChainPayload[],
   pendingContinue: null as string | null,
@@ -239,7 +241,15 @@ export const useRunStore = create<RunState>((set) => ({
   ...initialState,
 
   beginRun: (sessionId, mode) =>
-    set({ ...initialState, sessionId, mode, status: "connecting" }),
+    set((state) => ({
+      ...initialState,
+      sessionId,
+      mode,
+      status: "connecting",
+      // Preserve loop config across run start — already sent to backend.
+      configuredHillClimb: state.configuredHillClimb,
+      configuredGoal: state.configuredGoal,
+    })),
 
   reset: () => set({ ...initialState }),
   setConfiguredGoal: (g) => set({ configuredGoal: g }),
@@ -349,7 +359,10 @@ export const useRunStore = create<RunState>((set) => ({
           return { goalMet: event.payload };
 
         case "hill_climb":
-          return { hillClimb: [...state.hillClimb, event.payload] };
+          return {
+            hillClimb: [...state.hillClimb, event.payload],
+            currentTaskHash: event.payload.task_hash ?? state.currentTaskHash,
+          };
 
         case "scheduler":
           return { schedulerTriggers: event.payload };

@@ -44,7 +44,13 @@ class StudioChatClient:
         api_key: str | None,
         on_usage: OnUsage,
         temperature: float = 0.0,
-        retries: int = 4,
+        # 7 retries (~4 min with backoff 2.0) instead of 4 (~30s): a research run
+        # fans out many concurrent phase calls, and a transient upstream 503 lasting
+        # longer than 30s would otherwise FAIL that phase (losing its research) rather
+        # than recover. Verified the 503s are transient capacity, not a request bug:
+        # small/large/concurrent calls all succeed. A failed phase, not the scorer, was
+        # capping the score — so surviving the hiccup is the real fix.
+        retries: int = 7,
     ) -> None:
         self.model = model
         self.temperature = temperature

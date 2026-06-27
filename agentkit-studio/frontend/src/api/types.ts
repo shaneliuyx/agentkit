@@ -302,6 +302,7 @@ export interface HillClimbPayload {
   status: string;
   note: string;
   weaknesses: string[];
+  task_hash?: string;
 }
 
 export interface SchedulerPayload {

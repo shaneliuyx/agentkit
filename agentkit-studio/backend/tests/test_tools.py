@@ -150,7 +150,8 @@ def test_max_iters_caps_runaway_loop() -> None:
     inner = _AlwaysTool()
     c = ToolAugmentedClient(inner, search_fn=_fake_search, max_iters=3)
     c.chat([{"role": "user", "content": "q"}])
-    assert inner.calls == 3  # capped
+    # 3 tool-loop iterations + 1 forced synthesis call when last result has no text.
+    assert inner.calls == 4
 
 
 def test_search_failure_is_nonfatal_with_notice() -> None:
@@ -253,6 +254,7 @@ def test_web_fetch_content_is_capped() -> None:
         on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
             (summary, n)
         ),
+        context_compact=False,
     )
     c.chat([{"role": "user", "content": "read big"}])
     payload = json.loads(captured[0]["content"])

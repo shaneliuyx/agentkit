@@ -27,6 +27,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from agentkit.types import LLMClient
 
+from agentkit.artifacts.patcher import cleanup_orphaned_tmp
 from studio.backends import (
     build_chat_client,
     build_embedder,
@@ -37,9 +38,11 @@ from studio.backends import (
 from studio.events import StudioEvent
 from studio.export import run_to_loop
 from studio.loops import CatalogClient
+from studio.models import LoopConfig
 from studio.runner import Runner
 from studio.session import SessionRegistry
 from studio.skills_paths import build_path_skills
+from studio.workspace import workspace_root
 
 #: Sentinel pushed onto the event queue to signal stream completion.
 _STREAM_DONE = object()
@@ -58,6 +61,12 @@ registry = SessionRegistry()
 
 #: Loaded once on first /loops or seed call (fetch + 24h disk cache).
 _catalog: CatalogClient | None = None
+
+
+@app.on_event("startup")
+def _startup_cleanup() -> None:
+    """Remove *.tmp orphans left by a crash mid-atomic-rename."""
+    cleanup_orphaned_tmp(workspace_root())
 
 
 def _get_catalog() -> CatalogClient:
@@ -92,6 +101,7 @@ def post_session(body: dict[str, Any]) -> dict[str, str]:
     mode = body.get("mode", "auto")
     budget = (body.get("budget") or {}).get("ceiling")
     tools_enabled = bool(body.get("tools_enabled", True))
+    loop_config = LoopConfig.from_dict(body.get("loop_config") or {})
 
     try:
         backend = resolve_backend(llm_spec)
@@ -114,6 +124,7 @@ def post_session(body: dict[str, Any]) -> dict[str, str]:
         mode=mode,
         budget_ceiling=budget,
         tools_enabled=tools_enabled,
+        loop_config=loop_config,
     )
     # Optionally seed from a chosen loop-library loop in the same request.
     loop_id = body.get("loop_id")
@@ -546,4 +557,45 @@ def suggest_chain(body: dict[str, Any]) -> dict[str, Any]:
     return {
         "specs": list(suggestion.specs),
         "initial_ctx": suggestion.initial_ctx,
+    }
+
+
+@app.post("/session/{session_id}/hill-climb")
+def set_hill_climb(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Configure hill-climb auto-improve for a session.
+
+    Body: {score_metric?, min_improvement?, max_epochs?, auto_improve?}
+    Subsequent runs for the same task will score, mine weaknesses, and (when
+    auto_improve=true) seed the next run from the prior artifact.
+    """
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    session.hill_climb_config = {
+        "score_metric": str(body.get("score_metric") or "quality"),
+        "min_improvement": float(body.get("min_improvement") or 0.02),
+        "max_epochs": int(body.get("max_epochs") or 5),
+        "auto_improve": bool(body.get("auto_improve", False)),
+    }
+    return {"status": "ok", "hill_climb_config": session.hill_climb_config}
+
+
+@app.get("/task-runs/{task_hash_str}")
+def get_task_runs(task_hash_str: str) -> dict[str, Any]:
+    """Return all recorded runs for a task hash (cross-session version history)."""
+    from studio.task_runs import TaskRunStore
+    store = TaskRunStore()
+    runs = store.all_runs(task_hash_str)
+    return {
+        "task_hash": task_hash_str,
+        "runs": [
+            {
+                "version": r.version,
+                "session_id": r.session_id,
+                "score": r.score,
+                "weaknesses": r.weaknesses,
+                "artifact_path": r.artifact_path,
+            }
+            for r in runs
+        ],
     }

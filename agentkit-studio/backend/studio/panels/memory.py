@@ -13,14 +13,13 @@ a notice, never crashing the run.
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from typing import Any
 
 from agentkit.memory.store import MemoryEntry, MemoryStore
 from agentkit.types import Embedder
 
 from studio.events import MemoryEvent
+from studio.workspace import workspace_root
 
 
 class MemoryTracker:
@@ -38,7 +37,7 @@ class MemoryTracker:
             self._notice = "no embedder configured — memory panel disabled"
             return
         try:
-            db_path = str(Path(tempfile.mkdtemp(prefix="studio_mem_")) / "mem.db")
+            db_path = str(workspace_root().parent / "shared_memory.db")
             self._store = MemoryStore(db_path, embedder=embedder)
         except Exception as exc:  # noqa: BLE001
             self._notice = f"memory store unavailable: {exc}"

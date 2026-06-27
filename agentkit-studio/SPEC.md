@@ -356,3 +356,208 @@ The installable skill (`npx skills add Forward-Future/loop-library --skill loop-
 claude-code -g -y`) is for the *developer agent* to design/audit Studio's own loops conversationally
 (`/loop-library ...`). It is NOT installed into the Studio runtime — Studio integrates via
 `catalog.json` + the code above.
+
+---
+
+## 11. Hill-Climb / Auto-Improve architecture
+
+Cross-session iterative improvement via `task_runs.db`. Active when
+`session.hill_climb_config["auto_improve"] = true`.
+
+### 11.1 Pipeline overview
+
+```
+Epoch N-1 (prior session)
+  └─ produces artifact.md (large report, e.g. 28 K chars)
+  └─ mines weaknesses → task_runs.db
+
+Epoch N (current session)
+  ├─ seed: copy prior artifact.md → workspace/{session_id}/artifact.md
+  │
+  ├─ Workers (STAR fan-out, concurrent)
+  │    tools: web_search + web_fetch + read_artifact + patch_artifact
+  │
+  │    Per-worker flow:
+  │      1. read_artifact()          → {content, hash}   (no lock; OCC)
+  │      2. web_search(gap)          → find URL / data
+  │      3. patch_artifact(find, replace, expected_hash)
+  │           hash unchanged → acquire lock → write → release
+  │           hash changed   → re-read (use returned content+hash) → retry
+  │      4. text output: RESEARCH_FINDING blocks for NEW articles only
+  │                      (existing citations patched inline via tool)
+  │
+  │    Why tools not shared files: concurrent workers would corrupt artifact.md
+  │    without ordering. patch_artifact uses per-path threading.Lock + hash OCC:
+  │    only one writer at a time; stale reads are detected and retried.
+  │
+  └─ Reducer (SINGLE, is_last=True)
+       receives: updated artifact.md (injected as text — all inline patches applied)
+               + worker text outputs (RESEARCH_FINDING blocks for new articles)
+       produces: COMPLETE artifact with new article sections appended
+       runner writes output to artifact.md when len(output.strip()) > 5000 chars
+```
+
+### 11.2 Worker tools — read_artifact and patch_artifact
+
+Both tools are added to `ToolAugmentedClient` when `artifact_path` is provided.
+Implemented in `studio/tools.py`; dispatched via the existing `_dispatch` router.
+
+#### read_artifact
+Returns current artifact content + a short MD5 hash (12 hex chars).
+No locking — reads are always allowed. Call before generating any patch.
+
+```python
+# tool result shape
+{"content": "<full artifact text>", "hash": "<12-char md5>"}
+```
+
+#### patch_artifact
+Atomically applies one find/replace with OCC and file locking.
+
+```python
+# args
+{"find": "<exact verbatim text>", "replace": "<new text>", "expected_hash": "<hash from read>"}
+
+# success result
+{"success": True, "new_hash": "<updated hash>"}
+
+# hash mismatch — another worker wrote first; worker must re-read and retry
+{"success": False, "reason": "hash_mismatch", "content": "<current content>", "new_hash": "<current hash>"}
+
+# find string not in file
+{"success": False, "reason": "find_not_matched", "hint": "..."}
+```
+
+Worker prompt (injected when `_artifact_copied=True` and weaknesses exist):
+```
+Use the web_search tool right now to find the following missing data:
+  1. <weakness>
+  ...
+
+For each item:
+  1. Call read_artifact to get current artifact content and hash.
+  2. Call web_search to find the URL / data.
+  3. Call patch_artifact(find=<exact text>, replace=<improved text>, expected_hash=<hash>).
+     If it returns hash_mismatch: use the returned content+hash and retry.
+  4. For NEW articles not in the artifact: output a RESEARCH_FINDING block (see below).
+
+## RESEARCH_FINDING  (new articles only — do NOT output for patches you already applied)
+ARTICLE_TITLE: <exact title>
+URL: https://<exact URL>
+POPULARITY: <verifiable signal>
+PUBLICATION: <date or unknown>
+KEY_INSIGHT: <one sentence>
+PATCH_TARGET: <section in artifact where this belongs>
+```
+
+### 11.3 Reducer merge behavior
+
+By the time the reducer runs, workers have already patched inline URLs and
+popularity data directly into artifact.md via `patch_artifact`. Reducer's job
+is narrower: integrate NEW articles (RESEARCH_FINDING blocks from worker text).
+
+Reducer receives via its prompt:
+1. Updated artifact.md (re-read from file after workers finish — all inline patches applied)
+2. Worker text outputs (RESEARCH_FINDING blocks for articles not yet in the artifact)
+
+Reducer instructions (injected by runner when `_artifact_copied=True`):
+```
+Workers have already patched inline URLs and popularity data into the artifact.
+Your job is to add NEW articles found by workers.
+
+For each RESEARCH_FINDING block in the upstream worker output:
+  - If ARTICLE_TITLE is already in the artifact: skip (already there or patched).
+  - If new: add a summary paragraph in the appropriate section + a References entry.
+
+Output the COMPLETE artifact including all new additions. Do not truncate.
+```
+
+Write-back guard: `artifact.md <- sr.output` only when `len(sr.output.strip()) > 5000`.
+
+### 11.4 Scoring pipeline
+
+```python
+_scored_text = result_output            # after ws_artifact swap if reducer short
+if _art_file.exists() and len(_file_text) >= len(_scored_text):
+    _scored_text = _file_text           # use artifact.md when longer
+
+verified_urls = [u.rstrip(".,)") for u in re.findall(r"https?://\S+", _scored_text)
+                 if u.rstrip(".,)") in web_cache]
+score, unmet = score_result(_scored_text, req, judge_client,
+                             verified_urls=verified_urls or None)
+```
+
+`verified_urls` injects a `VERIFIED SOURCES:` note so real cached URLs are not
+penalised as fabrications. Score range 0.0–1.0 (5 rubric criteria x 0.2).
+
+### 11.5 Weakness mining → next epoch directives
+
+```python
+mine_weaknesses_from_outputs(
+    {**step_outputs, "reducer_response": result_output},
+    _scored_text,      # full artifact — NOT the short reducer response
+    requirement, judge_client, scorer_feedback=unmet
+)
+```
+
+Miner uses HEAD `[:8000]` + TAIL `[-4000:]` for docs > 12 K (sees references section).
+
+Mined weaknesses become next epoch's worker directives (numbered list, not bullets —
+numbered lists trigger actual tool calls; bullet `FIND AND OUTPUT` framing causes narration).
+
+### 11.7 OCC implementation — extracted to agentkit shared library
+
+OCC primitives live in **`agentkit`**, not in `studio/tools.py` directly.
+Studio is a thin dispatch wrapper.
+
+**`agentkit.artifacts.occ`** — mechanism (lock + hash + file I/O):
+```python
+# agentkit/artifacts/occ.py
+def get_lock(path: str) -> threading.Lock: ...       # per-path lock registry
+def artifact_hash(content: str) -> str: ...          # MD5[:12] OCC token
+def read_artifact(path: Path) -> ReadResult: ...     # acquires lock, reads, hashes
+def patch_artifact(path, find, replace, expected_hash) -> PatchResult: ...
+    # acquires lock → re-reads → hash check → replace(1) → write
+    # returns PatchResult(success=False, reason="hash_mismatch", content=...) on conflict
+```
+
+**`agentkit.tools.artifact`** — OpenAI tool schemas:
+```python
+# agentkit/tools/artifact.py
+READ_ARTIFACT_TOOL: dict       # {"name": "read_artifact", ...}
+PATCH_ARTIFACT_TOOL: dict      # {"name": "patch_artifact", find/replace/expected_hash}
+ARTIFACT_TOOL_SCHEMAS: list    # [READ_ARTIFACT_TOOL, PATCH_ARTIFACT_TOOL]
+```
+
+**`studio/tools.py`** — thin adapter:
+```python
+from agentkit.artifacts.occ import patch_artifact as _occ_patch, read_artifact as _occ_read
+from agentkit.tools.artifact import ARTIFACT_TOOL_SCHEMAS
+
+# Re-exports for legacy callers:
+READ_ARTIFACT_TOOL  = ARTIFACT_TOOL_SCHEMAS[0]
+PATCH_ARTIFACT_TOOL = ARTIFACT_TOOL_SCHEMAS[1]
+```
+
+`ToolAugmentedClient.__init__` gains `artifact_path: Path | None = None`.
+When set, `_schemas` appends `ARTIFACT_TOOL_SCHEMAS`.
+`_dispatch` routes `"read_artifact"` → `_run_read_artifact` → `_occ_read()`,
+`"patch_artifact"` → `_run_patch_artifact` → `_occ_patch()`.
+
+`runner.py` passes `artifact_path = _eff_ws2 / session.session_id / "artifact.md"`
+to `_maybe_tool_augment` when `_artifact_copied=True`.
+
+### 11.6 Production fixes landed (2026-06-26/27)
+
+| File | Change | Why |
+|---|---|---|
+| `runner.py` | `_ends_cleanly()` checks last **word** for `https://` (not last line) | Citation endings `"Title." https://url` were falsely flagged as truncated |
+| `task_runs.py` | `score_result(..., verified_urls)` injects `VERIFIED SOURCES:` note | Judge penalised real cached URLs as fabricated |
+| `runner.py` | URL cache scan before score; passes `verified_urls` | Activates judge hint for real citations |
+| `runner.py` | `mine_weaknesses_from_outputs` called with `_scored_text` (full artifact) | Miner on 3K reducer response gave wrong "no URLs" when 8 URLs existed in 28K artifact |
+| `runner.py` | `"reducer_response"` key added to `_mine_outputs` | Miner still catches reducer failures alongside artifact gaps |
+| `runner.py` | Worker directive: `FIND AND OUTPUT` framing → numbered list + imperative `Use web_search right now` | Bullet framing caused narration; model said "I'll search" without calling tool |
+| `runner.py` | Worker requirement includes `RESEARCH_FINDING` block schema after directives | Schema before directive caused model to generate format rather than call tool |
+| `runner.py` | Reducer prompt injects seeded artifact as literal text when `_artifact_copied` | Reducer had no `read_file` tool; "use read_file" was silently ignored |
+| `runner.py` | Reducer write-back: `artifact.md <- sr.output` when `len > 5000` | Improved artifact was discarded; seeded content never updated |
+| `studio/tools.py` | `read_artifact` + `patch_artifact` tools with OCC + `threading.Lock` | Workers write artifact.md concurrently; without locking + hash check, writes collide |

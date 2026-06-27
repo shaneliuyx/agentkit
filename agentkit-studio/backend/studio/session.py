@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from studio.models import LoopConfig
 from studio.shared_bridge import InterruptStateSnapshot, get_interrupt_disposition
 
 
@@ -67,6 +68,12 @@ class Session:
     last_run: "RunSnapshot | None" = None
     #: Loop goal — when set, runner polls check_goal() after each phase (agentkit.loop).
     goal: object = None  # LoopGoal | None when agentkit.loop installed
+    #: Hill-climb config — when set, runner scores + mines weaknesses after each run
+    #: and auto-seeds the next run from prior artifact (edit-in-place improvement).
+    #: {score_metric: str, min_improvement: float, max_epochs: int, auto_improve: bool}
+    hill_climb_config: dict | None = None
+    #: Loop Config panel settings — deliverable path, auto-improve, sizing sliders.
+    loop_config: LoopConfig | None = None
 
     def seed(self, loop_id: str, steps: list[dict[str, Any]]) -> None:
         """Pre-seed this session from a chosen loop-library loop."""
@@ -110,6 +117,7 @@ class SessionRegistry:
         mode: str,
         budget_ceiling: float | None,
         tools_enabled: bool = True,
+        loop_config: LoopConfig | None = None,
     ) -> Session:
         """Register a new session and return it."""
         session = Session(
@@ -121,6 +129,7 @@ class SessionRegistry:
             mode=mode,
             budget_ceiling=budget_ceiling,
             tools_enabled=tools_enabled,
+            loop_config=loop_config,
         )
         with self._lock:
             self._sessions[session.session_id] = session

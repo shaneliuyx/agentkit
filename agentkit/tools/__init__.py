@@ -6,9 +6,17 @@ root/containment injected — no global state — and reuses the sandbox jail
 primitive (``agentkit.sandbox.is_within``) so the filesystem boundary has ONE
 source of truth.
 
-``fs`` is the first member: ``read_file`` / ``write_file`` confined to a root.
+Modules:
+  fs       — ``read_file`` / ``write_file`` confined to a workspace root.
+  artifact — ``read_artifact`` / ``patch_artifact`` OCC schemas for concurrent
+             multi-worker writes (backed by ``agentkit.artifacts.occ``).
 """
 
+from agentkit.tools.artifact import (
+    ARTIFACT_TOOL_SCHEMAS,
+    PATCH_ARTIFACT_TOOL,
+    READ_ARTIFACT_TOOL,
+)
 from agentkit.tools.fs import (
     FS_TOOL_SCHEMAS,
     FileToolError,
@@ -23,4 +31,8 @@ __all__ = [
     "FileToolError",
     "FS_TOOL_SCHEMAS",
     "make_fs_tools",
+    # artifact OCC tool schemas
+    "READ_ARTIFACT_TOOL",
+    "PATCH_ARTIFACT_TOOL",
+    "ARTIFACT_TOOL_SCHEMAS",
 ]

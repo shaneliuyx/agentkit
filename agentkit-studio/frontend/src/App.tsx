@@ -7,7 +7,7 @@
  */
 import { lazy, Suspense, useEffect, useState } from "react";
 import { BackendPanel } from "./components/config/BackendPanel";
-import { RunBar } from "./components/config/RunBar";
+import { ChatPanel } from "./components/hud/ChatPanel";
 import { RunActions } from "./components/config/RunActions";
 import { LoopConfigPanel } from "./components/config/LoopConfigPanel";
 import { TopologyGraph } from "./components/graph/TopologyGraph";
@@ -27,7 +27,6 @@ import type { RunMode } from "./api/types";
 export default function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [mode, setMode] = useState<RunMode>("auto");
-  const [currentTask, setCurrentTask] = useState("");
   const session = useRunStore((s) => s.session);
   const errorMessage = useRunStore((s) => s.errorMessage);
   const cancelled = useRunStore((s) => s.cancelled);
@@ -71,9 +70,9 @@ export default function App() {
           ) : null}
         </div>
         <BackendPanel onSession={handleSession} mode={mode} disabled={false} />
-        <RunBar sessionId={sessionId} mode={mode} onModeChange={setMode} onRequirementChange={setCurrentTask} />
+        <ChatPanel sessionId={sessionId} mode={mode} onModeChange={setMode} />
         <RunActions sessionId={sessionId} />
-        <LoopConfigPanel sessionId={sessionId} currentTask={currentTask} />
+        <LoopConfigPanel sessionId={sessionId} />
       </header>
 
       <main className="studio-main">

@@ -110,6 +110,12 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const [hcMetric, setHcMetric] = useState("score");
   const [hcMinDelta, setHcMinDelta] = useState("0.01");
   const [hcMaxEpochs, setHcMaxEpochs] = useState("10");
+  const [hcAutoImprove, setHcAutoImprove] = useState(false);
+  const [deliverablePath, setDeliverablePath] = useState("");
+  const [useLatestPrior, setUseLatestPrior] = useState(true);
+  const [minTasksPerAgent, setMinTasksPerAgent] = useState(3);
+  const [maxTasksPerAgent, setMaxTasksPerAgent] = useState(5);
+  const [hcStatus, setHcStatus] = useState<string | null>(null);
   const [schedStatus, setSchedStatus] = useState<string | null>(null);
 
   const open = () => {
@@ -535,15 +541,91 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   />
                 </div>
               </div>
+              <div className="lc-field lc-checkbox">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={hcAutoImprove}
+                    onChange={(e) => setHcAutoImprove(e.target.checked)}
+                  />
+                  Auto-improve (seed next run from prior artifact + weaknesses)
+                </label>
+              </div>
+              <hr className="lc-divider" />
+              <p className="lc-section-label">Deliverable</p>
+              <div className="lc-field">
+                <label htmlFor="lc-hc-deliverable">Path (leave empty for auto)</label>
+                <input
+                  id="lc-hc-deliverable"
+                  className="mono"
+                  placeholder="/path/to/report.md"
+                  value={deliverablePath}
+                  onChange={(e) => setDeliverablePath(e.target.value)}
+                />
+              </div>
+              <div className="lc-field lc-checkbox">
+                <label>
+                  <input type="radio" name="lc-deliverable-mode" checked={useLatestPrior} onChange={() => setUseLatestPrior(true)} />
+                  Use latest prior artifact (hill-climb)
+                </label>
+              </div>
+              <div className="lc-field lc-checkbox">
+                <label>
+                  <input type="radio" name="lc-deliverable-mode" checked={!useLatestPrior} onChange={() => setUseLatestPrior(false)} />
+                  Create new artifact each run
+                </label>
+              </div>
+              <hr className="lc-divider" />
+              <p className="lc-section-label">Agent Sizing</p>
+              <div className="lc-row">
+                <div className="lc-field">
+                  <label>Min tasks per agent: <strong>{minTasksPerAgent}</strong></label>
+                  <input
+                    type="range" min={1} max={10}
+                    value={minTasksPerAgent}
+                    onChange={(e) => setMinTasksPerAgent(Number(e.target.value))}
+                  />
+                </div>
+                <div className="lc-field">
+                  <label>Max tasks per agent: <strong>{maxTasksPerAgent}</strong></label>
+                  <input
+                    type="range" min={1} max={10}
+                    value={maxTasksPerAgent}
+                    onChange={(e) => setMaxTasksPerAgent(Number(e.target.value))}
+                  />
+                </div>
+              </div>
+              {hcStatus && <p className="loop-config-hint">{hcStatus}</p>}
               <div className="lc-actions">
                 <button
                   className="btn btn-primary"
-                  onClick={() => {
-                    setConfiguredHillClimb({
+                  onClick={async () => {
+                    const cfg = {
                       score_metric: hcMetric.trim() || "score",
                       min_improvement: parseFloat(hcMinDelta) || 0.01,
                       max_epochs: parseInt(hcMaxEpochs) || 10,
-                    });
+                      auto_improve: hcAutoImprove,
+                      deliverable_path: deliverablePath.trim() || null,
+                      use_latest_prior: useLatestPrior,
+                      min_tasks_per_agent: minTasksPerAgent,
+                      max_tasks_per_agent: maxTasksPerAgent,
+                    };
+                    setConfiguredHillClimb(cfg);
+                    if (sessionId) {
+                      try {
+                        const res = await fetch(
+                          `/api/session/${sessionId}/hill-climb`,
+                          {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(cfg),
+                          }
+                        );
+                        setHcStatus(res.ok ? "✓ Hill climb config applied" : "✗ Failed to apply");
+                      } catch {
+                        setHcStatus("✗ Network error");
+                      }
+                    }
                   }}
                 >
                   Apply hill climb config
