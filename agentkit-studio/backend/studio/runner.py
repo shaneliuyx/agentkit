@@ -385,6 +385,29 @@ def _phase_search_failed(outputs: list[str]) -> bool:
     return saw_error
 
 
+def _detect_gaps(artifact_text: str) -> list[str]:
+    """Detect gaps in the merged deliverable (DESIGN §11.4).
+
+    A gap is a section that is empty, a placeholder, or carries substantive prose
+    with no source URL (unsourced claims). Returns actionable gap strings — routed
+    to the TaskLedger (non-last phase, filled this run) or to weaknesses in the DB
+    (last phase, filled next run). The count is the loop-until-dry signal (§11.7).
+    """
+    gaps: list[str] = []
+    parts = _re.split(r'(?m)^(#{2,6}\s+.+)$', artifact_text)
+    # parts = [pre, heading1, body1, heading2, body2, ...]
+    it = iter(parts[1:])
+    for heading in it:
+        body = next(it, '')
+        h, b = heading.strip(), body.strip()
+        low = b.lower()
+        if not b or '_(pending' in low or 'placeholder' in low:
+            gaps.append(f"{h}: empty/placeholder — needs sourced content")
+        elif 'http' not in low and len(b) > 80:
+            gaps.append(f"{h}: substantive prose but no source URL — add citations")
+    return gaps
+
+
 def _research_findings_to_patches(text: str) -> list:
     """Convert RESEARCH_FINDING blocks → ADDITIVE DocPatches (DESIGN §11.3).
 
@@ -875,6 +898,7 @@ class Runner:
         _sizing_cfg = _lc.sizing() if _lc is not None else None
 
         outputs: dict[str, str] = {}
+        _reducer_gaps: list[str] = []   # §11.4 last-phase gaps → next-run weaknesses
         cancelled = False
         final_output = ""
         #: Gate outcomes collected across phases — the Loop Doctor's safe_actions
@@ -1186,6 +1210,15 @@ class Runner:
                 # merged doc (worst case = no improvement, never regression).
                 if _rr.text and len(_rr.text) >= _seed_len:
                     write_artifact(_art_file, _rr.text)
+                # §11.4 gap routing: detect gaps in the merged doc; non-last phase
+                # → enqueue as TaskRecords (filled this run); last phase → stash as
+                # weaknesses (filled next run). Count drives loop-until-dry (§11.7).
+                _gaps = _detect_gaps(_rr.text or "")
+                if _gaps and not is_last:
+                    for _gi, _g in enumerate(_gaps):
+                        _ledger.add_task(TaskRecord(id=f"gap-{step.id}-{_gi}", description=_g))
+                elif _gaps:  # last phase → carry to next run via weaknesses
+                    _reducer_gaps.extend(_gaps)
 
         # budget gauge
         if budget is not None:
@@ -1332,6 +1365,12 @@ class Runner:
                 _judge_client,
                 scorer_feedback=_scorer_feedback,
             )
+            # §11.4: prepend the reducer's last-phase gaps — they are concrete and
+            # grounded ("§Results: no source URL"), so they make the next run's
+            # constraints specific. Dedup against the LLM-mined set.
+            if _reducer_gaps:
+                _seen_w = set(_weaknesses)
+                _weaknesses = [g for g in _reducer_gaps if g not in _seen_w] + _weaknesses
             _version = _store.next_version(_thash)
             _store.record(
                 TaskRun(

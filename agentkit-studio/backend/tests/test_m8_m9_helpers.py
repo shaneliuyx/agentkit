@@ -21,10 +21,36 @@ from studio.runner import (
     _parse_assigned,
     _parse_epic_plan,
     _parse_patches_from_output,
+    _detect_gaps,
     _phase_search_failed,
     _plan_from_epics,
     _research_findings_to_patches,
 )
+
+
+def test_detect_gaps_flags_placeholder_and_unsourced() -> None:
+    doc = (
+        "# Report\n"
+        "## Intro\nReal intro with [src](https://a.com) and detail.\n\n"
+        "## Results\n_(pending — needs sourced content)_\n\n"
+        "## Analysis\nThis section makes several substantive claims about agent loops "
+        "and verifiers and patterns but cites nothing at all, no link anywhere here.\n"
+    )
+    gaps = _detect_gaps(doc)
+    joined = " ".join(gaps)
+    assert any("Results" in g and "placeholder" in g for g in gaps)
+    assert any("Analysis" in g and "no source URL" in g for g in gaps)
+    assert "Intro" not in joined  # sourced section is not a gap
+
+
+def test_detect_gaps_clean_doc_has_none() -> None:
+    doc = "## A\nGrounded [x](https://x.com) content.\n## B\nMore [y](https://y.com).\n"
+    assert _detect_gaps(doc) == []
+
+
+def test_detect_gaps_empty_section() -> None:
+    gaps = _detect_gaps("## Sources\n\n## Refs\n[r](https://r.com)\n")
+    assert any("Sources" in g for g in gaps) and not any("Refs" in g for g in gaps)
 
 
 def test_findings_to_patches_additive_with_target() -> None:
