@@ -622,6 +622,7 @@ class Runner:
         _hc_cfg = getattr(session, "hill_climb_config", None) or {}
         _artifact_copied = False
         _eff_ws2 = None
+        _weaknesses_block = ""  # prior-run lessons → planner/hub constraints
         if _hc_cfg.get("auto_improve"):
             import shutil
             from studio.task_runs import TaskRunStore, task_hash as _task_hash
@@ -647,9 +648,21 @@ class Runner:
                 # including cross-task ones, carries forward. Deduplicated by
                 # exact string; exact-task lessons rank first. Degrades to
                 # exact-task-only when no embedder is available.
+                # Cap to the top-N most relevant lessons (exact-task first). The
+                # full accumulated set across many prior runs can be dozens of
+                # items; injecting all of them bloats the requirement and makes
+                # the planner explode each lesson into its own phase. 10 is plenty
+                # of signal without overwhelming the plan.
+                _MAX_INJECTED_WEAKNESSES = 10
                 _all_weaknesses = _store.accumulated_weaknesses(
                     requirement, _thash, embedder=self._embedder,
-                )
+                )[:_MAX_INJECTED_WEAKNESSES]
+                # Weaknesses are CONSTRAINTS for the planner/hub (quality bar to
+                # meet), NOT tasks to decompose — threaded via _weaknesses_block
+                # into _plan_from_epics so epic planning treats them correctly,
+                # and onto session.weaknesses so each phase hub sees them too.
+                _weaknesses_block = "\n".join(f"- {w}" for w in _all_weaknesses)
+                session.weaknesses = _all_weaknesses  # hub reads getattr(session,"weaknesses")
                 _fix_items = "\n".join(
                     f"  {i+1}. {w}" for i, w in enumerate(_all_weaknesses)
                 )
@@ -714,9 +727,15 @@ class Runner:
             self._emit(LoopSeedEvent(loop_id=session.seed_loop_id, steps=seed_steps))
         elif use_llm:
             # Planner runs on base_client (no tool loop — planning needs no web).
-            plan_obj = _plan_from_epics(requirement, base_client)
+            # Plan from the CLEAN task (not the weakness/research-finding-bloated
+            # `requirement`) and pass prior-run lessons as a constraints block, so
+            # epic planning treats them as a quality bar — never decomposing each
+            # weakness into its own phase.
+            plan_obj = _plan_from_epics(
+                _original_requirement, base_client, weaknesses_block=_weaknesses_block
+            )
         else:
-            plan_obj = plan(requirement)
+            plan_obj = plan(_original_requirement)
         # Capture the plan-as-dicts once: the PlanEvent payload AND the input the
         # Loop Doctor audits (its clear_stopping check walks this DAG at run end).
         plan_step_dicts = [
