@@ -283,8 +283,13 @@ export const useRunStore = create<RunState>((set) => ({
           return { graph: { nodes: event.payload.nodes, edges: event.payload.edges } };
 
         case "phase_start":
+          // Adopt the PLANNED fan-out up front so agents render as running during
+          // the phase; phase_done later reconciles to the real count.
           return {
-            phases: setPhase(state.phases, event.payload.step_id, { state: "running" }),
+            phases: setPhase(state.phases, event.payload.step_id, {
+              state: "running",
+              n_agents: event.payload.n_agents ?? null,
+            }),
           };
 
         case "agent_event":

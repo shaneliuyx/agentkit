@@ -112,10 +112,18 @@ class GraphEvent(StudioEvent):
 
 @dataclass(frozen=True)
 class PhaseStartEvent(StudioEvent):
-    """``phase_start`` — node → running (pulse)."""
+    """``phase_start`` — node → running (pulse).
+
+    ``n_agents`` is the PLANNED fan-out (the sizing cap), emitted up front so the
+    DAG renders the right number of agents as RUNNING during the phase instead of
+    a default guess that only corrects to the real count at ``phase_done`` (when
+    the agents would otherwise appear already-settled, never animating). ``None``
+    when no sizing config is set (falls back to the layout default).
+    """
 
     EVENT_TYPE: str = field(default="phase_start", init=False, repr=False)
     step_id: str = ""
+    n_agents: int | None = None
 
 
 @dataclass(frozen=True)

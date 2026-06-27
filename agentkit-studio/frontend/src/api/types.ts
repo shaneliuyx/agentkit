@@ -125,6 +125,8 @@ export interface GraphPayload {
 
 export interface PhaseStartPayload {
   step_id: string;
+  /** Planned fan-out (sizing cap), so the DAG sizes agents up front; null = use default. */
+  n_agents?: number | null;
 }
 
 export interface AgentEventPayload {

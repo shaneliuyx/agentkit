@@ -1167,7 +1167,10 @@ class Runner:
 
             self._current_step_id = step.id
             self._phase_captured = 0
-            self._emit(PhaseStartEvent(step_id=step.id))
+            # Planned fan-out (sizing cap + 1 reduce) so the DAG shows the agents
+            # as RUNNING up front, not a default guess corrected only at phase_done.
+            _planned_n = (_sizing_cfg.max_agents + 1) if _sizing_cfg is not None else None
+            self._emit(PhaseStartEvent(step_id=step.id, n_agents=_planned_n))
 
             # router panel
             self._emit(build_router_event(step))
