@@ -727,16 +727,39 @@ the STAR reducer is the active consolidation engine — not a generic synthesis.
   **reducer hook** on `run_plan` (keeps `agentkit` core domain-free: core only
   learns "use this reducer instead of the default synthesis"; the section/weakness
   semantics stay in `studio`).
+- **No `Section` dataclass is threaded through core.** Sections are already
+  encoded as the artifact's `##` markdown headings, and weaknesses are already
+  `[## Section]`-tagged (§11.4). The reducer consumes artifact-text + tagged
+  weaknesses as context — the markdown *is* the section-keyed structure.
 - **Every phase** runs this reduce and writes the section-keyed artifact back with
-  the existing grow-only anti-regression ratchet (`len(out) >= _seed_len`, then
+  a grow-only anti-regression ratchet (`len(out) >= _seed_len`, then
   `_seed_len = len(out)`), so the document is monotonic across phases and epochs.
 
-**Status.** Landed: force-STAR-under-hill-climb (§4.4) + the breadth cap.
-**Pending:** the `run_plan` reducer hook, the `Section{document, weaknesses}`
-handoff type, and per-phase section-aware reduce (generalizing the last-phase
-additive-merger at `runner.py` `is_last` block to every phase). This subsumes the
-earlier "pin last phase" idea — with every hill-climb phase STAR + section-aware,
-no special last-phase casing is needed.
+**Implementation.**
+- Core hook: `run_plan(reducer: Callable[[list[str]], tuple[str,int]] | None)`.
+  `_run_star` calls it instead of the generic synthesis when set; module global
+  `_REDUCER` (mirrors `_POOL_WORKERS`/`_MAX_SPOKES`).
+- Studio: `_make_section_reducer(client, artifact_text, weaknesses)` builds the
+  merge/refine/review closure; the runner passes it to `run_plan` whenever
+  `_artifact_copied` (hill-climb), reading artifact.md fresh each phase.
+- Per-phase writeback generalized from the `is_last` block to every phase with
+  the grow-only ratchet. Subsumes the earlier "pin last phase" idea — every
+  hill-climb phase is STAR + section-aware, so no special last-phase casing.
+
+**Status — LANDED.** Tests: `test_run_plan_star_uses_injected_reducer`,
+`test_run_plan_reducer_default_is_generic_synthesis` (core),
+`test_section_reducer_merges_with_artifact_and_weaknesses` (studio).
+
+**`is_last` is load-bearing — do NOT remove.** Two distinct roles, both essential:
+1. **Weakness lifecycle** (`if _gaps and not is_last`, `runner.py:1426` + post-loop
+   `mine_weaknesses_from_outputs` → `_store.record`): non-last phase gaps re-enter
+   the in-run ledger (retried THIS run); last-phase gaps are NOT re-queued → they
+   stay unsolved → mined from the final output → persisted to the weakness DB for
+   the NEXT run. A weakness that got solved is absent from the final output → not
+   mined → not written back → it drops off. This is the cross-epoch hand-off.
+2. **Document-merge prompt** (`if is_last and upstream`, `runner.py:1104`): shapes
+   the last-phase WORKER prompts (a different stage than the injected reducer,
+   which consolidates worker drafts) — so it is not redundant with §4.5's reducer.
 Hardcoded defaults in `SizingConfig` are never used directly by the runner.
 
 ```python

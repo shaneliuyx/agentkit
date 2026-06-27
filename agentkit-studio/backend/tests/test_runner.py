@@ -195,6 +195,33 @@ def test_seeded_run_emits_loop_seed(fake_client_factory) -> None:
     assert [s["id"] for s in plan_evt.steps] == ["s1", "s2"]
 
 
+def test_section_reducer_merges_with_artifact_and_weaknesses() -> None:
+    """_make_section_reducer (DESIGN §4.5) builds a run_plan reducer hook that
+    feeds the current artifact + section weaknesses + worker drafts to the LLM
+    and returns its merged output + token count."""
+    from agentkit.types import ChatResult
+    from studio.runner import _make_section_reducer
+
+    captured: dict = {}
+
+    class _C:
+        def chat(self, messages, tools=None) -> ChatResult:
+            captured["prompt"] = messages[-1]["content"]
+            return ChatResult(text="  MERGED ARTIFACT  ", total_tokens=12)
+
+    reduce = _make_section_reducer(
+        _C(), "## Intro\nseed text", ["## Intro: missing citation"]
+    )
+    text, tok = reduce(["worker found source X", "worker found source Y"])
+
+    assert text == "MERGED ARTIFACT"        # stripped
+    assert tok == 12
+    p = captured["prompt"]
+    assert "## Intro" in p and "missing citation" in p   # artifact + weakness checklist
+    assert "worker found source X" in p                  # worker drafts included
+    assert "PRESERVE every existing section" in p        # additive contract present
+
+
 def test_hill_climb_forces_star_topology(fake_client_factory, tmp_path) -> None:
     """auto_improve on → every phase forced to STAR (DESIGN §11.4), overriding
     auto-derived topology. 'compare ...' would normally classify to MESH; under

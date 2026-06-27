@@ -34,7 +34,7 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Callable
 
 from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
 from agentkit.planner.core import Plan, PlanStep
@@ -230,6 +230,15 @@ def _spoke_cap() -> int:
     ``_facets``), so 3 nudges is a sane unbounded-caller default.
     """
     return _MAX_SPOKES if _MAX_SPOKES is not None else _DEFAULT_PEERS
+
+
+# Optional injected reducer for STAR fan-out: a callable taking the worker
+# drafts (list[str]) and returning (final_text, tokens). Set by run_plan; None =
+# use the built-in generic synthesis. Lets the ORCHESTRATOR own a domain-specific
+# consolidation — e.g. Studio's section-aware merge/refine/review against each
+# section's weakness list (DESIGN §4.5) — without agentkit core learning about
+# sections or weaknesses. The reducer is a black box from core's point of view.
+_REDUCER: Callable[[list[str]], tuple[str, int]] | None = None
 _PIPELINE_STAGES = ("Outline the approach.", "Develop the details.",
                     "Produce the final result.")
 
@@ -259,11 +268,16 @@ def _run_star(
         _charge(budget, tok)
         tokens += tok
         drafts.append(text)
-    synthesis = "\n\n".join(f"[worker {i + 1}] {d}" for i, d in enumerate(drafts))
-    final, rtok = _chat(
-        client,
-        f"Synthesize these independent findings into one answer:\n\n{synthesis}",
-    )
+    if _REDUCER is not None:
+        # Orchestrator-owned consolidation (§4.5: section-aware merge/refine/
+        # review). Core stays domain-free — it just hands over the worker drafts.
+        final, rtok = _REDUCER(drafts)
+    else:
+        synthesis = "\n\n".join(f"[worker {i + 1}] {d}" for i, d in enumerate(drafts))
+        final, rtok = _chat(
+            client,
+            f"Synthesize these independent findings into one answer:\n\n{synthesis}",
+        )
     _charge(budget, rtok)
     return final, len(facets) + 1, tokens + rtok
 
@@ -448,6 +462,7 @@ def run_plan(
     budget: FanoutBudget | None = None,
     max_workers: int = 4,
     max_agents: int | None = None,
+    reducer: Callable[[list[str]], tuple[str, int]] | None = None,
 ) -> DynamicPlanResult:
     """Execute every step under its assigned topology, in ``depends_on`` order.
 
@@ -485,9 +500,10 @@ def run_plan(
     Raises:
         BudgetExceeded: if a ``budget`` ceiling is crossed mid-fan-out.
     """
-    global _POOL_WORKERS, _MAX_SPOKES
+    global _POOL_WORKERS, _MAX_SPOKES, _REDUCER
     _POOL_WORKERS = max_workers      # concurrency lever (thread pool size)
     _MAX_SPOKES = max_agents         # breadth lever (spoke COUNT cap) — distinct
+    _REDUCER = reducer               # optional injected STAR consolidation (§4.5)
     t0 = time.perf_counter()
     outputs: dict[str, str] = {}
     runs: list[StepRun] = []

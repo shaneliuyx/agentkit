@@ -501,6 +501,45 @@ def _unresolved_block(weaknesses: list[str], repeat_failed: set[str], limit: int
     )
 
 
+def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
+    """Build the section-aware STAR reducer closure (DESIGN §4.5).
+
+    Returns a callable matching ``run_plan``'s reducer hook:
+    ``(worker_drafts: list[str]) -> (merged_text, tokens)``. It MERGES / REFINES
+    / REVIEWS each worker's per-section output into the CURRENT artifact, using
+    the section-tagged weakness list as the per-section review checklist. Additive
+    + preserve-verbatim; the runner's grow-only writeback ratchet rejects any
+    shrink. Sections are the artifact's ``##`` headings — no separate Section type
+    is threaded through core; the structure lives in the markdown + weakness tags.
+    """
+    wk_block = "\n".join(f"- {w}" for w in (weaknesses or [])) or "(none)"
+    art_block = artifact_text.strip() or "(empty — create the sections from worker output)"
+
+    def reduce(drafts: list[str]) -> tuple[str, int]:
+        workers = "\n\n".join(f"[worker {i + 1}]\n{d}" for i, d in enumerate(drafts))
+        prompt = (
+            "You are the section-aware reducer of a multi-worker research phase.\n"
+            "MERGE / REFINE / REVIEW each worker output into the CURRENT ARTIFACT, "
+            "section by section (sections are the '##' headings).\n\n"
+            "RULES — violating these REGRESSES the deliverable:\n"
+            "  - PRESERVE every existing section VERBATIM; only ADD sourced content "
+            "from a worker output. Output length MUST be >= the current artifact.\n"
+            "  - Treat each section's weaknesses below as a review checklist: if a "
+            "worker resolves one (with a real source/URL), fold it in.\n"
+            "  - No worker content for a section -> leave that section exactly as-is.\n\n"
+            f"SECTION WEAKNESSES (review checklist):\n{wk_block}\n\n"
+            f"CURRENT ARTIFACT:\n--- BEGIN ---\n{art_block}\n--- END ---\n\n"
+            f"WORKER OUTPUTS:\n{workers}\n\n"
+            "Output ONLY the full updated artifact markdown (every original section "
+            "intact). Do NOT include the '--- BEGIN ---' / '--- END ---' delimiter "
+            "lines — they frame the input only."
+        )
+        res = client.chat([{"role": "user", "content": prompt}])
+        return (res.text or "").strip(), int(getattr(res, "total_tokens", 0) or 0)
+
+    return reduce
+
+
 def _research_findings_to_patches(text: str) -> list:
     """Convert RESEARCH_FINDING blocks → ADDITIVE DocPatches (DESIGN §11.3).
 
@@ -1185,10 +1224,26 @@ class Runner:
             # the same task from appearing as "remaining" while it is executing.
             _ledger.mark_in_flight(step.id)
 
+            # §4.5: under hill-climb, inject the section-aware reducer so the STAR
+            # reduce step merges/refines/reviews worker output into the current
+            # artifact (vs the generic synthesis). Read the running artifact fresh
+            # each phase — it is the section-keyed handoff from the prior phase.
+            _reducer = None
+            if _artifact_copied and _eff_ws2 is not None:
+                _cur_art = ""
+                try:
+                    _cur_art = (_eff_ws2 / session.session_id / "artifact.md").read_text()
+                except OSError:
+                    pass
+                _reducer = _make_section_reducer(
+                    client, _cur_art, getattr(session, "weaknesses", []) or []
+                )
+
             try:
                 result = run_plan(
                     sub_plan, client, budget=budget,
                     max_workers=_max_workers, max_agents=_max_agents,
+                    reducer=_reducer,
                 )
             except BudgetExceeded as exc:
                 self._emit(
@@ -1247,11 +1302,18 @@ class Runner:
             # only overwrite if the new output is >5000 chars AND not shorter than
             # the seed — a thin/failed run must keep the prior good doc, never
             # shrink it (worst case = no improvement, never regression).
-            if (is_last and _artifact_copied and _eff_ws2 is not None
-                    and len(sr.output.strip()) > 5000
+            # §4.5: write EVERY phase's reduced output back (was last-phase only),
+            # so artifact.md is the running section-keyed handoff to the next
+            # phase. Grow-only ratchet: only overwrite if not shorter than the
+            # current artifact, then raise _seed_len — the doc grows monotonically
+            # across phases AND epochs, never regresses (a thin/failed reduce keeps
+            # the prior good doc).
+            if (_artifact_copied and _eff_ws2 is not None
+                    and len(sr.output.strip()) > 0
                     and len(sr.output) >= _seed_len):
                 try:
                     (_eff_ws2 / session.session_id / "artifact.md").write_text(sr.output)
+                    _seed_len = len(sr.output)   # ratchet up for the next phase
                 except OSError:
                     pass
 

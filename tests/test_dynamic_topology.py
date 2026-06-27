@@ -387,6 +387,32 @@ def test_run_plan_max_agents_caps_map_buckets():
 
 
 @pytest.mark.unit
+def test_run_plan_star_uses_injected_reducer():
+    """run_plan(reducer=fn) replaces STAR's generic synthesis with fn(drafts)
+    (DESIGN §4.5 — the orchestrator injects a section-aware merge/refine/review
+    without agentkit core learning about sections/weaknesses)."""
+    seen = {}
+
+    def my_reducer(drafts):
+        seen["drafts"] = list(drafts)
+        return ("MERGED::" + " | ".join(drafts), 9)
+
+    p = Plan(task="t", steps=(PlanStep(id="s1", description="gather sources on RAG", topology=STAR),))
+    result = run_plan(p, FakeClient(), reducer=my_reducer)
+    assert result.runs[0].output.startswith("MERGED::")
+    assert len(seen["drafts"]) >= 1               # reducer got the worker drafts
+    assert result.runs[0].tokens >= 9             # reducer tokens added to the sum
+
+
+@pytest.mark.unit
+def test_run_plan_reducer_default_is_generic_synthesis():
+    """No reducer → unchanged generic STAR synthesis (back-compat)."""
+    p = Plan(task="t", steps=(PlanStep(id="s1", description="gather sources on RAG", topology=STAR),))
+    result = run_plan(p, FakeClient())
+    assert not result.runs[0].output.startswith("MERGED::")
+
+
+@pytest.mark.unit
 def test_run_plan_no_max_agents_preserves_cli_map_one_per_item():
     # Back-compat: with no cap, MAP keeps one-worker-per-item (CLI behaviour).
     from agentkit.topology.core import MAP
