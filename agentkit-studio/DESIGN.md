@@ -607,22 +607,24 @@ from dataclasses import dataclass
 class SizingConfig:
     min_tasks_per_agent: int = 3   # UI default; overridden by Loop Config panel slider
     max_tasks_per_agent: int = 5   # UI default; overridden by Loop Config panel slider
+    max_agents: int = 5            # HARD ceiling on agent count (menu slider). A
+                                   # flooded task list can never explode the topology
+                                   # (2026-06-27 gap-flood fix). Product spec: 3..5.
 
 def compute_n_agents(n_tasks: int, cfg: SizingConfig = SizingConfig()) -> int:
     """
-    Derive agent count so each agent gets at most max_tasks_per_agent tasks.
-    Last agent may receive fewer than min_tasks_per_agent (that is acceptable).
+    Derive agent count so each agent gets at most max_tasks_per_agent tasks,
+    then CLAMP to max_agents. Last agent may receive fewer than min_tasks_per_agent.
 
-    Examples (max=5):
+    Examples (max_tasks=5, max_agents=5):
       n=3  -> 1 agent  (3 tasks)
-      n=5  -> 1 agent  (5 tasks)
       n=6  -> 2 agents (5+1)
-      n=10 -> 2 agents (5+5)
       n=11 -> 3 agents (5+5+1)
+      n=74 -> 5 agents (capped — pre-fix this was ceil(74/5)=15 → topology explosion)
     """
     if n_tasks <= 0:
         return 1
-    return max(1, math.ceil(n_tasks / cfg.max_tasks_per_agent))
+    return max(1, min(cfg.max_agents, math.ceil(n_tasks / cfg.max_tasks_per_agent)))
 
 def assign_tasks(
     tasks: list, cfg: SizingConfig = SizingConfig()
@@ -1033,17 +1035,92 @@ The reducer **never regenerates the document**. It:
    claims — and emits them as structured, actionable items
    (`"§Verifier: 3 claims lack source URLs"`), never filling them itself.
 
-### 11.4 Gap routing
+### 11.4 Gap routing — the section is the unit of work
+
+**Section is the single currency of the loop.** Every unit of work — a detected
+gap, a consolidated task, a hub assignment, a patch, a carried-forward weakness —
+is keyed by the artifact section it belongs to. This is load-bearing: an agent may
+only patch sections **assigned to it** (§11.2 + the ASSIGNED validation, §3.3), so
+any work item that is *not* tied to a section is unactionable — it would be handed
+to an agent with no mandate to touch it. Keying everything by section also makes
+the bound **`n_agents ≤ n_sections`** propagate everywhere for free.
+
+**Detection → consolidation (the 2026-06-27 gap-flood fix).** `_detect_gaps`
+flags only **empty / placeholder** sections — NOT "prose without an inline URL"
+(that old rule mis-flagged every well-formed section of a properly-cited report,
+which keeps its citations in a References section, producing ~74 false gaps that
+exploded agent sizing to 18 and burned 2.5M tokens). Each gap is tagged with its
+nearest **top-level (h1/h2)** section. Before anything is sized or routed, gaps are
+**consolidated to distinct top-level sections** (`_gap_sections`): 74 raw sub-gaps
+collapse to the ~6 real sections that own them.
 
 ```
-gap detected in phase N:
-  N is not the last phase  → enqueue as a TaskRecord in the TaskLedger
-                             → phase N+1's workers (with search) fill it (this run)
-  N is the last phase      → record as a weakness in task_runs.db
-                             → next run's hill-climb injects it as a constraint
+gap detected in phase N (tagged with its top-level section):
+  consolidate → distinct sections needing work          (bounded by the document)
+  N is not the last phase  → one TaskRecord PER SECTION in the TaskLedger
+                             → handed forward to phase N+1's hub, which RE-JUDGES
+                               and assigns within its own bounded sizing (this run)
+  N is the last phase       → record as SECTION-BOUND weaknesses in task_runs.db,
+                               format "[## Section] issue"
+                             → next run's hill-climb injects each weakness only to
+                               the agent that owns its section
                                (feeds the §2.4 accumulated_weaknesses pipeline,
                                 deduped + consolidated)
 ```
+
+**Sizing is driven by consolidated sections, never raw gap count**, and clamped by
+`SizingConfig.max_agents` (menu-configurable, default 5 — the "≥3 ≤5 agents"
+product spec). So a noisy gap list can no longer inflate the topology: this is the
+shared-ledger-poisoning fix (a completed phase's count cannot be re-expanded by a
+later flood). `compute_n_agents` returns `min(max_agents, ceil(n / max_per_agent))`.
+
+**Section-bound weaknesses.** `mine_weaknesses_from_outputs` prefixes each weakness
+with the section it concerns (`[## Sources] missing URLs`; `[document]` only for
+whole-doc/structural issues). On the next run the hub assigns sections, and each
+worker routes weaknesses by their label:
+
+```
+[## Section] weakness  → ONLY the agent that owns that section fixes it
+                         (an agent cannot patch a section it does not own).
+[document]   weakness  → EVERY agent fixes it within its OWN assigned sections
+                         (a global bar — grounding, no truncation, consistent
+                         terminology — applied per-section). No agent edits a
+                         section outside its set, so the broadcast stays
+                         conflict-free under the additive-patch contract (§11.3).
+```
+
+The `[document]` broadcast is why a structural weakness with no single owner still
+gets acted on: instead of being orphaned, it is handed to **all** agents, each of
+whom enforces it on the sections it holds. This bounds weakness count by section,
+and closes the loop: detection → consolidation → assignment → modification →
+carry-forward all share the section key.
+
+**Loop-closure check — surface, never hide.** Without closure, recorded weaknesses
+*recur* across runs (observed v8→v24: same "unverifiable sources / truncation / no
+metrics") because the detector that re-finds a weakness does not know it was
+*already injected and not fixed*. A **repeat-failure** is a weakness recorded in
+**≥ `REPEAT_LIMIT` (3) distinct prior runs** of this task (`TaskRunStore.
+repeat_failures`, counted over normalized text, section label stripped).
+
+A repeat-failure is **not dropped and not hidden** — that would silently strand
+work the user never sees. Instead:
+
+```
+1. NEVER drop it. It flows through the normal handoff (ledger → next phase), so
+   the LAST phase gets a final attempt with full-document context + search.
+2. After the run, any repeat-failure STILL recorded this run (attempted again,
+   incl. the last phase, and still open) is APPENDED below the result as a
+   "## ⚠️ Known unresolved issues" block — shown in the chat window so the user
+   knows exactly what could not be resolved (_unresolved_block, runner end).
+3. It is scored BEFORE the block is appended, so the honesty footer never
+   inflates or deflates the quality score.
+```
+
+This is reducer/run-end owned (the producer), and it is **transparency over
+silent convergence**: a genuinely unfixable weakness (the data does not exist, an
+infra 503) is surfaced to the user every run until resolved, rather than swept
+away after N rounds. `repeat_failures` (history/policy) lives in `TaskRunStore`;
+the run end owns rendering the user-facing report.
 
 Reducer gaps are a **better weakness source** than `mine_weaknesses_from_outputs`:
 they are concrete and grounded in what the reducer actually saw, so the next run's

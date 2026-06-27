@@ -265,6 +265,12 @@ def _build_worker_cot_prompt(
         "      Copy the heading verbatim from CURRENT DELIVERABLE CONTENT — do not paraphrase.\n"
         "    - Each patch targets ONLY sections you were assigned.\n"
         "    - Do NOT write patches for sections assigned to other agents.\n"
+        "    - Prior weaknesses are labeled by section. Fix a \"[## Section]\" weakness\n"
+        "      ONLY if that section is one you were assigned — you cannot patch a\n"
+        "      section you do not own. A \"[document]\" weakness has NO single owner, so\n"
+        "      EVERY agent must address it within its OWN assigned sections (apply the\n"
+        "      global fix — e.g. grounding, no truncation, consistent terminology — to\n"
+        "      each section you hold). Never edit a section outside your set. (§11.4)\n"
         "    - Prefer insert_after/append over replace — additive patches on distinct\n"
         "      anchors commute; replace patches on the same anchor conflict.\n"
         "    - Use the PATCHES JSON format exactly (see the patch schema).\n\n"
@@ -420,27 +426,76 @@ def _build_skeleton(goal: str, client) -> str:
     )
 
 
-def _detect_gaps(artifact_text: str) -> list[str]:
+def _detect_gaps(artifact_text: str) -> list[tuple[str, str]]:
     """Detect gaps in the merged deliverable (DESIGN §11.4).
 
-    A gap is a section that is empty, a placeholder, or carries substantive prose
-    with no source URL (unsourced claims). Returns actionable gap strings — routed
-    to the TaskLedger (non-last phase, filled this run) or to weaknesses in the DB
-    (last phase, filled next run). The count is the loop-until-dry signal (§11.7).
+    A gap is a section that is **empty or a placeholder**. Each gap is tagged with
+    its nearest **top-level** section (h1/h2) so the caller can consolidate by
+    section before sizing agents — a report has a bounded number of top-level
+    sections, so the worklist (and thus agent count) is structurally bounded.
+
+    Returns (top_level_section, message) tuples. Routed by the caller: non-last
+    phase → consolidated to distinct sections, handed to the next phase via the
+    ledger; last phase → messages carried to the next run as weaknesses.
+
+    NOTE (2026-06-27 fix): the old "substantive prose but no inline http → gap"
+    rule mis-flagged every well-formed section of a properly-cited report (whose
+    citations live in a References section, not inline) — ~74 false gaps that
+    exploded agent sizing. Removed: prose with content is NOT a gap; only
+    empty/placeholder sections are.
     """
-    gaps: list[str] = []
-    parts = _re.split(r'(?m)^(#{2,6}\s+.+)$', artifact_text)
+    gaps: list[tuple[str, str]] = []
+    parts = _re.split(r'(?m)^(#{1,6}\s+.+)$', artifact_text)
     # parts = [pre, heading1, body1, heading2, body2, ...]
     it = iter(parts[1:])
+    top = "(document root)"
     for heading in it:
         body = next(it, '')
         h, b = heading.strip(), body.strip()
+        level = len(h) - len(h.lstrip('#'))
+        if level <= 2:
+            top = h  # nearest h1/h2 owns the sub-sections beneath it
         low = b.lower()
         if not b or '_(pending' in low or 'placeholder' in low:
-            gaps.append(f"{h}: empty/placeholder — needs sourced content")
-        elif 'http' not in low and len(b) > 80:
-            gaps.append(f"{h}: substantive prose but no source URL — add citations")
+            gaps.append((top, f"{h}: empty/placeholder — needs sourced content"))
     return gaps
+
+
+def _gap_sections(gaps: list[tuple[str, str]]) -> list[str]:
+    """Consolidate gaps to distinct top-level sections (DESIGN §11.4).
+
+    Agent sizing is driven by SECTIONS needing work, not raw gap count: a report
+    has a bounded number of top-level sections, so n_agents <= n_sections and the
+    topology cannot explode (the 2026-06-27 gap-flood fix). Order-preserving.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for top, _ in gaps:
+        if top not in seen:
+            seen.add(top)
+            out.append(top)
+    return out
+
+
+def _unresolved_block(weaknesses: list[str], repeat_failed: set[str], limit: int) -> str:
+    """User-facing 'known unresolved issues' block (DESIGN §11.4 — surface, don't hide).
+
+    A repeat-failure (recorded in >= ``limit`` prior runs) still present in this
+    run's weaknesses was attempted again — including the last phase — and remains
+    open. It is appended below the result shown in the chat window so the user
+    knows what could not be resolved, instead of being silently dropped. Returns
+    '' when nothing is still open.
+    """
+    from studio.task_runs import _norm_weakness
+    still_open = [w for w in weaknesses if _norm_weakness(w) in repeat_failed]
+    if not still_open:
+        return ""
+    return (
+        "\n\n---\n\n## ⚠️ Known unresolved issues\n\n"
+        f"_Attempted across {limit}+ runs (including this run's final phase) and "
+        "still open — surfaced, not hidden:_\n\n"
+        + "\n".join(f"- {w}" for w in still_open)
+    )
 
 
 def _research_findings_to_patches(text: str) -> list:
@@ -747,6 +802,11 @@ class Runner:
         _eff_ws2 = None
         _weaknesses_block = ""  # prior-run lessons → planner/hub constraints
         _seed_len = 0           # length of the seeded prior artifact (anti-regression)
+        # §11.4 loop-closure check: normalized weaknesses recorded in >= REPEAT_LIMIT
+        # prior runs of this task were injected and never fixed. The reducer drops
+        # them from its handoff (below) instead of grinding on them forever. Empty
+        # when not hill-climbing.
+        _repeat_failed: set[str] = set()
         if _hc_cfg.get("auto_improve"):
             import shutil
             from studio.task_runs import TaskRunStore, task_hash as _task_hash
@@ -754,6 +814,7 @@ class Runner:
             # Pass the embedder so each run's requirement is embedded for R10
             # cross-task similarity retrieval (no-op when embedder is None).
             _store = TaskRunStore(embedder=self._embedder)
+            _repeat_failed = _store.repeat_failures(_thash)
             # Use latest run with actual artifact content — LLM self-eval scores
             # are noisy; the most recent non-empty artifact has accumulated the
             # most incremental work and is the best hill-climb seed.
@@ -1259,15 +1320,30 @@ class Runner:
                 # merged doc (worst case = no improvement, never regression).
                 if _rr.text and len(_rr.text) >= _seed_len:
                     write_artifact(_art_file, _rr.text)
-                # §11.4 gap routing: detect gaps in the merged doc; non-last phase
-                # → enqueue as TaskRecords (filled this run); last phase → stash as
-                # weaknesses (filled next run). Count drives loop-until-dry (§11.7).
+                # §11.4 gap routing: detect empty/placeholder sections, then
+                # CONSOLIDATE by top-level section before routing so a noisy gap
+                # list can't inflate agent sizing (2026-06-27 fix). Non-last phase
+                # → hand the distinct sections to the next phase via the ledger
+                # (one bounded task per section); last phase → carry gap messages
+                # to the next run as weaknesses.
                 _gaps = _detect_gaps(_rr.text or "")
+                # §11.4 closure: a repeat-failure (recorded in >= REPEAT_LIMIT prior
+                # runs) is NEVER dropped or hidden. It flows normally through handoff
+                # so the LAST phase gets a final attempt; whatever is still open after
+                # the run is surfaced to the user below the result (see run end). We
+                # only TRACK them here for that report — _repeat_failed is computed at
+                # run start and consumed at run end.
                 if _gaps and not is_last:
-                    for _gi, _g in enumerate(_gaps):
-                        _ledger.add_task(TaskRecord(id=f"gap-{step.id}-{_gi}", description=_g))
-                elif _gaps:  # last phase → carry to next run via weaknesses
-                    _reducer_gaps.extend(_gaps)
+                    for _si, _sec in enumerate(_gap_sections(_gaps)):
+                        _ledger.add_task(TaskRecord(
+                            id=f"gap-{step.id}-{_si}",
+                            description=f"Revise/source section: {_sec}",
+                        ))
+                elif _gaps:  # last phase → carry to next run as SECTION-bound weaknesses
+                    # Keep the section label so next run routes each weakness to the
+                    # agent that owns that section (an agent can't patch unassigned
+                    # sections — DESIGN §11.4).
+                    _reducer_gaps.extend(f"[{_sec}] {_m}" for _sec, _m in _gaps)
 
         # budget gauge
         if budget is not None:
@@ -1420,6 +1496,16 @@ class Runner:
             if _reducer_gaps:
                 _seen_w = set(_weaknesses)
                 _weaknesses = [g for g in _reducer_gaps if g not in _seen_w] + _weaknesses
+            # §11.4 surface (never hide): a repeat-failure (>= REPEAT_LIMIT prior runs)
+            # that is STILL recorded this run was attempted again — including the last
+            # phase — and remains open. Append it visibly below the result shown in the
+            # chat window so the user knows what could not be resolved, instead of
+            # silently dropping it.
+            if _repeat_failed:
+                from studio.task_runs import REPEAT_LIMIT
+                result_output = (result_output or "").rstrip() + _unresolved_block(
+                    _weaknesses, _repeat_failed, REPEAT_LIMIT
+                )
             _version = _store.next_version(_thash)
             _store.record(
                 TaskRun(

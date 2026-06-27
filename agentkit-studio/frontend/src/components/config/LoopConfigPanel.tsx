@@ -115,6 +115,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const [useLatestPrior, setUseLatestPrior] = useState(true);
   const [minTasksPerAgent, setMinTasksPerAgent] = useState(3);
   const [maxTasksPerAgent, setMaxTasksPerAgent] = useState(5);
+  const [maxAgents, setMaxAgents] = useState(5);
   const [hcStatus, setHcStatus] = useState<string | null>(null);
   const [schedStatus, setSchedStatus] = useState<string | null>(null);
 
@@ -594,6 +595,14 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                     onChange={(e) => setMaxTasksPerAgent(Number(e.target.value))}
                   />
                 </div>
+                <div className="lc-field">
+                  <label>Max agents (cap): <strong>{maxAgents}</strong></label>
+                  <input
+                    type="range" min={1} max={10}
+                    value={maxAgents}
+                    onChange={(e) => setMaxAgents(Number(e.target.value))}
+                  />
+                </div>
               </div>
               {hcStatus && <p className="loop-config-hint">{hcStatus}</p>}
               {!sessionId && (
@@ -616,6 +625,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                       use_latest_prior: useLatestPrior,
                       min_tasks_per_agent: minTasksPerAgent,
                       max_tasks_per_agent: maxTasksPerAgent,
+                      max_agents: maxAgents,
                     };
                     setConfiguredHillClimb(cfg);
                     if (sessionId) {

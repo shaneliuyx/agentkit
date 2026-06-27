@@ -595,6 +595,16 @@ def set_hill_climb(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "max_epochs": int(body.get("max_epochs") or 5),
         "auto_improve": bool(body.get("auto_improve", False)),
     }
+    # Agent Sizing sliders (min/max tasks per agent, max-agents cap) ride in the
+    # same panel payload, but the runner reads them from loop_config
+    # (_sizing_cfg = loop_config.sizing()), NOT hill_climb_config — so sync them
+    # here or they are silently dropped (they only matched the 3/5 defaults by
+    # coincidence before). 2026-06-27 menu-configurable cap fix.
+    _lc = getattr(session, "loop_config", None) or LoopConfig()
+    for _k in ("min_tasks_per_agent", "max_tasks_per_agent", "max_agents"):
+        if body.get(_k) is not None:
+            setattr(_lc, _k, int(body[_k]))
+    session.loop_config = _lc
     return {"status": "ok", "hill_climb_config": session.hill_climb_config}
 
 

@@ -22,6 +22,11 @@ class SizingConfig:
 
     min_tasks_per_agent: int = 3
     max_tasks_per_agent: int = 5
+    max_agents: int = 5  # hard ceiling on agent count, independent of task count
+    #   Backstop against a flooded task list spawning unbounded agents (the
+    #   2026-06-27 gap-flood: 74 false gaps -> ceil(74/5)=18 agents -> 2.5M tokens).
+    #   Real bounding is upstream via section-consolidation; this is the floor
+    #   under it. Matches the ">=3 <=5 agents" product requirement.
 
 
 def compute_n_agents(n_tasks: int, cfg: SizingConfig = SizingConfig()) -> int:
@@ -41,7 +46,7 @@ def compute_n_agents(n_tasks: int, cfg: SizingConfig = SizingConfig()) -> int:
     """
     if n_tasks <= 0:
         return 1
-    return max(1, math.ceil(n_tasks / cfg.max_tasks_per_agent))
+    return max(1, min(cfg.max_agents, math.ceil(n_tasks / cfg.max_tasks_per_agent)))
 
 
 def assign_tasks(tasks: list, cfg: SizingConfig = SizingConfig()) -> list[list]:

@@ -23,6 +23,8 @@ from studio.runner import (
     _parse_patches_from_output,
     _build_skeleton,
     _detect_gaps,
+    _gap_sections,
+    _unresolved_block,
     _phase_search_failed,
     _plan_from_epics,
     _research_findings_to_patches,
@@ -46,19 +48,22 @@ def test_build_skeleton_falls_back_on_bad_llm() -> None:
     assert _detect_gaps(skel)  # a fresh skeleton is all gaps → drives the fill loop
 
 
-def test_detect_gaps_flags_placeholder_and_unsourced() -> None:
+def test_detect_gaps_flags_placeholder_only() -> None:
+    # 2026-06-27 fix: ONLY empty/placeholder sections are gaps. Substantive prose
+    # whose citations live elsewhere (a References section) is NOT a gap — the old
+    # "prose without inline URL" rule mis-flagged it and exploded agent sizing.
     doc = (
-        "# Report\n"
+        "# Report\nOverview paragraph with enough words to count as real content.\n"
         "## Intro\nReal intro with [src](https://a.com) and detail.\n\n"
         "## Results\n_(pending — needs sourced content)_\n\n"
         "## Analysis\nThis section makes several substantive claims about agent loops "
-        "and verifiers and patterns but cites nothing at all, no link anywhere here.\n"
+        "and verifiers and patterns but cites nothing inline; refs live in References.\n"
     )
     gaps = _detect_gaps(doc)
-    joined = " ".join(gaps)
-    assert any("Results" in g and "placeholder" in g for g in gaps)
-    assert any("Analysis" in g and "no source URL" in g for g in gaps)
-    assert "Intro" not in joined  # sourced section is not a gap
+    msgs = " ".join(m for _, m in gaps)
+    assert any("Results" in m and "placeholder" in m for _, m in gaps)
+    assert "Intro" not in msgs      # sourced section is not a gap
+    assert "Analysis" not in msgs   # prose-without-inline-URL is NO LONGER a gap
 
 
 def test_detect_gaps_clean_doc_has_none() -> None:
@@ -68,7 +73,38 @@ def test_detect_gaps_clean_doc_has_none() -> None:
 
 def test_detect_gaps_empty_section() -> None:
     gaps = _detect_gaps("## Sources\n\n## Refs\n[r](https://r.com)\n")
-    assert any("Sources" in g for g in gaps) and not any("Refs" in g for g in gaps)
+    msgs = [m for _, m in gaps]
+    assert any("Sources" in m for m in msgs) and not any("Refs" in m for m in msgs)
+
+
+def test_unresolved_block_surfaces_still_open_repeat_failures() -> None:
+    # §11.4: a repeat-failure still present this run is appended below the result,
+    # never hidden. Normalization strips the [section] label to match history.
+    repeat_failed = {"missing urls on cited articles"}
+    weaknesses = ["[## Sources] missing URLs on cited articles", "[## Intro] too short"]
+    block = _unresolved_block(weaknesses, repeat_failed, 3)
+    assert "Known unresolved issues" in block
+    assert "missing URLs on cited articles" in block  # the persistent one surfaced
+    assert "too short" not in block                   # not a repeat-failure
+
+
+def test_unresolved_block_empty_when_nothing_persistent() -> None:
+    assert _unresolved_block(["[## Intro] too short"], {"missing urls"}, 3) == ""
+    assert _unresolved_block([], set(), 3) == ""
+
+
+def test_gap_sections_consolidate_to_top_level() -> None:
+    # Regression for the 2026-06-27 gap-flood: many empty SUB-sections collapse to
+    # their few top-level (h1/h2) parents, so the worklist (and agent count) stays
+    # bounded by the document's real section count, not the raw gap count.
+    doc = (
+        "# Report\nOverview paragraph with enough words to count as real content.\n"
+        "## Findings\nIntro to findings with body text here.\n"
+        "### Sub A\n\n### Sub B\n\n### Sub C\n\n"  # 3 empty sub-sections, one parent
+        "## Sources\n\n"                            # one empty top-level section
+    )
+    sections = _gap_sections(_detect_gaps(doc))
+    assert sections == ["## Findings", "## Sources"]  # 4 gaps → 2 top-level sections
 
 
 def test_findings_to_patches_additive_with_target() -> None:
@@ -517,3 +553,35 @@ def test_dedupe_assignment_three_agents_one_section() -> None:
     clean, overlaps = _dedupe_assignment(assigned)
     assert clean == {"a1": ["## S"], "a2": [], "a3": []}
     assert overlaps == ["## S"]  # reported once
+
+
+def test_loop_config_max_agents_flows_to_sizing() -> None:
+    # 2026-06-27: the max-agents cap is menu-configurable — it must travel
+    # from_dict → LoopConfig → SizingConfig → compute_n_agents.
+    from studio.models import LoopConfig
+    from agentkit.topology.sizing import compute_n_agents
+
+    lc = LoopConfig.from_dict({"max_agents": 3, "max_tasks_per_agent": 5})
+    assert lc.sizing().max_agents == 3
+    assert compute_n_agents(74, lc.sizing()) == 3  # pre-fix: ceil(74/5)=15
+
+
+def test_set_hill_climb_wires_sizing_into_loop_config() -> None:
+    # Regression: the hill-climb endpoint used to DROP the Agent Sizing sliders
+    # (they only matched the 3/5 defaults by coincidence). It must now patch
+    # session.loop_config, which is what the runner reads for sizing.
+    from studio.app import registry, set_hill_climb
+    from agentkit.topology.sizing import compute_n_agents
+
+    s = registry.create(
+        llm_spec={"name": "haiku", "model": "m", "endpoint": "e"},
+        embed_spec={}, llm_info={}, embed_info={}, mode="llm",
+        budget_ceiling=None,
+    )
+    set_hill_climb(s.session_id, {
+        "auto_improve": True, "max_agents": 3,
+        "max_tasks_per_agent": 4, "min_tasks_per_agent": 2,
+    })
+    cfg = registry.get(s.session_id).loop_config.sizing()
+    assert cfg.max_agents == 3 and cfg.max_tasks_per_agent == 4
+    assert compute_n_agents(74, cfg) == 3

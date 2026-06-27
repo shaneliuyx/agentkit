@@ -27,6 +27,20 @@ def test_compute_n_agents_ceil():
     assert compute_n_agents(11, cfg) == 3
 
 
+def test_compute_n_agents_capped_at_max_agents():
+    # 2026-06-27 gap-flood regression: 74 tasks would be ceil(74/5)=15 agents;
+    # the hard ceiling clamps to max_agents so the topology cannot explode.
+    cfg = SizingConfig(max_tasks_per_agent=5, max_agents=5)
+    assert compute_n_agents(74, cfg) == 5
+    assert compute_n_agents(1000, cfg) == 5
+
+
+def test_compute_n_agents_respects_configured_cap():
+    # The cap is menu-configurable (LoopConfig.max_agents → SizingConfig).
+    assert compute_n_agents(74, SizingConfig(max_tasks_per_agent=5, max_agents=3)) == 3
+    assert compute_n_agents(2, SizingConfig(max_tasks_per_agent=5, max_agents=3)) == 1
+
+
 def test_assign_tasks_empty():
     result = assign_tasks([])
     assert result == [[]]

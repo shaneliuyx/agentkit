@@ -38,6 +38,24 @@ def task_hash(requirement: str) -> str:
     return hashlib.sha256(requirement.strip().lower().encode()).hexdigest()[:12]
 
 
+# Loop-closure check (DESIGN §11.4): a weakness re-recorded in this many DISTINCT
+# prior runs of the same task was injected and never fixed — stop re-injecting it
+# so a persistently-unfixable lesson (data doesn't exist, infra 503) cannot crowd
+# out actionable ones forever.
+REPEAT_LIMIT = 3
+
+
+def _norm_weakness(w: str) -> str:
+    """Normalize a weakness for recurrence counting across runs.
+
+    Strips a leading "[section]" label, lowercases, and collapses whitespace so
+    the same lesson phrased near-identically across runs counts as one. (Coarse by
+    design — semantic drift is handled separately by _consolidate_weaknesses.)
+    """
+    s = re.sub(r"^\s*\[[^\]]*\]\s*", "", w or "")  # drop "[## Section]" / "[document]"
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
 # --- similarity retrieval helpers (R10: cross-task context history) -----------
 # task_hash is an EXACT key — only the identical requirement's history is found.
 # To also retrieve context from SIMILAR prior tasks we embed each run's
@@ -292,6 +310,21 @@ class TaskRunStore:
             kept_vecs.append(v)
         return kept
 
+    def repeat_failures(self, exact_hash: str, limit: int = REPEAT_LIMIT) -> set[str]:
+        """Normalized weaknesses re-recorded in >= ``limit`` distinct prior runs.
+
+        The loop-closure signal (DESIGN §11.4): a weakness recorded this many times
+        was injected and never fixed, so the **reducer** drops it from its handoff
+        instead of grinding on it forever. Counting and the policy live here (the
+        history layer); the reducer owns *applying* it before writing a handoff.
+        """
+        freq: dict[str, int] = {}
+        for run in self.all_runs(exact_hash):
+            for nk in {_norm_weakness(w) for w in run.weaknesses}:  # per-run distinct
+                if nk:
+                    freq[nk] = freq.get(nk, 0) + 1
+        return {nk for nk, c in freq.items() if c >= limit}
+
     def accumulated_weaknesses(
         self,
         requirement: str,
@@ -307,6 +340,11 @@ class TaskRunStore:
         semantically similar prior tasks → exact-string dedup → semantic
         consolidation (near-duplicate phrasings collapsed). With no embedder this
         degrades to exact-string-deduped exact-task weaknesses (prior behaviour).
+
+        The loop-closure check (dropping repeat-failures) is NOT applied here — it
+        is owned by the reducer at handoff time (§11.4), so a known-unfixable
+        weakness is never emitted into the loop in the first place. See
+        ``repeat_failures``.
         """
         seen: set[str] = set()
         merged: list[str] = []
@@ -437,7 +475,13 @@ def mine_weaknesses_from_outputs(
         f"(views, stars, engagement metrics) justifying the ranking?\n\n"
         f"{_scorer_section}"
         f"TASK: {requirement[:400]}\n\n{combined}\n\n"
-        f'Return a JSON array of short strings, e.g. ["Truncated mid-section", "Claims unsupported"]. '
+        f"Return a JSON array of short strings. PREFIX each weakness with the artifact "
+        f"SECTION it concerns, in square brackets — because the next run assigns each "
+        f"section to one agent, and an agent can only fix weaknesses for its own "
+        f"section. Use the section's verbatim heading (e.g. '## Sources'); use "
+        f"'[document]' only for whole-document or structural issues that no single "
+        f'section owns. Example: ["[## Sources] Missing URLs on three articles", '
+        f'"[## Findings] Truncated mid-sentence", "[document] No conclusion section"]. '
         f"Return [] ONLY if the work is genuinely complete and strong."
     )
     try:

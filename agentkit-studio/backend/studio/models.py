@@ -22,18 +22,23 @@ class LoopConfig:
                         prior run artifact.md.
     min_tasks_per_agent — slider lower bound (not a hard floor for last agent).
     max_tasks_per_agent — slider upper bound; agent count = ceil(n / max).
+    max_agents          — slider hard ceiling on agent count per phase, so a
+                        flooded task list can never explode the topology
+                        (2026-06-27 gap-flood fix). Product spec: 3..5.
     """
 
     deliverable_path: str | None = None
     auto_improve: bool = True
     min_tasks_per_agent: int = 3
     max_tasks_per_agent: int = 5
+    max_agents: int = 5
 
     def sizing(self) -> SizingConfig:
         """Return SizingConfig derived from UI slider values."""
         return SizingConfig(
             min_tasks_per_agent=self.min_tasks_per_agent,
             max_tasks_per_agent=self.max_tasks_per_agent,
+            max_agents=self.max_agents,
         )
 
     @classmethod
@@ -46,4 +51,5 @@ class LoopConfig:
             auto_improve=bool(d.get("auto_improve", True)),
             min_tasks_per_agent=int(d.get("min_tasks_per_agent", 3)),
             max_tasks_per_agent=int(d.get("max_tasks_per_agent", 5)),
+            max_agents=int(d.get("max_agents", 5)),
         )

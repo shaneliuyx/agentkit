@@ -138,3 +138,26 @@ def test_backfill_embeds_legacy_rows(tmp_path: Path) -> None:
     s = TaskRunStore(db_path=tmp_path / "legacy.db", embedder=FakeEmbedder())
     hits = s.similar_runs("agent loop", FakeEmbedder(), k=5, min_similarity=0.1)
     assert any("agent loop" in run.requirement for run, _ in hits)
+
+
+def test_repeat_failures_flags_persistently_recurring(tmp_path: Path) -> None:
+    # §11.4 closure-check: a weakness recorded in >= REPEAT_LIMIT (3) distinct runs
+    # of the same task is a repeat-failure; one in fewer runs is still actionable.
+    from studio.task_runs import REPEAT_LIMIT
+    s = TaskRunStore(db_path=tmp_path / "rf.db")
+    req = "build an agent loop framework"
+    for i in range(REPEAT_LIMIT):  # same weakness, 3 distinct runs
+        s.record(_run(req, ["[## Sources] missing URLs on cited articles"], 0.3, f"r{i}"))
+    s.record(_run(req, ["[## Intro] too short"], 0.3, "r-once"))  # appears once
+
+    rf = s.repeat_failures(task_hash(req))
+    assert "missing urls on cited articles" in rf   # section stripped, normalized
+    assert not any("too short" in k for k in rf)     # only 1 run → not a repeat-failure
+
+
+def test_repeat_failures_below_limit_not_flagged(tmp_path: Path) -> None:
+    s = TaskRunStore(db_path=tmp_path / "rf2.db")
+    req = "design an agentic loop system"
+    for i in range(2):  # 2 < REPEAT_LIMIT
+        s.record(_run(req, ["[## Results] no popularity metrics"], 0.3, f"r{i}"))
+    assert s.repeat_failures(task_hash(req)) == set()
