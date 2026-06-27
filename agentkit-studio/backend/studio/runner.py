@@ -181,6 +181,23 @@ def _plan_from_epics(
         return plan(requirement)
 
 
+def _today_note() -> str:
+    """Current-date context line for agent prompts (DESIGN §11.4).
+
+    Agents are otherwise date-blind and wrongly flag current-year sources as
+    'future-dated' credibility problems. A tool would force a round-trip per
+    agent for a value constant across the run; injecting it is cheaper and
+    guaranteed-seen.
+    """
+    import datetime
+    today = datetime.date.today()
+    return (
+        f"Today's date is {today.isoformat()}. Treat any date on or before today "
+        f"as current or past — do NOT flag dates in {today.year} or earlier as "
+        "'future-dated' or a credibility concern.\n\n"
+    )
+
+
 def _build_hub_cot_prompt(
     goal: str,
     artifact_path: str,
@@ -207,6 +224,7 @@ def _build_hub_cot_prompt(
             f"  Deliverable will be created at: {artifact_path}\n"
         )
     return (
+        _today_note() +
         "You are the planning hub for a multi-phase agent system.\n"
         "Think through each step carefully before acting.\n\n"
         "CONTEXT:\n"
@@ -247,6 +265,7 @@ def _build_worker_cot_prompt(
     deliverable so the Reducer can locate it unambiguously.
     """
     return (
+        _today_note() +
         "You are a worker agent. You will suggest changes to a shared document.\n"
         "Do NOT write to any file — emit patch suggestions only. Think step by step.\n\n"
         f"TASK ASSIGNMENTS:\n{task_list_for_agent}\n\n"
@@ -501,6 +520,22 @@ def _unresolved_block(weaknesses: list[str], repeat_failed: set[str], limit: int
     )
 
 
+def _weakness_score(prior_weaknesses: list[str], open_weaknesses: list[str]) -> float:
+    """Deterministic hill-climb score = solved / total over the weakness set (§11.4).
+
+    total = prior accumulated UNION still-open (normalized); solved = total - open.
+    No weakness anywhere => nothing to fix => 1.0. Replaces the noisy LLM self-eval
+    (which emitted impossible values like 0.1 and rated good output low).
+    """
+    from studio.task_runs import _norm_weakness
+    prior = {_norm_weakness(w) for w in (prior_weaknesses or [])}
+    still_open = {_norm_weakness(w) for w in (open_weaknesses or [])}
+    total = prior | still_open
+    if not total:
+        return 1.0
+    return round(len(total - still_open) / len(total), 2)
+
+
 def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
     """Build the section-aware STAR reducer closure (DESIGN §4.5).
 
@@ -518,6 +553,7 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
     def reduce(drafts: list[str]) -> tuple[str, int]:
         workers = "\n\n".join(f"[worker {i + 1}]\n{d}" for i, d in enumerate(drafts))
         prompt = (
+            _today_note() +
             "You are the section-aware reducer of a multi-worker research phase.\n"
             "MERGE / REFINE / REVIEW each worker output into the CURRENT ARTIFACT, "
             "section by section (sections are the '##' headings).\n\n"
@@ -530,8 +566,11 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
             f"SECTION WEAKNESSES (review checklist):\n{wk_block}\n\n"
             f"CURRENT ARTIFACT:\n--- BEGIN ---\n{art_block}\n--- END ---\n\n"
             f"WORKER OUTPUTS:\n{workers}\n\n"
-            "Output ONLY the full updated artifact markdown (every original section "
-            "intact). Do NOT include the '--- BEGIN ---' / '--- END ---' delimiter "
+            "Output ONLY the full updated artifact markdown, beginning at its very "
+            "first heading. Do NOT prepend any preamble, status line, review summary, "
+            "weakness checklist, or commentary about what you changed or verified — "
+            "emit the document itself and nothing else. Keep every original section "
+            "intact. Do NOT include the '--- BEGIN ---' / '--- END ---' delimiter "
             "lines — they frame the input only."
         )
         res = client.chat([{"role": "user", "content": prompt}])
@@ -1590,6 +1629,13 @@ class Runner:
             if _reducer_gaps:
                 _seen_w = set(_weaknesses)
                 _weaknesses = [g for g in _reducer_gaps if g not in _seen_w] + _weaknesses
+            # §11.4 SCORE = solved / total over the weakness set (deterministic;
+            # overrides the noisy LLM self-eval, which emitted impossible values
+            # like 0.1 and rated good output low). total = prior accumulated UNION
+            # still-open; solved = total - still-open. No weakness anywhere => nothing
+            # to fix => 1.0. score_result still runs above, but only for the
+            # scorer_feedback that mining consumes — its score is discarded here.
+            _score = _weakness_score(getattr(session, "weaknesses", []) or [], _weaknesses)
             # §11.4 surface (never hide): a repeat-failure (>= REPEAT_LIMIT prior runs)
             # that is STILL recorded this run was attempted again — including the last
             # phase — and remains open. Append it visibly below the result shown in the

@@ -222,6 +222,37 @@ def test_section_reducer_merges_with_artifact_and_weaknesses() -> None:
     assert "PRESERVE every existing section" in p        # additive contract present
 
 
+def test_weakness_score_no_weakness_is_one() -> None:
+    """DESIGN §11.4: no weaknesses anywhere => nothing to fix => score 1.0."""
+    from studio.runner import _weakness_score
+    assert _weakness_score([], []) == 1.0
+    assert _weakness_score(["[## A] x", "[## B] y"], []) == 1.0  # all prior solved
+
+
+def test_weakness_score_solved_over_total() -> None:
+    """score = solved / total. 3 of 5 prior weaknesses resolved => 0.6."""
+    from studio.runner import _weakness_score
+    prior = ["[## A] missing url", "[## B] thin", "[## C] no source",
+             "[## D] gap", "[## E] stale"]
+    still_open = ["[## B] thin", "[## C] no source"]  # 3 solved, 2 open
+    assert _weakness_score(prior, still_open) == 0.6
+
+
+def test_weakness_score_new_open_weakness_penalized() -> None:
+    """A first run that introduces an open weakness (none solved) => 0.0."""
+    from studio.runner import _weakness_score
+    assert _weakness_score([], ["[## A] new problem"]) == 0.0
+
+
+def test_today_note_injects_current_date() -> None:
+    """Agents must know today's date so current-year sources aren't flagged future."""
+    import datetime
+    from studio.runner import _today_note
+    note = _today_note()
+    assert datetime.date.today().isoformat() in note
+    assert "future" in note.lower()
+
+
 def test_hill_climb_forces_star_topology(fake_client_factory, tmp_path) -> None:
     """auto_improve on → every phase forced to STAR (DESIGN §11.4), overriding
     auto-derived topology. 'compare ...' would normally classify to MESH; under
