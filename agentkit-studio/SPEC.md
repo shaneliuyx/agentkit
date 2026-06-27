@@ -138,7 +138,7 @@ One event type per GUI concern → frontend reducer stays a flat switch.
 | `plan` | `{task, steps:[{id,description,depends_on,role,difficulty}]}` | graph phases |
 | `topology` | `{steps:[{id,topology}]}` (post `assign_topologies`) | graph shapes |
 | `graph` | `{nodes:[{id,kind,phase,label,state}], edges:[{from,to,kind}]}` | derived render graph |
-| `phase_start` | `{step_id}` | node → running (pulse) |
+| `phase_start` | `{step_id, n_agents?}` | node → running (pulse); `n_agents` = PLANNED fan-out (sizing cap), so the DAG sizes agents up front instead of a default guess corrected only at `phase_done` |
 | `agent_event` | `{step_id, name, data}` (forwarded `log_event`) | self-improve timeline |
 | `token` | `{step_id, input, output, total, estimated, cumulative:{input,output,total,estimated}}` | token HUD |
 | `text` | `{step_id, delta}` (streamed `ChatChunk.text`) | stream pane |
@@ -402,14 +402,24 @@ Epoch N (current session)
 Both tools are added to `ToolAugmentedClient` when `artifact_path` is provided.
 Implemented in `studio/tools.py`; dispatched via the existing `_dispatch` router.
 
-#### read_artifact
-Returns current artifact content + a short MD5 hash (12 hex chars).
-No locking — reads are always allowed. Call before generating any patch.
+#### read_artifact (SECTION-SCOPED — §11.10)
+Never dumps the full document (that was the ~1M-token bomb: 26+ calls × the full
+~38K artifact). No locking — reads are always allowed. Call before any patch.
 
 ```python
-# tool result shape
-{"content": "<full artifact text>", "hash": "<12-char md5>"}
+# NO args  -> cheap section index (deterministic '##' split, per-section hash)
+{"index": [{"section": "## Sources", "hash": "<12hex>", "chars": 1129}, …], "doc_hash": "<12hex>"}
+
+# section="## Sources"  -> that one section's body + hash
+{"section": "## Sources", "content": "<section body>", "hash": "<12hex>"}
+
+# unknown section
+{"error": "section '## Nope' not found", "available": ["## Sources", …]}
 ```
+
+Per-section hashes let an agent re-read a section only when it changed (a patch to
+one section never busts the others' cache); the agent self-dedups via the hashes
+already in its context — no server-side per-agent state.
 
 #### patch_artifact
 Atomically applies one find/replace with OCC and file locking.

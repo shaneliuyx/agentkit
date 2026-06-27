@@ -1277,3 +1277,56 @@ B  route the seeded research path through reduce_patches (retire runner.py:863) 
 C  reducer gap-detection → TaskLedger (non-last) / weaknesses DB (last)         (convergence)
 D  termination on gaps-dry; placeholder-aware scoring (% sections sourced)      (bounded loop)
 ```
+
+### 11.10 Hardening pass (2026-06-27) — live-run-surfaced fixes
+
+A GUI hill-climb run surfaced a chain of *carried-forward-state* defects. Each
+fix below was correct in isolation yet exposed the next, because hill-climb
+propagates state (artifact + weaknesses) across runs — so forward-generation
+fixes are not enough; inherited state must be sanitized/normalized too.
+
+- **Score = solved / total over the weakness set, SEMANTIC matching**
+  (`runner._weakness_score`, `studio/runner.py`). The old LLM self-eval emitted
+  impossible values (rated a good report 0.1). The weakness-ratio replaced it —
+  but matching by normalized STRING counted a weakness the miner merely re-worded
+  ("no comparative metrics" → "no systematic ranking") as *solved*, inflating the
+  score on an UNCHANGED artifact. Matching is now embedding-cosine (≥0.85): a
+  prior weakness is solved only if NO open weakness is semantically similar; an
+  open weakness is "new" only if it matches no prior. `no weakness ⇒ 1.0`. Falls
+  back to string match without an embedder. Verified on the unchanged v26→v27:
+  0.44 (string) → 0.20 (semantic).
+- **Artifact preamble sanitizer** (`runner._strip_preamble`). A reducer that
+  prepended commentary ("The artifact is complete… Weaknesses addressed: ✅…
+  Remaining concern:") poisoned `artifact.md`; the grow-only ratchet then LOCKED
+  it into the seed forever (a clean-up that shortens the doc reads as a
+  regression), so the poison propagated byte-identical across runs. Strip
+  everything before the first `#` heading at every artifact boundary (seed copy —
+  resets `_seed_len` to the clean baseline — reducer read, write-back). That
+  commentary belongs in the chat's surfaced `_unresolved_block`, never the doc.
+  Self-heals a poisoned seed on the next load.
+- **Date awareness** (`runner._today_note`). Agents were date-blind and flagged
+  current-year sources as "future-dated" credibility problems. Inject today's
+  date into hub/worker/reducer prompts (a per-run constant — a tool call would be
+  a wasted round-trip).
+- **Reducer output hygiene.** The §4.5 section reducer prompt forbids any
+  preamble/status/checklist — emit only the document, starting at its first
+  heading.
+- **Section-scoped `read_artifact`** (`studio/tools.py`). The tool returned the
+  full ~38K artifact on EVERY call; agents called it 26+× per phase → ~1M input
+  tokens. It now returns a cheap SECTION INDEX (`[{section, hash, chars}]`) with
+  no args and ONE section's body+hash with `section='## Heading'` (deterministic
+  `_split_sections`, 0 LLM). Per-section hashes let an agent re-read a section
+  only when it changed; the agent self-dedups via hashes in its own context.
+  Measured: index ≈ 1398 chars vs a 38121-char dump (27×). `web_fetch` dedup was
+  *rejected by design* — its cache already serves each agent the content it needs;
+  stubbing a repeat would starve a cross-agent reader.
+- **DAG sync (frontend).** (1) `read_artifact x26` no longer balloons tokens.
+  (2) Agent count is emitted at `phase_start` (planned = sizing cap + 1), so the
+  DAG shows agents as RUNNING up front instead of a default-3 guess that only
+  corrected — already settled — at `phase_done`. (3) A run-status badge
+  (`running` / `finalizing — verify · score · improve`) stays until the terminal
+  `done` event, so the diagram never reads complete while post-phase work runs.
+  (4) The DAG legend pills derive from the live `s.phases` (same source as the
+  diagram nodes), not the durable GraphStore's own status, which drifted out of
+  sync. (5) A running node uses a SOLID glowing border (dashed read as inactive
+  for the hub/reduce role markers); late-mounted spoke nodes reveal-animate.

@@ -7,6 +7,27 @@ a live 2D topology graph + an honest token meter, ending in a verified result.
 
 See [`SPEC.md`](./SPEC.md) for the full design authority.
 
+## Recent hardening (2026-06-27)
+
+A live hill-climb run surfaced a chain of carried-forward-state bugs; all fixed
+(see DESIGN §4.4–§4.5 and §11.10):
+
+- **Bounded fan-out** — `run_plan(max_agents)` caps STAR/MESH facets + MAP buckets;
+  the breadth cap is distinct from the concurrency cap (`max_workers`). Hill-climb
+  forces STAR on every phase (only STAR's reducer does the section-aware merge).
+- **Token cost** — `read_artifact` is section-scoped (a cheap section index, not a
+  full-doc dump on every call): a ~38K artifact's index is ~27× smaller, cutting
+  the per-run input tokens from ~1M toward ~300K.
+- **Honest score** — the hill-climb score is `solved / total` over the weakness
+  set with **semantic** (embedding) matching, replacing a noisy LLM self-eval;
+  `no weakness ⇒ 1.0`.
+- **Clean artifact** — a sanitizer strips reducer commentary preamble at every
+  artifact boundary (it belongs in the chat, not the doc) and self-heals a
+  poisoned seed; agents are date-aware (no false "future-dated source" flags).
+- **DAG sync** — agents sized at `phase_start`, a run-status badge until `done`,
+  the legend derives from live phase state, and running nodes are clearly
+  highlighted.
+
 ## Backend quickstart
 
 The backend is a FastAPI server that streams an SSE event sequence (`GET /run`)
