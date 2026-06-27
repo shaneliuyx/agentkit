@@ -1574,6 +1574,15 @@ class Runner:
         if ws_artifact and len(ws_artifact) > len(result_output) and _ends_cleanly(ws_artifact):
             result_output = ws_artifact
 
+        # §11.10: strip any reducer commentary preamble from the DISPLAYED/stored
+        # result too — not just artifact.md. A reducer that narrated ("The artifact
+        # is complete… Weaknesses addressed: ✅… Remaining concern: future-dated…")
+        # leaves that in result_output even when artifact.md was sanitized, since
+        # the preamble version is longer and wins the length check above. That
+        # commentary belongs in the surfaced _unresolved_block (chat), never in the
+        # deliverable shown to the user.
+        result_output = _strip_preamble(result_output)
+
         # verification (pure tier, always runs)
         verify_event = build_verify_event(result_output)
         self._emit(verify_event)
