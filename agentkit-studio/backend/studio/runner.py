@@ -538,20 +538,46 @@ def _strip_preamble(text: str) -> str:
     return text[m.start():] if m else text
 
 
-def _weakness_score(prior_weaknesses: list[str], open_weaknesses: list[str]) -> float:
-    """Deterministic hill-climb score = solved / total over the weakness set (§11.4).
+def _weakness_score(
+    prior_weaknesses: list[str],
+    open_weaknesses: list[str],
+    embedder=None,
+    threshold: float = 0.85,
+) -> float:
+    """Hill-climb score = solved / total over the weakness set (§11.4).
 
-    total = prior accumulated UNION still-open (normalized); solved = total - open.
-    No weakness anywhere => nothing to fix => 1.0. Replaces the noisy LLM self-eval
-    (which emitted impossible values like 0.1 and rated good output low).
+    A prior weakness is SOLVED only if NO still-open weakness is SEMANTICALLY
+    similar to it. Matching must be semantic, not string: the LLM miner re-words
+    the same issue every run ("no comparative metrics" -> "no systematic ranking"),
+    so exact/normalized-string matching counted a re-worded-but-unsolved weakness as
+    'solved' and inflated the score on an UNCHANGED artifact. total = prior + open
+    issues with no prior match (genuinely new). No weakness anywhere => 1.0.
+
+    Falls back to normalized-string matching when no embedder is available.
     """
-    from studio.task_runs import _norm_weakness
-    prior = {_norm_weakness(w) for w in (prior_weaknesses or [])}
-    still_open = {_norm_weakness(w) for w in (open_weaknesses or [])}
-    total = prior | still_open
-    if not total:
+    from studio.task_runs import _cosine, _norm_weakness
+    prior = [w for w in (prior_weaknesses or []) if w and w.strip()]
+    open_ = [w for w in (open_weaknesses or []) if w and w.strip()]
+    if not prior and not open_:
         return 1.0
-    return round(len(total - still_open) / len(total), 2)
+
+    if embedder is not None:
+        try:
+            pe = embedder.embed(prior) if prior else []
+            oe = embedder.embed(open_) if open_ else []
+            def _hit(vec, others) -> bool:
+                return any(_cosine(vec, o) >= threshold for o in others)
+            solved = sum(1 for pv in pe if not _hit(pv, oe))
+            new_open = sum(1 for ov in oe if not _hit(ov, pe))
+            total = len(prior) + new_open
+            return round(solved / total, 2) if total else 1.0
+        except Exception:  # noqa: BLE001 — embedding unavailable → string fallback
+            pass
+
+    pn = {_norm_weakness(w) for w in prior}
+    on = {_norm_weakness(w) for w in open_}
+    total_set = pn | on
+    return 1.0 if not total_set else round(len(total_set - on) / len(total_set), 2)
 
 
 def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
@@ -1664,7 +1690,10 @@ class Runner:
             # still-open; solved = total - still-open. No weakness anywhere => nothing
             # to fix => 1.0. score_result still runs above, but only for the
             # scorer_feedback that mining consumes — its score is discarded here.
-            _score = _weakness_score(getattr(session, "weaknesses", []) or [], _weaknesses)
+            _score = _weakness_score(
+                getattr(session, "weaknesses", []) or [], _weaknesses,
+                embedder=self._embedder,
+            )
             # §11.4 surface (never hide): a repeat-failure (>= REPEAT_LIMIT prior runs)
             # that is STILL recorded this run was attempted again — including the last
             # phase — and remains open. Append it visibly below the result shown in the

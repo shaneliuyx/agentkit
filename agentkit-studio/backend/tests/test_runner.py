@@ -246,6 +246,43 @@ def test_strip_preamble_noop_on_clean_or_headingless() -> None:
     assert _strip_preamble("prose, no heading") == "prose, no heading"  # never destroy
 
 
+class _FakeEmb:
+    """Embeds by keyword cluster: 'rank/comparison' issues are similar to each
+    other (re-worded same issue), 'url' is its own cluster."""
+    def embed(self, texts):
+        out = []
+        for t in texts:
+            tl = t.lower()
+            if any(k in tl for k in ("rank", "comparison", "comparative", "metric")):
+                out.append([1.0, 0.0, 0.0])
+            elif "url" in tl:
+                out.append([0.0, 1.0, 0.0])
+            else:
+                out.append([0.0, 0.0, 1.0])
+        return out
+
+
+def test_weakness_score_semantic_no_false_solved() -> None:
+    """A re-worded-but-unsolved weakness must NOT count as solved (the v27 bug:
+    the miner re-words issues each run, so string-match falsely inflated the score
+    on an UNCHANGED artifact)."""
+    from studio.runner import _weakness_score
+    prior = ["[## S] No comparative engagement metrics"]
+    open_ = ["[## S] No systematic ranking or comparison", "[## Sources] Missing URLs"]
+    # prior 'comparative' ~ open 'ranking' (same cluster) → prior still open → solved 0;
+    # the URL weakness is genuinely new → total = 1 prior + 1 new = 2 → 0/2 = 0.0
+    assert _weakness_score(prior, open_, embedder=_FakeEmb()) == 0.0
+
+
+def test_weakness_score_semantic_genuine_solve() -> None:
+    """A prior weakness with NO similar open weakness counts as solved."""
+    from studio.runner import _weakness_score
+    prior = ["[## A] ranking not systematic", "[## B] missing url"]
+    open_ = ["[## A] no comparative metrics"]   # A persists (re-worded); B solved
+    # solved 1 (B), still-open 1 (A), new 0 → total 2 → 0.5
+    assert _weakness_score(prior, open_, embedder=_FakeEmb()) == 0.5
+
+
 def test_weakness_score_no_weakness_is_one() -> None:
     """DESIGN §11.4: no weaknesses anywhere => nothing to fix => score 1.0."""
     from studio.runner import _weakness_score
