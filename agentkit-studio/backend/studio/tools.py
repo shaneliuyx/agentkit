@@ -174,8 +174,57 @@ WRITE_FILE_TOOL: dict[str, Any] = {
 
 #: Artifact OCC tool schemas sourced from agentkit.tools.artifact.
 #: Re-exported here for callers that import from studio.tools directly.
-READ_ARTIFACT_TOOL = ARTIFACT_TOOL_SCHEMAS[0]
+#: read_artifact is overridden to SECTION-SCOPED reads (token-cap, §11.4): the
+#: full document is never dumped at once. No arg -> a cheap section index; a
+#: ``section`` arg -> that one section. Per-section hashes let an agent re-read a
+#: section only when it actually changed (a patch to one section never busts the
+#: others' cache the way a whole-doc hash would).
+import copy as _copy
+
+READ_ARTIFACT_TOOL = _copy.deepcopy(ARTIFACT_TOOL_SCHEMAS[0])
+_raf = READ_ARTIFACT_TOOL["function"]
+_raf["description"] = (
+    "Read the deliverable WITHOUT dumping the whole document. With NO arguments, "
+    "returns a cheap SECTION INDEX: [{section, hash, chars}] listing every '##' "
+    "section. Pass section='## Exact Heading' (verbatim from the index) to read "
+    "ONE section's full body + its hash. Re-read a section only if its hash "
+    "changed since you last saw it — this keeps context small."
+)
+_raf.setdefault("parameters", {}).setdefault("properties", {})["section"] = {
+    "type": "string",
+    "description": "Exact '## Heading' (verbatim from the index) to read one section. Omit for the index.",
+}
 PATCH_ARTIFACT_TOOL = ARTIFACT_TOOL_SCHEMAS[1]
+
+
+def _split_sections(text: str) -> list[tuple[str, str]]:
+    """Deterministically split markdown into top-level ('##') sections (0 LLM).
+
+    Returns ordered (heading, body) pairs; body INCLUDES the heading line and any
+    nested '###' subsections beneath it. Content before the first '##' (the title
+    + intro) is the first pair, keyed '(intro)'.
+    """
+    import re
+    out: list[tuple[str, str]] = []
+    head: str | None = None
+    buf: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if re.match(r"^##\s", line):
+            if head is not None or buf:
+                out.append((head or "(intro)", "".join(buf)))
+            head = line.strip()
+            buf = [line]
+        else:
+            buf.append(line)
+    if head is not None or buf:
+        out.append((head or "(intro)", "".join(buf)))
+    return out
+
+
+def _section_hash(body: str) -> str:
+    """Stable short content hash for one section (dedup key)."""
+    import hashlib
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
 
 #: Callbacks: (step_id, tool, args) and (step_id, tool, summary, n_results, notice).
 OnToolCall = Callable[[str, str, dict[str, Any]], None]
@@ -580,19 +629,44 @@ class ToolAugmentedClient:
 
     # -- artifact tools (OCC + file locking) ------------------------------
 
-    def _run_read_artifact(self, step_id: str, args: dict[str, Any]) -> Message:  # noqa: ARG002
-        """Read artifact.md under the per-path lock (blocks while a patch is in progress)."""
+    def _run_read_artifact(self, step_id: str, args: dict[str, Any]) -> Message:
+        """Section-scoped artifact read under the per-path lock (§11.4 token-cap).
+
+        No ``section`` arg -> a cheap section INDEX ([{section, hash, chars}]); a
+        ``section`` arg -> that one section's body + hash. The full document is
+        never dumped at once — that was the read_artifact x26 input-token bomb.
+        """
         if self._artifact_path is None:
             return self._tool_message("read_artifact", {"error": "no artifact_path configured"})
         try:
             result = _occ_read(self._artifact_path)
         except OSError as exc:
             return self._tool_message("read_artifact", {"error": str(exc)})
+        sections = _split_sections(result.content)
+        requested = str((args or {}).get("section", "")).strip()
+        if requested:
+            want = requested.lstrip("# ").strip().lower()
+            for head, body in sections:
+                if head == requested or head.lstrip("# ").strip().lower() == want:
+                    self._emit_result(
+                        step_id, "read_artifact",
+                        f"read section {head!r} ({len(body)} chars)", len(body), "",
+                    )
+                    return self._tool_message(
+                        "read_artifact",
+                        {"section": head, "content": body, "hash": _section_hash(body)},
+                    )
+            return self._tool_message(
+                "read_artifact",
+                {"error": f"section {requested!r} not found", "available": [h for h, _ in sections]},
+            )
+        index = [{"section": h, "hash": _section_hash(b), "chars": len(b)} for h, b in sections]
         self._emit_result(
             step_id, "read_artifact",
-            f"read {len(result.content)} chars hash={result.hash}", len(result.content), ""
+            f"index: {len(index)} sections (doc {len(result.content)} chars, not dumped)",
+            len(index), "",
         )
-        return self._tool_message("read_artifact", {"content": result.content, "hash": result.hash})
+        return self._tool_message("read_artifact", {"index": index, "doc_hash": result.hash})
 
     def _run_patch_artifact(self, step_id: str, args: dict[str, Any]) -> Message:
         """Atomically apply a find/replace patch with OCC hash check (via agentkit.artifacts.occ).

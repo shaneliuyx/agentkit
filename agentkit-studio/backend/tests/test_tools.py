@@ -263,6 +263,39 @@ def test_web_fetch_content_is_capped() -> None:
     assert "truncated" in results[0][0] and results[0][1] == 1
 
 
+def test_split_sections_deterministic() -> None:
+    from studio.tools import _split_sections
+    doc = "# Title\nintro\n\n## A\nbody a\n### sub\nmore\n\n## B\nbody b\n"
+    secs = dict(_split_sections(doc))
+    assert list(secs) == ["(intro)", "## A", "## B"]
+    assert "### sub" in secs["## A"] and "more" in secs["## A"]  # nested ### stays in A
+    assert "body b" not in secs["## A"]                          # B not bled into A
+
+
+def test_read_artifact_returns_index_then_section(tmp_path) -> None:
+    """No arg -> cheap section index (no full dump); section arg -> one section."""
+    art = tmp_path / "artifact.md"
+    art.write_text("# Title\nintro\n\n## Sources\nurls here\n\n## Findings\nstuff\n")
+
+    class _Inner:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(text="", total_tokens=0)
+
+    c = ToolAugmentedClient(_Inner(), artifact_path=art)
+
+    idx = json.loads(c._run_read_artifact("s1", {})["content"])
+    assert "index" in idx and "content" not in idx                # never dumps full doc
+    assert [s["section"] for s in idx["index"]] == ["(intro)", "## Sources", "## Findings"]
+    assert all("hash" in s and "chars" in s for s in idx["index"])
+
+    sec = json.loads(c._run_read_artifact("s1", {"section": "## Sources"})["content"])
+    assert sec["section"] == "## Sources" and "urls here" in sec["content"]
+    assert "stuff" not in sec["content"]                          # only the one section
+
+    bad = json.loads(c._run_read_artifact("s1", {"section": "## Nope"})["content"])
+    assert "error" in bad and "## Sources" in bad["available"]
+
+
 def test_web_fetch_page_failure_is_nonfatal() -> None:
     """ok=False (404/blocked) → error tool-message + notice, loop continues, n=0."""
 
