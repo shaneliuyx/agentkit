@@ -33,7 +33,11 @@ def _python_blocks() -> list[str]:
 
 def _namespace() -> dict:
     from agentkit.gates import Gate
+    from agentkit.loop.goal import LoopGoal, check_goal
     from agentkit.sandbox import SubprocessSandbox
+
+    # Safe goal with no evidence_cmd — check_goal returns met=False immediately.
+    _goal = LoopGoal(end_state="test placeholder", max_turns=1)
 
     msgs = [
         {"role": "user", "content": "hello there, this is a longer message"},
@@ -52,6 +56,22 @@ def _namespace() -> dict:
         "my_proposer": (lambda current, history: current + " (improved)"),
         "my_scorer": (lambda proposal: 1.0),
         "my_gate": Gate(sandbox=SubprocessSandbox(), evaluator=lambda p: 1.0),
+        # LoopGoal / check_goal — used in the goal-check README block
+        "LoopGoal": LoopGoal,
+        "check_goal": check_goal,
+        "goal": _goal,
+        # Illustrative runner stubs for LoopChain README examples
+        "run_research": lambda ctx: {"findings": "stub"},
+        "run_synthesize": lambda ctx: {"report": "stub"},
+        "run_deploy": lambda ctx: {},
+        "run_build": lambda ctx: {},
+        "run_web_research": lambda ctx: {},
+        "run_code_research": lambda ctx: {},
+        "run_merge": lambda ctx: {},
+        # GraphStore stub for Scheduler README examples (temp file — :memory: loses schema across connections)
+        "gs": __import__("agentkit.runtime.graph_store", fromlist=["GraphStore"]).GraphStore(__import__("tempfile").mktemp(suffix=".db")),
+        # Stub chain registry for scheduler examples
+        "registered_chains": {},
     }
 
 

@@ -634,29 +634,25 @@ shows live per-spec status, skipped/done state, and output summary.
 later phase, webhooks) that fire a chain automatically.
 
 ```python
+import tempfile
+from agentkit.runtime.graph_store import GraphStore
 from agentkit.runtime.scheduler import Scheduler, CronRegistration
 
-scheduler = Scheduler(graph_store=gs)
+gs = GraphStore(tempfile.mktemp(suffix=".db"))
+scheduler = Scheduler(store=gs)
 
-# ── Pattern 1: Nightly self-improvement run ───────────────────────────────
-scheduler.register(CronRegistration(
-    id="nightly-improve",
-    spec="0 2 * * *",                # 02:00 UTC daily
-    chain_id="self-improve-chain",
-))
+# Create graphs to schedule
+g1 = gs.create_graph("self-improve", {"nodes": {"a": {"type": "tool"}}, "edges": []})
+g2 = gs.create_graph("health-check", {"nodes": {"b": {"type": "tool"}}, "edges": []})
 
-# ── Pattern 2: Hourly health check ───────────────────────────────────────
-scheduler.register(CronRegistration(
-    id="hourly-health",
-    spec="0 * * * *",
-    chain_id="health-check-chain",
-))
+# ── Pattern 1: Register a nightly cron (86400 s = 24 h) ─────────────────
+reg1 = scheduler.register_cron(g1, "0 2 * * *", interval_s=86400)
 
-# ── Pattern 3: Check due triggers and fire ───────────────────────────────
-due = scheduler.due()                # returns List[CronRegistration] ready to fire
-for reg in due:
-    chain_result = registered_chains[reg.chain_id].run()
-    scheduler.mark_fired(reg.id)
+# ── Pattern 2: Register an hourly cron ───────────────────────────────────
+reg2 = scheduler.register_cron(g2, "0 * * * *", interval_s=3600)
+
+# ── Pattern 3: Fire a run manually right now ─────────────────────────────
+run_id = scheduler.trigger_manually(g1)        # returns the new run_id
 ```
 
 **Via REST:**
