@@ -21,11 +21,29 @@ from studio.runner import (
     _parse_assigned,
     _parse_epic_plan,
     _parse_patches_from_output,
+    _build_skeleton,
     _detect_gaps,
     _phase_search_failed,
     _plan_from_epics,
     _research_findings_to_patches,
 )
+
+
+def test_build_skeleton_uses_llm_output_when_valid() -> None:
+    client = _FakeClient("# Loop Report\n## Intro\n_(pending — needs sourced content)_\n"
+                         "## Sources\n_(pending — needs sourced content)_\n")
+    skel = _build_skeleton("research loop engineering", client)
+    assert skel.count("##") >= 2
+    assert "_(pending" in skel
+    assert "GOAL: research loop engineering" in (client.seen or "")
+
+
+def test_build_skeleton_falls_back_on_bad_llm() -> None:
+    # LLM returns no headings → deterministic skeleton (search/LLM-robust, §11.5).
+    skel = _build_skeleton("my goal", _FakeClient("sorry, I cannot."))
+    assert skel.count("##") >= 4
+    assert "_(pending — needs sourced content)_" in skel
+    assert _detect_gaps(skel)  # a fresh skeleton is all gaps → drives the fill loop
 
 
 def test_detect_gaps_flags_placeholder_and_unsourced() -> None:

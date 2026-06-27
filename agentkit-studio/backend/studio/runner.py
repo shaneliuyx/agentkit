@@ -385,6 +385,41 @@ def _phase_search_failed(outputs: list[str]) -> bool:
     return saw_error
 
 
+def _build_skeleton(goal: str, client) -> str:
+    """Build an initial document skeleton from the goal (DESIGN §11.5).
+
+    Headings + placeholder bodies only — NO search needed, so it is robust to a
+    search outage. Workers then fill each section additively, the SAME pipeline as
+    improving an existing doc (create == improve). Falls back to a generic skeleton
+    if the LLM is unavailable or returns nothing usable.
+    """
+    prompt = (
+        "Set up a document SKELETON for the goal below. Output ONLY markdown:\n"
+        "  - one title line (#)\n"
+        "  - 4-8 section headings (##) that the goal genuinely requires (derive them\n"
+        "    from the goal — not a generic template)\n"
+        "  - under each heading exactly this placeholder line:\n"
+        "      _(pending — needs sourced content)_\n"
+        "Do NOT write real content or invent facts. Headings + placeholders only.\n\n"
+        f"GOAL: {goal}\n"
+    )
+    try:
+        res = client.chat([{"role": "user", "content": prompt}])
+        out = (getattr(res, "text", "") or "").strip()
+        if out.count("##") >= 2:
+            return out
+    except Exception:  # noqa: BLE001 — fall back to a generic skeleton
+        pass
+    return (
+        f"# {goal.strip()[:100]}\n\n"
+        "## Overview\n_(pending — needs sourced content)_\n\n"
+        "## Key Findings\n_(pending — needs sourced content)_\n\n"
+        "## Details\n_(pending — needs sourced content)_\n\n"
+        "## Sources\n_(pending — needs sourced content)_\n\n"
+        "## References\n_(pending — needs sourced content)_\n"
+    )
+
+
 def _detect_gaps(artifact_text: str) -> list[str]:
     """Detect gaps in the merged deliverable (DESIGN §11.4).
 
@@ -899,6 +934,20 @@ class Runner:
 
         outputs: dict[str, str] = {}
         _reducer_gaps: list[str] = []   # §11.4 last-phase gaps → next-run weaknesses
+
+        # §11.5: create == improve. When improving but NO prior doc exists yet,
+        # bootstrap a skeleton (headings + placeholders from the goal, no search) so
+        # the phase loop fills it ADDITIVELY — the same pipeline as improving an
+        # existing doc, instead of asking one LLM to author the whole report.
+        if (_hc_cfg.get("auto_improve") and not _artifact_copied
+                and _eff_ws2 is not None and use_llm):
+            _skel = _build_skeleton(plan_obj.task or requirement, base_client)
+            if _skel:
+                _skel_file = _eff_ws2 / session.session_id / "artifact.md"
+                _skel_file.parent.mkdir(parents=True, exist_ok=True)
+                _skel_file.write_text(_skel)
+                _artifact_copied = True       # additive pipeline now has a base
+                _seed_len = len(_skel)        # may grow from here, never shrink below
         cancelled = False
         final_output = ""
         #: Gate outcomes collected across phases — the Loop Doctor's safe_actions
