@@ -100,6 +100,19 @@ const NODE_TYPES = { studio: StudioNodeView };
 export function TopologyGraph() {
   const phases = useRunStore((s) => s.phases);
   const tools = useRunStore((s) => s.tools);
+  const status = useRunStore((s) => s.status);
+  // The DAG draws PHASES only. After every phase settles to `done`, the run is
+  // STILL active (verify → score → weakness mining → next epoch) — work the graph
+  // has no node for. Without this, the diagram reads "complete" while the run
+  // churns (the v27 1M-token tail). Surface a run-level badge until the terminal
+  // `done` event so the diagram never claims done prematurely.
+  const allPhasesDone = phases.length > 0 && phases.every((p) => p.state === "done");
+  const runBadge =
+    status === "running"
+      ? allPhasesDone
+        ? "finalizing — verify · score · improve"
+        : "running"
+      : null;
 
   const { nodes, edges } = useMemo(() => {
     const built = buildGraph(phases);
@@ -133,19 +146,27 @@ export function TopologyGraph() {
   }
 
   return (
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      nodeTypes={NODE_TYPES}
-      fitView
-      fitViewOptions={{ padding: 0.25 }}
-      proOptions={{ hideAttribution: true }}
-      nodesDraggable={false}
-      nodesConnectable={false}
-      elementsSelectable={false}
-    >
-      <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#2a3550" />
-      <Controls showInteractive={false} />
-    </ReactFlow>
+    <div className="topo-canvas">
+      {runBadge ? (
+        <div className="topo-run-badge" data-finalizing={allPhasesDone}>
+          <span className="topo-run-dot" />
+          {runBadge}
+        </div>
+      ) : null}
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={NODE_TYPES}
+        fitView
+        fitViewOptions={{ padding: 0.25 }}
+        proOptions={{ hideAttribution: true }}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={false}
+      >
+        <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#2a3550" />
+        <Controls showInteractive={false} />
+      </ReactFlow>
+    </div>
   );
 }

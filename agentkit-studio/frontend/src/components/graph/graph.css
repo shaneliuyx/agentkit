@@ -1,5 +1,53 @@
 /* Topology graph node styling — semantic state coloring (running/done/pending). */
 
+/* Full-size wrapper so React Flow keeps its height while the run-status badge
+   floats over it. */
+.topo-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* Run-level status badge: the DAG draws phases only, so once every phase node is
+   `done` the diagram looks finished even though the run is still verifying /
+   scoring / starting the next epoch. This badge stays until the terminal `done`
+   event so the diagram never reads "complete" prematurely. */
+.topo-run-badge {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  color: var(--color-running);
+  background: color-mix(in oklch, var(--color-running) 10%, var(--color-surface-2));
+  border: 1px solid color-mix(in oklch, var(--color-running), transparent 55%);
+}
+.topo-run-badge[data-finalizing="true"] {
+  color: var(--color-accent);
+  border-color: color-mix(in oklch, var(--color-accent), transparent 55%);
+}
+.topo-run-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: topo-run-pulse 1.4s ease-in-out infinite;
+}
+@keyframes topo-run-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .topo-run-dot { animation: none; }
+}
+
 .topo-empty {
   position: absolute;
   inset: 0;
