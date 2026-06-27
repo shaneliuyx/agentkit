@@ -23,7 +23,43 @@ from studio.runner import (
     _parse_patches_from_output,
     _phase_search_failed,
     _plan_from_epics,
+    _research_findings_to_patches,
 )
+
+
+def test_findings_to_patches_additive_with_target() -> None:
+    txt = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Loop Engineering\n"
+        "URL: https://addyosmani.com/loop\nKEY_INSIGHT: verifier is the bottleneck\n"
+        "POPULARITY: 6.5M views\nPATCH_TARGET: ## Sources\n"
+    )
+    ps = _research_findings_to_patches(txt)
+    assert len(ps) == 1
+    assert ps[0].op == "insert_after" and ps[0].anchor == "## Sources"
+    assert "https://addyosmani.com/loop" in ps[0].content
+    assert "6.5M views" in ps[0].content
+
+
+def test_findings_to_patches_drops_unsourced() -> None:
+    # No real URL → not content → no patch (§11 grounding).
+    txt = "## RESEARCH_FINDING\nARTICLE_TITLE: x\nURL: (none)\nPATCH_TARGET: ## S\n"
+    assert _research_findings_to_patches(txt) == []
+
+
+def test_findings_to_patches_append_when_no_target() -> None:
+    txt = "## RESEARCH_FINDING\nARTICLE_TITLE: T\nURL: https://x.com\n"
+    ps = _research_findings_to_patches(txt)
+    assert len(ps) == 1 and ps[0].op == "append" and ps[0].anchor is None
+
+
+def test_findings_to_patches_multiple_blocks() -> None:
+    txt = (
+        "## RESEARCH_FINDING\nURL: https://a.com\nPATCH_TARGET: ## A\n\n"
+        "## RESEARCH_FINDING\nURL: https://b.com\nPATCH_TARGET: ## B\n"
+    )
+    ps = _research_findings_to_patches(txt)
+    assert len(ps) == 2
+    assert all(p.op == "insert_after" for p in ps)
 
 
 # ---------------------------------------------------------------------------

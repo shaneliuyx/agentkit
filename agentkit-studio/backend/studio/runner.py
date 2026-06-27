@@ -385,6 +385,41 @@ def _phase_search_failed(outputs: list[str]) -> bool:
     return saw_error
 
 
+def _research_findings_to_patches(text: str) -> list:
+    """Convert RESEARCH_FINDING blocks → ADDITIVE DocPatches (DESIGN §11.3).
+
+    Each finding with a real URL becomes an `insert_after` its PATCH_TARGET (or an
+    `append` if no target) — a citation line. Additive only: it can add content but
+    never remove or shorten the existing doc, so the merge cannot regress. Findings
+    without a real URL are dropped (§11 grounding: content needs a source).
+    """
+    from agentkit.artifacts.patcher import DocPatch
+
+    patches: list = []
+    for m in _re.finditer(
+        r'##\s*RESEARCH_FINDING(.*?)(?=##\s*RESEARCH_FINDING|\Z)', text, _re.DOTALL
+    ):
+        block = m.group(1)
+
+        def _f(name: str) -> str:
+            fm = _re.search(rf'{name}:\s*(.+)', block)
+            return fm.group(1).strip() if fm else ''
+
+        url = _f('URL')
+        if not url.lower().startswith('http'):
+            continue  # not a sourced finding → not content
+        title, target = _f('ARTICLE_TITLE'), _f('PATCH_TARGET')
+        insight, pop = _f('KEY_INSIGHT'), _f('POPULARITY')
+        line = (f"\n- [{title or url}]({url})"
+                + (f" — {insight}" if insight else "")
+                + (f" ({pop})" if pop else ""))
+        if target:
+            patches.append(DocPatch(op="insert_after", anchor=target, content=line, source="finding"))
+        else:
+            patches.append(DocPatch(op="append", anchor=None, content=line, source="finding"))
+    return patches
+
+
 def _parse_patches_from_output(text: str) -> list:
     """Extract DocPatch list from a worker's PATCHES JSON block (DESIGN §2.2).
 
@@ -1113,7 +1148,10 @@ class Runner:
         if _eff_ws2 is not None and outputs:
             _patch_groups: list[list] = []
             for _out in outputs.values():
-                _patches = _parse_patches_from_output(_out)
+                # §11.3: PATCHES from workers, plus RESEARCH_FINDING blocks
+                # converted to additive patches — both merge programmatically so
+                # the document is never re-emitted (and never shortened) by an LLM.
+                _patches = _parse_patches_from_output(_out) + _research_findings_to_patches(_out)
                 if _patches:
                     _patch_groups.append(_patches)
             if _patch_groups:
