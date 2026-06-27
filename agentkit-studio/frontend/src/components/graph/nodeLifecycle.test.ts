@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { nodeLifecycle, entranceDelayMs } from "./nodeLifecycle";
+import { nodeLifecycle, entranceDelayMs, nodeTransition } from "./nodeLifecycle";
 import { buildGraph, type StudioNodeData } from "./topologyLayout";
 import type { PhaseState } from "../../store/runStore";
 import type { TopologyKind } from "../../api/types";
@@ -91,6 +91,28 @@ describe("entranceDelayMs (fan-out reveal staging)", () => {
     expect(entranceDelayMs("phase", 3)).toBe(entranceDelayMs("phase", 0));
     expect(entranceDelayMs("reduce", 3)).toBe(entranceDelayMs("reduce", 0));
     expect(entranceDelayMs("hub", 3)).toBe(entranceDelayMs("hub", 0));
+  });
+});
+
+describe("nodeTransition (entrance/exit animation decision)", () => {
+  test("a node leaving pending → running REVEALS (normal activation)", () => {
+    expect(nodeTransition("pending", "running")).toBe("reveal");
+  });
+
+  test("a late-mounted node appearing already done STILL reveals (the fix)", () => {
+    // A phase that re-expanded its agent count mid-run adds spokes after it is
+    // already running/done; those mount with prev='pending' and must animate in.
+    expect(nodeTransition("pending", "done")).toBe("reveal");
+  });
+
+  test("running → done SETTLES (results converging)", () => {
+    expect(nodeTransition("running", "done")).toBe("settle");
+  });
+
+  test("no animation on a same-state re-render (no spurious re-reveal)", () => {
+    expect(nodeTransition("running", "running")).toBeNull();
+    expect(nodeTransition("done", "done")).toBeNull();
+    expect(nodeTransition("pending", "pending")).toBeNull();
   });
 });
 

@@ -87,3 +87,27 @@ export function entranceDelayMs(
   const staggered = kind === "agent" || kind === "stage";
   return base + (staggered ? siblingIndex * SIBLING_STAGGER_MS : 0);
 }
+
+/** Animation a node should play on a lifecycle change, or null for none. */
+export type NodeTransition = "reveal" | "settle" | null;
+
+/**
+ * Decide the entrance/exit animation for a `prev → next` lifecycle change. Pure so
+ * the rule is unit-testable without a render or timer.
+ *
+ * REVEAL fires whenever a node LEAVES pending — to running OR straight to done. The
+ * "straight to done" arm is the fix for late-mounted nodes: when a phase re-expands
+ * its agent count mid-run (n_agents only lands at `phase_done`, so spokes are added
+ * after the phase is already running/done), the new spoke nodes mount with an
+ * initial `prev` of "pending" and must still animate IN rather than pop in static.
+ * SETTLE fires on the running→done convergence (results landing).
+ */
+export function nodeTransition(prev: NodeLifecycle, next: NodeLifecycle): NodeTransition {
+  if (prev === "pending" && next !== "pending") {
+    return "reveal";
+  }
+  if (prev === "running" && next === "done") {
+    return "settle";
+  }
+  return null;
+}

@@ -15,7 +15,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { useRunStore } from "../../store/runStore";
 import { buildGraph, type StudioNodeData } from "./topologyLayout";
-import { entranceDelayMs } from "./nodeLifecycle";
+import { entranceDelayMs, nodeTransition } from "./nodeLifecycle";
 import { pulseRunning, revealNode, settleNode } from "./nodeAnim";
 import { toolBadgeLabel, toolBadgeTitle } from "../panels/toolMeta";
 import "./graph.css";
@@ -23,9 +23,13 @@ import "./graph.css";
 function StudioNodeView({ data }: NodeProps<StudioNodeData>) {
   const ref = useRef<HTMLDivElement>(null);
   // Remember the previous lifecycle so we fire the staged ENTRANCE only on the
-  // pending→active transition (the moment this node joins the time sequence), not on
-  // every unrelated re-render of an already-active node.
-  const prevState = useRef<StudioNodeData["state"]>(data.state);
+  // leaving-pending transition (the moment this node joins the time sequence), not on
+  // every unrelated re-render of an already-active node. Initialised to "pending"
+  // (NOT data.state) so a node mounted LATE — when a phase re-expanded its agent
+  // count mid-run and the new spoke first appears already running/done — still
+  // animates in instead of popping in static (the "animation must follow newly
+  // added agents" fix).
+  const prevState = useRef<StudioNodeData["state"]>("pending");
 
   // Time-sequence transitions: stage the fan-out ENTRANCE when a node first
   // activates (orchestrator→spokes→reduce ordering via the stagger delay), and play
@@ -38,10 +42,11 @@ function StudioNodeView({ data }: NodeProps<StudioNodeData>) {
     if (!el) {
       return;
     }
-    if (prev === "pending" && data.state === "running") {
+    const transition = nodeTransition(prev, data.state);
+    if (transition === "reveal") {
       return revealNode(el, entranceDelayMs(data.kind, data.siblingIndex));
     }
-    if (prev === "running" && data.state === "done") {
+    if (transition === "settle") {
       return settleNode(el);
     }
   }, [data.state, data.kind, data.siblingIndex]);
