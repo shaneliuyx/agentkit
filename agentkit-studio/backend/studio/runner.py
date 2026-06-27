@@ -464,9 +464,12 @@ def _detect_gaps(artifact_text: str) -> list[tuple[str, str]]:
 def _gap_sections(gaps: list[tuple[str, str]]) -> list[str]:
     """Consolidate gaps to distinct top-level sections (DESIGN §11.4).
 
-    Agent sizing is driven by SECTIONS needing work, not raw gap count: a report
-    has a bounded number of top-level sections, so n_agents <= n_sections and the
-    topology cannot explode (the 2026-06-27 gap-flood fix). Order-preserving.
+    Consolidation shrinks the LEDGER input (sections, not raw gap count) that
+    drives ``_max_workers`` (concurrency) and the hub prompt's ledger block.
+    It does NOT by itself bound the spoke COUNT: the fan-out derives breadth
+    from ``_facets`` (STAR/MESH) and the upstream item count (MAP), which read
+    prose/lists, not section count. The hard breadth cap is ``run_plan``'s
+    ``max_agents`` arg (the 2026-06-27 gap-flood fix). Order-preserving.
     """
     seen: set[str] = set()
     out: list[str] = []
@@ -957,6 +960,18 @@ class Runner:
         plan_obj = assign_topologies(
             plan_obj, mode="auto", client=client, llm=use_llm
         )
+        # Hill-climb REQUIRES STAR on every phase (DESIGN §11.4): only STAR's
+        # reducer does the section-aware merge/refine/review of each worker's
+        # per-section output against that section's weakness list, producing the
+        # section-keyed {document, weaknesses} handoff that the next phase (and
+        # next epoch) accumulates. MESH/PIPELINE/SINGLE have no such reducer, so
+        # auto-derived topology would silently break the improvement loop. The
+        # breadth cap (run_plan max_agents) keeps the forced STAR from exploding.
+        if _hc_cfg.get("auto_improve"):
+            plan_obj = replace(
+                plan_obj,
+                steps=tuple(replace(s, topology=STAR) for s in plan_obj.steps),
+            )
         topology_map = {s.id: (s.topology or SINGLE) for s in plan_obj.steps}
         self._emit(
             TopologyEvent(
@@ -1108,6 +1123,11 @@ class Runner:
 
             # M9: inject hub CoT prompt when loop_config active and phase fans out.
             # The step description becomes the hub's system prompt inside run_plan.
+            # STAR/MAP ONLY — by design: these are the section-partition fan-outs
+            # the hub plans an ASSIGNED block for. MESH (debate) and PIPELINE
+            # (ordered stages) have no section partition, so they skip the hub
+            # CoT (no sizing/assignment features). Their breadth is still bounded
+            # — run_plan's max_agents caps _facets/PIPELINE stages regardless.
             if _lc is not None and topo in (STAR, MAP):
                 _hub_art_text = ""
                 if _eff_ws2 is not None:
@@ -1145,11 +1165,20 @@ class Runner:
                 sub_plan = replace(sub_plan, steps=(sub_step,))
 
             # M8: dynamic worker count from LoopConfig sizing (DESIGN §3).
+            # TWO DISTINCT LEVERS (the 2026-06-27 gap-flood fix):
+            #   _max_workers  → concurrency (how many spokes run at once),
+            #                   derived from the remaining-task count.
+            #   _max_agents   → breadth   (how many spokes EXIST), the raw
+            #                   max_agents slider. Passing only _max_workers
+            #                   capped concurrency while STAR/MAP still spawned
+            #                   18 spokes; run_plan now clamps the COUNT too.
             _max_workers = 4
+            _max_agents = None
             if _sizing_cfg is not None:
                 from agentkit.topology.sizing import compute_n_agents
                 _n_remaining = max(1, len(_ledger.remaining()))
                 _max_workers = compute_n_agents(_n_remaining, _sizing_cfg)
+                _max_agents = _sizing_cfg.max_agents
 
             # Collision guard (DESIGN §3.1): mark this phase in-flight before it
             # runs so remaining() excludes it; mark_done() clears it after. Keeps
@@ -1157,7 +1186,10 @@ class Runner:
             _ledger.mark_in_flight(step.id)
 
             try:
-                result = run_plan(sub_plan, client, budget=budget, max_workers=_max_workers)
+                result = run_plan(
+                    sub_plan, client, budget=budget,
+                    max_workers=_max_workers, max_agents=_max_agents,
+                )
             except BudgetExceeded as exc:
                 self._emit(
                     BudgetEvent(spent=exc.spent, ceiling=session.budget_ceiling, exceeded=True)

@@ -319,3 +319,88 @@ def test_run_plan_budget_under_ceiling_completes():
     p = assign_topologies(make_plan("write a summary"), mode="manual")
     result = run_plan(p, FakeClient(tokens=5), budget=FanoutBudget(ceiling=10_000))
     assert result.runs[0].topology == SINGLE
+
+
+# ---------------------------------------------------------------------------
+# 6. Fan-out BREADTH cap (2026-06-27 gap-flood fix) — max_agents bounds the
+#    spoke COUNT, not just concurrency. Regression guard for the 18-spoke /
+#    790K-token explosion: a capped max_workers did NOT stop it.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_facets_n_is_a_hard_cap_not_a_floor():
+    # The bug: parts[:max(n, len(parts))] returned ALL enumerated parts, so a
+    # description listing 18 subjects yielded 18 facets and n was a no-op.
+    from agentkit.topology.dynamic import _facets
+    comma_desc = "cover " + ", ".join(f"section {i}" for i in range(18))
+    assert len(_facets(comma_desc, 3)) == 3
+    enum_desc = " and ".join(f"topic{i}" for i in range(12))
+    assert len(_facets(enum_desc, 4)) == 4
+    # Fallback (no enumeration) still honours n.
+    assert len(_facets("gather sources on the topic", 5)) == 5
+
+
+@pytest.mark.unit
+def test_run_plan_max_agents_caps_star_spokes():
+    # A STAR description enumerating 18 items would (pre-fix) fan out to 18
+    # workers + 1 reduce. max_agents=5 must clamp it to <=5 workers (+1 reduce).
+    desc = "gather sources on " + ", ".join(f"topic{i}" for i in range(18))
+    p = Plan(task="t", steps=(PlanStep(id="s1", description=desc, topology=STAR),))
+    client = FakeClient()
+    result = run_plan(p, client, max_workers=5, max_agents=5)
+    assert result.runs[0].n_agents <= 6  # <=5 workers + 1 reduce
+    assert client.n_calls == result.runs[0].n_agents
+
+
+@pytest.mark.unit
+def test_run_plan_max_agents_caps_mesh_spokes():
+    # MESH = N draft + N revise + 1 reduce; N (facets) capped at max_agents.
+    desc = "compare " + ", ".join(f"option{i}" for i in range(18))
+    p = Plan(task="t", steps=(PlanStep(id="s1", description=desc, topology=MESH),))
+    client = FakeClient()
+    result = run_plan(p, client, max_workers=4, max_agents=4)
+    assert result.runs[0].n_agents <= 2 * 4 + 1
+
+
+@pytest.mark.unit
+def test_run_plan_max_agents_caps_map_buckets():
+    # Upstream emits 30 URLs; a MAP step would (pre-fix) spawn 30 workers.
+    # max_agents=5 must bucket them into <=5 workers (+1 reduce).
+    from agentkit.topology.core import MAP
+    urls = "\n".join(f"https://example.com/{i}" for i in range(30))
+
+    class UrlClient(FakeClient):
+        def chat(self, messages, tools=None):
+            self.n_calls += 1
+            # s1 (first call) emits the URL list; MAP workers echo.
+            text = urls if self.n_calls == 1 else f"reply#{self.n_calls}"
+            return ChatResult(text=text, total_tokens=self.tokens)
+
+    p = Plan(task="t", steps=(
+        PlanStep(id="s1", description="produce links", topology=SINGLE),
+        PlanStep(id="s2", description="summarise each", depends_on=("s1",), topology=MAP),
+    ))
+    result = run_plan(p, UrlClient(), max_workers=5, max_agents=5)
+    s2 = result.by_id["s2"]
+    assert s2.topology == MAP
+    assert s2.n_agents <= 6  # <=5 buckets + 1 reduce
+
+
+@pytest.mark.unit
+def test_run_plan_no_max_agents_preserves_cli_map_one_per_item():
+    # Back-compat: with no cap, MAP keeps one-worker-per-item (CLI behaviour).
+    from agentkit.topology.core import MAP
+    urls = "\n".join(f"https://example.com/{i}" for i in range(4))
+
+    class UrlClient(FakeClient):
+        def chat(self, messages, tools=None):
+            self.n_calls += 1
+            text = urls if self.n_calls == 1 else f"reply#{self.n_calls}"
+            return ChatResult(text=text, total_tokens=self.tokens)
+
+    p = Plan(task="t", steps=(
+        PlanStep(id="s1", description="produce links", topology=SINGLE),
+        PlanStep(id="s2", description="summarise each", depends_on=("s1",), topology=MAP),
+    ))
+    result = run_plan(p, UrlClient())  # no max_agents
+    assert result.by_id["s2"].n_agents == 4 + 1  # one per item + reduce

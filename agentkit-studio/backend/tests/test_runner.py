@@ -195,6 +195,33 @@ def test_seeded_run_emits_loop_seed(fake_client_factory) -> None:
     assert [s["id"] for s in plan_evt.steps] == ["s1", "s2"]
 
 
+def test_hill_climb_forces_star_topology(fake_client_factory, tmp_path) -> None:
+    """auto_improve on → every phase forced to STAR (DESIGN §11.4), overriding
+    auto-derived topology. 'compare ...' would normally classify to MESH; under
+    hill-climb it must become STAR so the section-aware reducer runs."""
+    events: list[StudioEvent] = []
+    session = _make_session()
+    session.hill_climb_config = {"auto_improve": True}
+    runner = Runner(
+        session, events.append, client_factory=fake_client_factory,
+        embedder=None, workspace_root=tmp_path,
+    )
+    runner.run("1. compare redis and postgres 2. write a recommendation")
+    topo = [e for e in events if e.EVENT_TYPE == "topology"][0]
+    tops = {s["topology"] for s in topo.steps}
+    assert tops == {"star"}, tops
+
+
+def test_no_hill_climb_keeps_auto_topology(fake_client_factory) -> None:
+    """Without auto_improve, topology stays auto-derived (regression guard for
+    the force-STAR override — it must not fire when hill-climb is off)."""
+    events = _run(fake_client_factory)  # no hill_climb_config
+    topo = [e for e in events if e.EVENT_TYPE == "topology"][0]
+    tops = {s["topology"] for s in topo.steps}
+    # "compare redis and postgres" → MESH; not forced to STAR.
+    assert "mesh" in tops, tops
+
+
 def test_tool_loop_emits_tool_events(fake_client) -> None:
     """With tools enabled + a mocked search_fn, a tool-calling client fires
     tool_call/tool_result during a phase (web_search runs, no network)."""

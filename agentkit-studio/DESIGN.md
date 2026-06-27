@@ -516,12 +516,13 @@ for step in plan_obj.steps:
     # hub CoT prompt (with ledger.to_context_block() + artifact_path) is built
     # for STAR/MAP fan-out phases and prepended to the step description.
 
-    # worker count is derived from remaining work (DESIGN §4):
+    # TWO levers (§4.4): concurrency vs breadth.
     n_remaining = max(1, len(ledger.remaining()))
-    max_workers = compute_n_agents(n_remaining, sizing_cfg)
+    max_workers = compute_n_agents(n_remaining, sizing_cfg)  # how many run at once
+    max_agents  = sizing_cfg.max_agents                      # how many SPOKES exist
 
     ledger.mark_in_flight(step.id)             # collision guard during the phase
-    result = run_plan(sub_plan, client, max_workers=max_workers)
+    result = run_plan(sub_plan, client, max_workers=max_workers, max_agents=max_agents)
     ledger.mark_done(step.id)                  # completed → carried to next phase
 
 # After workers finish, the Reducer collects PATCHES blocks from the phase
@@ -607,9 +608,12 @@ from dataclasses import dataclass
 class SizingConfig:
     min_tasks_per_agent: int = 3   # UI default; overridden by Loop Config panel slider
     max_tasks_per_agent: int = 5   # UI default; overridden by Loop Config panel slider
-    max_agents: int = 5            # HARD ceiling on agent count (menu slider). A
-                                   # flooded task list can never explode the topology
-                                   # (2026-06-27 gap-flood fix). Product spec: 3..5.
+    max_agents: int = 5            # HARD ceiling on agent count (menu slider).
+                                   # Product spec: 3..5. NOTE: clamping
+                                   # compute_n_agents alone does NOT stop the
+                                   # explosion — it bounds CONCURRENCY only. The
+                                   # spoke COUNT is a separate lever (see §4.4);
+                                   # max_agents must ALSO be passed to run_plan.
 
 def compute_n_agents(n_tasks: int, cfg: SizingConfig = SizingConfig()) -> int:
     """
@@ -646,8 +650,11 @@ live runner the count comes from the ledger's remaining work for the phase
 # runner.py — derive worker count, never hard-code n
 from agentkit.topology.sizing import compute_n_agents
 n_remaining = max(1, len(ledger.remaining()))
-max_workers = compute_n_agents(n_remaining, cfg=session.loop_config.sizing())
-result = run_plan(sub_plan, client, max_workers=max_workers)
+sizing_cfg  = session.loop_config.sizing()
+max_workers = compute_n_agents(n_remaining, cfg=sizing_cfg)   # concurrency
+result = run_plan(sub_plan, client,
+                  max_workers=max_workers,
+                  max_agents=sizing_cfg.max_agents)            # breadth (§4.4)
 ```
 
 `assign_tasks` partitions an explicit task list when one is in hand; the runner
@@ -660,6 +667,76 @@ Flow: **Loop Config UI panel → `LoopConfig` → `SizingConfig` → `compute_n_
 
 User sets sliders in the UI before running. Values travel in `POST /session` body
 as `loop_config`. Runner calls `session.loop_config.sizing()` to get `SizingConfig`.
+
+### 4.4 Fan-out breadth cap & hill-climb topology (2026-06-27)
+
+**Root cause of the 18-spoke / ~790K-token explosion.** `max_agents` /
+`compute_n_agents` only set `run_plan`'s `max_workers`, which is **concurrency**
+(thread-pool size) — NOT the number of spokes. The spoke COUNT is a *different*
+lever the cap never touched:
+
+- **STAR / MESH** — `dynamic._facets(description, n)` derived breadth by splitting
+  the step description on `","` / `" and "` / `" vs "`. The cap arg `n` was applied
+  as `parts[:max(n, len(parts))]` — i.e. an inverted cap that returned **all**
+  parts. A ledger-stuffed hub prompt (74 gap items) splits into ~18 facets →
+  18 STAR workers (+1 reduce) regardless of `max_workers=5`.
+- **MAP** — `dynamic._run_map` spawned one worker per item from
+  `_extract_items(upstream)` (30 URLs → 30 workers), also independent of
+  `max_workers`.
+
+**Fix (the COUNT lever).** `run_plan` gains `max_agents: int | None`:
+
+- `_facets` now hard-caps: `parts[:n]` (the `max(n,len)` bug is removed). STAR/MESH
+  facets ≤ `max_agents`.
+- `_run_map` buckets items into ≤`max_agents` groups (`_bucket`, ceiling-split);
+  one worker per bucket. With `max_agents=None` (CLI, no sizing) MAP keeps its
+  one-worker-per-item shape for back-compat.
+- The runner passes BOTH levers (§3.2 / §4.2): `max_workers` (concurrency, from
+  remaining count) and `max_agents` (breadth, the raw slider value — NOT the
+  remaining-derived count, or a phase with little remaining work would clamp its
+  own breadth to 1).
+
+`max_workers` and `max_agents` are deliberately **distinct**: conflating them is
+what hid the bug for a whole session. Verified offline: `_facets(18-item desc, 5)
+→ 5`; STAR `n_agents` 18 → 6 (5 workers + reduce). Section-consolidation (§11.4)
+shrinks the ledger INPUT but never bounded the spoke count — only this cap does.
+
+**Hill-climb forces STAR on every phase.** Topology is auto-derived per phase
+(`assign_topologies` overwrites the epic STAR placeholder; a "compare …" phase
+becomes MESH, a "write …" phase SINGLE). But only **STAR has the reducer** that
+does the section-aware merge/refine/review needed to accumulate the artifact
+across phases and epochs. So when `hill_climb_config.auto_improve` is on, the
+runner overrides **every** phase to STAR (right after `assign_topologies`). The
+breadth cap above keeps the forced STAR from exploding. MESH/PIPELINE/SINGLE are
+left for non-hill-climb runs. (Tests: `test_hill_climb_forces_star_topology`,
+`test_no_hill_climb_keeps_auto_topology`.)
+
+### 4.5 Section-keyed handoff & the STAR reducer (DESIGN target)
+
+**Decision (2026-06-27):** the phase-to-phase handoff is **section-keyed**, and
+the STAR reducer is the active consolidation engine — not a generic synthesis.
+
+- **Handoff** = `[ Section{ id, document_text, weaknesses[] }, … ]` — each section
+  carries its current document AND its associated weakness list. That whole
+  structure flows phase → phase (and seeds the next epoch), replacing the flat
+  `outputs[step.id] = sr.output` text handoff.
+- **STAR reducer (B2 — lives in the topology's reduce step, not the orchestrator):**
+  for each section it **merges / refines / reviews** every assigned worker's
+  output into that section's document, using the section's weakness list as the
+  review checklist. The merge logic is injected by the orchestrator via a generic
+  **reducer hook** on `run_plan` (keeps `agentkit` core domain-free: core only
+  learns "use this reducer instead of the default synthesis"; the section/weakness
+  semantics stay in `studio`).
+- **Every phase** runs this reduce and writes the section-keyed artifact back with
+  the existing grow-only anti-regression ratchet (`len(out) >= _seed_len`, then
+  `_seed_len = len(out)`), so the document is monotonic across phases and epochs.
+
+**Status.** Landed: force-STAR-under-hill-climb (§4.4) + the breadth cap.
+**Pending:** the `run_plan` reducer hook, the `Section{document, weaknesses}`
+handoff type, and per-phase section-aware reduce (generalizing the last-phase
+additive-merger at `runner.py` `is_last` block to every phase). This subsumes the
+earlier "pin last phase" idea — with every hill-climb phase STAR + section-aware,
+no special last-phase casing is needed.
 Hardcoded defaults in `SizingConfig` are never used directly by the runner.
 
 ```python

@@ -30,6 +30,7 @@ control flow, no mutation of the input ``Plan``.
 
 from __future__ import annotations
 
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -211,6 +212,24 @@ def _chat(client: LLMClient, prompt: str, *, system: str | None = None) -> tuple
 
 # Default fan-out breadth when a step's description does not enumerate peers.
 _DEFAULT_PEERS = 3
+
+# Hard ceiling on fan-out BREADTH (workers per STAR/MESH/MAP step). Set by
+# run_plan from its ``max_agents`` arg; ``None`` = no explicit cap (CLI callers
+# with no sizing). This is the COUNT lever, DISTINCT from ``_POOL_WORKERS``
+# (which only bounds concurrency). Conflating the two was the 2026-06-27
+# gap-flood bug: a pool capped at 5 still spawned 18 spokes because the spoke
+# count came from ``_facets``/item-count, never from the pool size.
+_MAX_SPOKES: int | None = None
+
+
+def _spoke_cap() -> int:
+    """Effective hard cap on STAR/MESH facet count (≥1).
+
+    Falls back to ``_DEFAULT_PEERS`` when ``run_plan`` set no ``max_agents`` —
+    a facet is "just a prompt-steering nudge, not load-bearing logic" (see
+    ``_facets``), so 3 nudges is a sane unbounded-caller default.
+    """
+    return _MAX_SPOKES if _MAX_SPOKES is not None else _DEFAULT_PEERS
 _PIPELINE_STAGES = ("Outline the approach.", "Develop the details.",
                     "Produce the final result.")
 
@@ -227,13 +246,13 @@ def _run_star(
     budget: FanoutBudget | None,
 ) -> tuple[str, int, int]:
     """STAR: fan out independent workers in parallel, then reduce. → (text, n, tokens)."""
-    facets = _facets(step.description, _DEFAULT_PEERS)
+    facets = _facets(step.description, _spoke_cap())
     base = _with_upstream(step.description, upstream)
 
     def work(facet: str) -> tuple[str, int]:
         return _chat(client, f"{base}\n\nFocus specifically on: {facet}")
 
-    results: list[tuple[str, int]] = _parallel_map(work, facets)
+    results: list[tuple[str, int]] = _parallel_map(work, list(facets))
     tokens = 0
     drafts = []
     for text, tok in results:
@@ -256,7 +275,7 @@ def _run_mesh(
     """MESH: peers draft (round 1), READ each other via a MessageBus, REVISE
     (round 2), then reduce. The cross-read is what distinguishes mesh from a
     star fan-out — peers debate. → (text, n, tokens)."""
-    facets = _facets(step.description, _DEFAULT_PEERS)
+    facets = _facets(step.description, _spoke_cap())
     base = _with_upstream(step.description, upstream)
     bus = MessageBus()
     tokens = 0
@@ -382,10 +401,21 @@ def _run_map(
 
     base = step.description
 
-    def work(item: str) -> tuple[str, int]:
-        return _chat(client, f"{base}\n\nItem: {item}")
+    # Bound the worker count: one worker per BUCKET, not per item. With no cap
+    # (CLI, _MAX_SPOKES is None) keep the original one-worker-per-item shape; a
+    # cap (Studio's max_agents) partitions the items into ≤cap buckets so an
+    # upstream emitting 30 URLs spawns ≤cap workers, not 30 (the gap-flood fix
+    # applied to MAP's own breadth lever — item count, not _facets).
+    buckets = (
+        _bucket(items, _MAX_SPOKES) if _MAX_SPOKES is not None
+        else [[it] for it in items]
+    )
 
-    results: list[tuple[str, int]] = _parallel_map(work, items)
+    def work(bucket: list[str]) -> tuple[str, int]:
+        listing = "\n".join(f"- {it}" for it in bucket)
+        return _chat(client, f"{base}\n\nItems:\n{listing}")
+
+    results: list[tuple[str, int]] = _parallel_map(work, buckets)
     tokens = 0
     drafts = []
     for text, tok in results:
@@ -393,13 +423,13 @@ def _run_map(
         tokens += tok
         drafts.append(text)
 
-    synthesis = "\n\n".join(f"[item {i + 1}] {d}" for i, d in enumerate(drafts))
+    synthesis = "\n\n".join(f"[group {i + 1}] {d}" for i, d in enumerate(drafts))
     final, rtok = _chat(
         client,
         f"Synthesize these per-item results into one answer:\n\n{synthesis}",
     )
     _charge(budget, rtok)
-    return final, len(items) + 1, tokens + rtok
+    return final, len(buckets) + 1, tokens + rtok
 
 
 _DISPATCH = {
@@ -417,6 +447,7 @@ def run_plan(
     *,
     budget: FanoutBudget | None = None,
     max_workers: int = 4,
+    max_agents: int | None = None,
 ) -> DynamicPlanResult:
     """Execute every step under its assigned topology, in ``depends_on`` order.
 
@@ -440,7 +471,13 @@ def run_plan(
         plan:        A Plan whose steps carry ``.topology`` (assign first).
         client:      The injected LLMClient.
         budget:      Optional FanoutBudget ceiling (default None = unbounded).
-        max_workers: Parallelism for STAR/MESH fan-out (default 4).
+        max_workers: Concurrency for STAR/MESH/MAP fan-out (thread-pool size,
+            default 4). Bounds how many spokes run AT ONCE — NOT how many exist.
+        max_agents:  Hard cap on spoke COUNT (breadth) per fan-out step: ≤N
+            STAR/MESH facets and ≤N MAP buckets. ``None`` (default) = no cap,
+            preserving CLI behaviour. This is the lever the Studio MAX AGENTS
+            slider drives; ``max_workers`` alone could not stop the 2026-06-27
+            18-spoke explosion because it only throttled concurrency.
 
     Returns:
         DynamicPlanResult with one StepRun per step.
@@ -448,8 +485,9 @@ def run_plan(
     Raises:
         BudgetExceeded: if a ``budget`` ceiling is crossed mid-fan-out.
     """
-    global _POOL_WORKERS
-    _POOL_WORKERS = max_workers
+    global _POOL_WORKERS, _MAX_SPOKES
+    _POOL_WORKERS = max_workers      # concurrency lever (thread pool size)
+    _MAX_SPOKES = max_agents         # breadth lever (spoke COUNT cap) — distinct
     t0 = time.perf_counter()
     outputs: dict[str, str] = {}
     runs: list[StepRun] = []
@@ -527,6 +565,12 @@ def _facets(description: str, n: int) -> tuple[str, ...]:
     use those; otherwise fall back to ``n`` generic critique angles so a vague
     step still fans out to a real debate/survey. Deterministic — the facet text
     is just a prompt steering nudge, not load-bearing logic.
+
+    ``n`` is a HARD cap on the returned breadth. (It was previously
+    ``max(n, len(parts))`` — which inverted the cap into a FLOOR and let a
+    description enumerating 18 subjects fan out to 18 spokes: the 2026-06-27
+    gap-flood explosion. A ledger-stuffed STAR prompt is full of commas/"and"s,
+    so the split count is unbounded; the cap must clamp it.)
     """
     import re
 
@@ -534,18 +578,31 @@ def _facets(description: str, n: int) -> tuple[str, ...]:
     parts = re.split(r"\s+(?:vs\.?|versus|and)\s+", description, flags=re.IGNORECASE)
     parts = [p.strip(" .,:;") for p in parts if p.strip(" .,:;")]
     if len(parts) >= 2:
-        return tuple(parts[:max(n, len(parts))])
+        return tuple(parts[:n])
 
     # Comma list.
     commas = [p.strip() for p in description.split(",") if p.strip()]
     if len(commas) >= 2:
-        return tuple(commas[:max(n, len(commas))])
+        return tuple(commas[:n])
 
     # Fallback: n generic angles.
     angles = ("the strongest case for it", "the strongest case against it",
               "the practical trade-offs", "edge cases and risks",
               "the simplest viable option")
     return angles[:n]
+
+
+def _bucket(items: list, n: int) -> list[list]:
+    """Partition ``items`` into at most ``n`` order-preserving buckets.
+
+    Ceiling split (mirrors ``sizing.assign_tasks``): earlier buckets may carry
+    one extra item; ``len(items) <= n`` degrades to one item per bucket. One MAP
+    worker handles one bucket, so this is the hard cap on MAP fan-out breadth.
+    """
+    if n <= 0 or len(items) <= n:
+        return [[x] for x in items]
+    size = math.ceil(len(items) / n)
+    return [items[i * size:(i + 1) * size] for i in range(n)]
 
 
 def _topo_order(steps: tuple[PlanStep, ...]) -> list[PlanStep]:
