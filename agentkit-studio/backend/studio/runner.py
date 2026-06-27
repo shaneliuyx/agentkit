@@ -255,8 +255,12 @@ def _build_worker_cot_prompt(
         "Step 2 — Execute: use web_search and web_fetch to gather evidence.\n"
         "  For each source: note the URL, title, and key facts extracted.\n\n"
         "Step 3 — Assess completeness. One more search if any task is thin.\n\n"
-        "Step 4 — Draft your patch suggestions.\n"
+        "Step 4 — Draft your patch suggestions (patch-or-silent, DESIGN §11.2).\n"
         "  Rules:\n"
+        "    - Emit a PATCH for a section ONLY if you found sourced content (real URL)\n"
+        "      that improves it. Found nothing → emit NO patch for that section.\n"
+        "    - NEVER write prose explaining why you couldn't (no 'search unavailable',\n"
+        "      no 'I could not find'). Silence = no change; the reducer keeps the doc.\n"
         "    - Use the exact section heading string as your anchor (e.g. \"## Results\").\n"
         "      Copy the heading verbatim from CURRENT DELIVERABLE CONTENT — do not paraphrase.\n"
         "    - Each patch targets ONLY sections you were assigned.\n"
@@ -265,9 +269,10 @@ def _build_worker_cot_prompt(
         "      anchors commute; replace patches on the same anchor conflict.\n"
         "    - Use the PATCHES JSON format exactly (see the patch schema).\n\n"
         "Step 5 — Emit DONE markers: DONE: [\"task-id-1\", \"task-id-2\"]\n\n"
-        "Step 6 — Emit your PATCHES block. The Reducer will collect all workers'\n"
-        "  patches, resolve conflicts, perform a full editorial refinement pass,\n"
-        "  then atomic-write to disk.\n"
+        "Step 6 — Emit your PATCHES block (empty [] if you found nothing), then ONE\n"
+        "  status line: 'SEARCH: ok' or 'SEARCH: error' (error iff the search tool\n"
+        "  itself failed). The Reducer applies patches ADDITIVELY — it never rewrites\n"
+        "  or shortens the document (DESIGN §11.3).\n"
     )
 
 
@@ -353,6 +358,31 @@ def _dedupe_assignment(
             kept.append(s)
         clean[agent] = kept
     return clean, overlaps
+
+
+def _phase_search_failed(outputs: list[str]) -> bool:
+    """True iff every worker reported SEARCH: error and none produced findings (§11.6).
+
+    A phase where the search tool itself failed for ALL workers must HALT with a
+    visible notice — not silently no-op (which would look like "doc is already
+    perfect") and not write failure-narration. Returns False if any worker found
+    content (RESEARCH_FINDING / PATCHES) or reported SEARCH: ok, or if there are
+    no worker outputs to judge.
+    """
+    if not outputs:
+        return False
+    saw_error = False
+    for o in outputs:
+        low = o.lower()
+        # Real work: a RESEARCH_FINDING block, a NON-empty PATCHES array, or an
+        # explicit SEARCH: ok. (An empty `PATCHES: []` is no work, not evidence.)
+        if ("research_finding" in low
+                or _re.search(r"search:\s*ok", low)
+                or _parse_patches_from_output(o)):
+            return False
+        if _re.search(r"search:\s*error", low):
+            saw_error = True
+    return saw_error
 
 
 def _parse_patches_from_output(text: str) -> list:
@@ -703,8 +733,16 @@ class Runner:
                         f"{_fix_items}\n\n"
                         f"For each item found, output a RESEARCH_FINDING block:\n"
                         f"{_finding_schema}\n"
-                        f"Call web_search immediately. Do not narrate — output RESEARCH_FINDING "
-                        f"blocks only. URL is required in every block."
+                        f"Call web_search immediately.\n\n"
+                        f"WORKER CONTRACT (DESIGN §11.2) — patch-or-silent:\n"
+                        f"  - Found sourced content (with a real URL) → output a RESEARCH_FINDING.\n"
+                        f"  - Found nothing → output NOTHING. Do NOT write a sentence explaining\n"
+                        f"    why (no 'web search unavailable', no 'I could not find...'). Silence\n"
+                        f"    means 'no change' — the reducer keeps the existing doc as-is.\n"
+                        f"  - End with exactly ONE status line:\n"
+                        f"      SEARCH: ok      (the search tool worked, whatever it returned)\n"
+                        f"      SEARCH: error   (the search tool itself failed — quota/timeout/down)\n"
+                        f"  URL is required in every RESEARCH_FINDING. Failure-narration is forbidden."
                     )
 
         # session frame
@@ -861,17 +899,27 @@ class Runner:
                         if _seed_text else ""
                     )
                     desc = (
-                        f"You are the reducer in a multi-worker research pipeline.\n\n"
+                        f"You are the reducer in a multi-worker research pipeline.\n"
+                        f"You are an ADDITIVE MERGER, never a rewriter (DESIGN §11.3).\n\n"
                         f"Workers searched the web and produced RESEARCH_FINDING blocks above "
                         f"(each has ARTICLE_TITLE / URL / POPULARITY / PATCH_TARGET fields).\n\n"
-                        f"Your job — apply every RESEARCH_FINDING block to the artifact:\n"
-                        f"1. Find PATCH_TARGET in the artifact.\n"
-                        f"2. If URL is missing inline → add it next to the citation.\n"
-                        f"3. If POPULARITY is missing → add it in parentheses.\n"
-                        f"4. If the article is new (not in artifact) → add a summary paragraph "
-                        f"   and a References entry with the URL.\n"
-                        f"5. Output the COMPLETE updated artifact — every section, no truncation.\n"
-                        f"   Your output length must be >= the input artifact length.\n\n"
+                        f"ABSOLUTE RULES — violating these REGRESSES the deliverable:\n"
+                        f"  - PRESERVE every existing section of the CURRENT ARTIFACT VERBATIM.\n"
+                        f"    Do NOT summarize, shorten, condense, re-word, or remove anything.\n"
+                        f"  - You may ONLY ADD content that comes from a worker's RESEARCH_FINDING\n"
+                        f"    (with its URL). No finding for a section → leave that section exactly\n"
+                        f"    as-is.\n"
+                        f"  - If workers found NOTHING (no RESEARCH_FINDING blocks above), output\n"
+                        f"    the CURRENT ARTIFACT completely unchanged. Never write a 'blocker' or\n"
+                        f"    'search unavailable' report — that is failure-narration, not content.\n\n"
+                        f"How to apply each RESEARCH_FINDING:\n"
+                        f"  1. Find PATCH_TARGET in the artifact.\n"
+                        f"  2. URL missing inline → add it next to the citation.\n"
+                        f"  3. POPULARITY missing → add it in parentheses.\n"
+                        f"  4. New article → add a summary paragraph + a References entry with the URL.\n\n"
+                        f"Output: the CURRENT ARTIFACT with additions applied — every original\n"
+                        f"section intact, output length STRICTLY >= the input length (a shorter\n"
+                        f"output is rejected and the prior good doc is kept).\n\n"
                         f"{_art_ctx}"
                         f"Workflow instruction: {desc}"
                     )
@@ -951,6 +999,19 @@ class Runner:
             sr = result.runs[0]
             outputs[step.id] = sr.output
             final_output = sr.output
+
+            # §11.6: if the search tool itself failed for this whole phase, surface
+            # it as a visible gate check — a broken-search run must not masquerade
+            # as a finished one (and the anti-regression guard keeps the seed).
+            if _phase_search_failed([sr.output]):
+                _sf_gate = GateEvent(
+                    name="search-availability",
+                    outcome="fail",
+                    detail="Search tool failed for this phase (SEARCH: error, no findings); "
+                           "deliverable left unchanged (no regression).",
+                )
+                gate_events.append(_sf_gate)
+                self._emit(_sf_gate)
 
             # R2 enforcement: validate the hub's ASSIGNED block in CODE (not just
             # prompt). Parse agent→sections, detect any section claimed by >1

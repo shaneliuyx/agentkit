@@ -21,8 +21,45 @@ from studio.runner import (
     _parse_assigned,
     _parse_epic_plan,
     _parse_patches_from_output,
+    _phase_search_failed,
     _plan_from_epics,
 )
+
+
+# ---------------------------------------------------------------------------
+# §11 — worker contract + all-error halt
+# ---------------------------------------------------------------------------
+
+def test_worker_prompt_patch_or_silent_contract() -> None:
+    p = _build_worker_cot_prompt("task", "doc")
+    low = p.lower()
+    assert "patch-or-silent" in low
+    assert "found nothing" in low and "no patch" in low
+    assert "search: ok" in low and "search: error" in low
+    assert "never rewrites" in low and "shortens" in low  # additive reducer promise
+
+
+def test_phase_search_failed_all_error_no_findings() -> None:
+    outs = ["I searched.\nPATCHES:\n```json\n[]\n```\nSEARCH: error"]
+    assert _phase_search_failed(outs) is True
+
+
+def test_phase_search_failed_false_when_any_finding() -> None:
+    outs = ["## RESEARCH_FINDING\nURL: https://x\nSEARCH: ok", "nothing\nSEARCH: error"]
+    assert _phase_search_failed(outs) is False
+
+
+def test_phase_search_failed_false_when_search_ok() -> None:
+    assert _phase_search_failed(["searched, found little\nSEARCH: ok"]) is False
+
+
+def test_phase_search_failed_empty_outputs() -> None:
+    assert _phase_search_failed([]) is False
+
+
+def test_phase_search_failed_no_status_is_false() -> None:
+    # No SEARCH status at all → don't claim a search failure.
+    assert _phase_search_failed(["some normal output with no status"]) is False
 
 
 class _FakeChatResult:
