@@ -433,6 +433,7 @@ def mine_weaknesses_from_outputs(
     requirement: str,
     client: Any,
     scorer_feedback: str = "",
+    verified_urls: list[str] | None = None,
 ) -> list[str]:
     """Extract weakness patterns from plain text phase outputs (no AgentResult needed).
 
@@ -460,6 +461,17 @@ def mine_weaknesses_from_outputs(
         f"{scorer_feedback}\n"
         f"Use these as your starting point — include them and add any further gaps you find.\n\n"
     ) if scorer_feedback else ""
+    # Cache-as-oracle (§11.10): a URL present in the fetch cache was ACTUALLY
+    # fetched from a live site, so it is real — the miner must not flag it as
+    # unverified/fabricated. Verification is a FACT (in cache or not), not a
+    # judgment.
+    _verified_section = (
+        "VERIFIED SOURCES — the following URLs were ACTUALLY FETCHED from live "
+        "sites (they are in the fetch cache), so they are REAL, not fabricated. Do "
+        "NOT flag these as unverified or unsubstantiated:\n"
+        + "\n".join(f"  - {u}" for u in (verified_urls or [])[:20])
+        + "\n\n"
+    ) if verified_urls else ""
     prompt = (
         f"Today's date is {_today}. "
         f"Review these agent phase outputs against the TASK. List up to 5 specific "
@@ -474,6 +486,7 @@ def mine_weaknesses_from_outputs(
         f"4. If the TASK asks for 'most popular' or 'top' items: is there evidence "
         f"(views, stars, engagement metrics) justifying the ranking?\n\n"
         f"{_scorer_section}"
+        f"{_verified_section}"
         f"TASK: {requirement[:400]}\n\n{combined}\n\n"
         f"Return a JSON array of short strings. PREFIX each weakness with the artifact "
         f"SECTION it concerns, in square brackets — because the next run assigns each "

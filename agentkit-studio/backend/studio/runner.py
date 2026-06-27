@@ -301,6 +301,42 @@ def _build_worker_cot_prompt(
     )
 
 
+def _build_executor_prompt(goal: str, artifact_text: str, weaknesses_block: str) -> str:
+    """STAR-spoke EXECUTOR prompt (§11.10 — the score-ceiling fix).
+
+    The spokes were given the HUB planning prompt ("you are the planning hub …
+    assign work … emit TASK_LIST/ASSIGNED"), so they PLANNED instead of fetching:
+    the reducer received analysis, the artifact never gained sourced content, and
+    the score stalled. This frames each spoke as a research EXECUTOR — fetch real
+    pages and emit RESEARCH_FINDING blocks WITH their URLs — never a planner.
+    """
+    art = (artifact_text or "").strip()
+    art_block = (
+        f"CURRENT DELIVERABLE (improve it; do not restate a plan):\n{art[:3000]}\n\n"
+        if art else ""
+    )
+    return (
+        _today_note()
+        + "You are a RESEARCH EXECUTOR, not a planner. DO the research NOW — do NOT "
+        "emit TASK_LIST, ASSIGNED, or any plan/assignment.\n\n"
+        f"GOAL: {goal}\n\n"
+        f"{art_block}"
+        f"WEAKNESSES TO FIX (concrete gaps):\n{weaknesses_block or '(none)'}\n\n"
+        "Step 1 — For each weakness in your focus, run web_search THEN web_fetch to "
+        "read the ACTUAL article content (not just the snippet).\n"
+        "Step 2 — Emit one RESEARCH_FINDING per page you fetched, exactly:\n"
+        "  RESEARCH_FINDING:\n"
+        "  ARTICLE_TITLE: <title>\n"
+        "  URL: <the EXACT url you fetched — REQUIRED, never omit>\n"
+        "  POPULARITY: <metric if stated, else n/a>\n"
+        "  PATCH_TARGET: <the '## Section' heading this improves>\n"
+        "  CONTENT: <2-4 sentences of substance FROM the fetched page>\n\n"
+        "Rules: emit a RESEARCH_FINDING ONLY for a URL you actually fetched (so it "
+        "is real and verifiable); every finding MUST carry its URL; found nothing "
+        "for a weakness → emit nothing for it (no narration, no plan).\n"
+    )
+
+
 def _build_reducer_refine_prompt(goal: str, artifact_path: str) -> str:
     """Reducer Phase-2 editorial refinement prompt (DESIGN §2.2 Step 5).
 
@@ -1270,30 +1306,19 @@ class Runner:
                 _hub_wk_lines = "\n".join(
                     f"- {w}" for w in getattr(session, "weaknesses", []) or []
                 )
-                _hub_desc = _build_hub_cot_prompt(
+                # §11.10: frame the STAR spokes as EXECUTORS, not planning hubs.
+                # The old _build_hub_cot_prompt made every spoke "the planning hub"
+                # → they emitted TASK_LIST/ASSIGNED (plans) instead of fetching, so
+                # the reducer got analysis, the artifact gained no sources, and the
+                # score stalled. Execute-and-emit-RESEARCH_FINDING framing instead.
+                _executor_desc = _build_executor_prompt(
                     goal=plan_obj.task or requirement,
-                    artifact_path=str(_eff_ws2 / session.session_id / "artifact.md")
-                    if _eff_ws2 else "artifact.md",
-                    ledger_block=_ledger.to_context_block(),
-                    weaknesses_block=_hub_wk_lines,
                     artifact_text=_hub_art_text,
-                    max_tasks_per_agent=_lc.max_tasks_per_agent,
-                )
-                # Prepend hub CoT; append worker §5.3 patch-emission rules so the
-                # fanned-out execution agents know to anchor PATCHES on verbatim
-                # section headings (DESIGN §5.3). Hub plans the assignment, workers
-                # emit section-scoped suggestions the Reducer later merges + refines.
-                _worker_rules = _build_worker_cot_prompt(
-                    task_list_for_agent="(your assigned sections — see ASSIGNED above)",
-                    artifact_current_text=_hub_art_text or "(deliverable will be created this phase)",
+                    weaknesses_block=_hub_wk_lines,
                 )
                 sub_step = replace(
                     sub_step,
-                    description=(
-                        _hub_desc + "\n\n" + sub_step.description
-                        + "\n\nWORKER PATCH RULES (apply when executing an assigned section):\n"
-                        + _worker_rules
-                    ),
+                    description=_executor_desc + "\n\n" + sub_step.description,
                 )
                 sub_plan = replace(sub_plan, steps=(sub_step,))
 
@@ -1689,6 +1714,7 @@ class Runner:
                 _original_requirement,
                 _judge_client,
                 scorer_feedback=_scorer_feedback,
+                verified_urls=_verified_urls or None,  # cache-as-oracle (§11.10)
             )
             # §11.4: prepend the reducer's last-phase gaps — they are concrete and
             # grounded ("§Results: no source URL"), so they make the next run's

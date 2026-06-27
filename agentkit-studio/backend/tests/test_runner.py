@@ -314,6 +314,40 @@ def test_today_note_injects_current_date() -> None:
     assert "future" in note.lower()
 
 
+def test_executor_prompt_frames_research_not_planning() -> None:
+    """STAR spokes must be EXECUTORS (fetch + emit findings), not planning hubs —
+    the planner framing was the score ceiling (§11.10)."""
+    from studio.runner import _build_executor_prompt
+    p = _build_executor_prompt("find popular articles", "# Doc\n## Sources\nx",
+                               "- [## Sources] missing url")
+    assert "RESEARCH EXECUTOR" in p
+    assert "TASK_LIST" in p and "ASSIGNED" in p          # explicitly FORBIDDEN
+    assert "RESEARCH_FINDING" in p and "URL:" in p       # the execute output format
+    assert "find popular articles" in p and "missing url" in p
+    assert "planning hub" not in p                       # the bug framing is gone
+
+
+def test_miner_marks_cached_urls_verified() -> None:
+    """Cache-as-oracle (§11.10): a URL in the fetch cache is real, so the miner is
+    told NOT to flag it as unverified/fabricated."""
+    from agentkit.types import ChatResult
+    from studio.task_runs import mine_weaknesses_from_outputs
+    cap: dict = {}
+
+    class _C:
+        def chat(self, messages, tools=None) -> ChatResult:
+            cap["p"] = messages[-1]["content"]
+            return ChatResult(text="[]", total_tokens=1)
+
+    mine_weaknesses_from_outputs(
+        {"s1": "x"}, "doc body", "the task", _C(),
+        verified_urls=["https://real.example.com/a"],
+    )
+    assert "VERIFIED SOURCES" in cap["p"]
+    assert "https://real.example.com/a" in cap["p"]
+    assert "not fabricated" in cap["p"].lower()
+
+
 def test_hill_climb_forces_star_topology(fake_client_factory, tmp_path) -> None:
     """auto_improve on → every phase forced to STAR (DESIGN §11.4), overriding
     auto-derived topology. 'compare ...' would normally classify to MESH; under
