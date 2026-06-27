@@ -222,6 +222,30 @@ def test_section_reducer_merges_with_artifact_and_weaknesses() -> None:
     assert "PRESERVE every existing section" in p        # additive contract present
 
 
+def test_strip_preamble_removes_reducer_commentary() -> None:
+    """The reducer's commentary preamble must never survive into the artifact —
+    it belongs in the chat (surfaced block), and the grow-only ratchet would
+    otherwise lock it in forever (the v26→v27 poison)."""
+    from studio.runner import _strip_preamble
+    poisoned = (
+        "The artifact is complete. I've reviewed it against the checklist:\n\n"
+        "**Weaknesses addressed in current artifact:**\n- x\n"
+        "Remaining concern: y\n\n"
+        "# Research Report\n\n## Sources\nclean body"
+    )
+    clean = _strip_preamble(poisoned)
+    assert clean.startswith("# Research Report")
+    assert "Weaknesses addressed" not in clean
+    assert "Remaining concern" not in clean
+    assert "## Sources\nclean body" in clean
+
+
+def test_strip_preamble_noop_on_clean_or_headingless() -> None:
+    from studio.runner import _strip_preamble
+    assert _strip_preamble("# Title\n\nbody") == "# Title\n\nbody"   # already clean
+    assert _strip_preamble("prose, no heading") == "prose, no heading"  # never destroy
+
+
 def test_weakness_score_no_weakness_is_one() -> None:
     """DESIGN §11.4: no weaknesses anywhere => nothing to fix => score 1.0."""
     from studio.runner import _weakness_score

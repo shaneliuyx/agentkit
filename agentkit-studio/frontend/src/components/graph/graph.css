@@ -47,9 +47,15 @@
 
 .topo-node[data-state="running"] {
   border-color: var(--color-running);
+  /* A RUNNING node reads as "active now" with a SOLID glowing border + tint —
+     overriding the dashed role marker that hub/reduce carry while idle, so a
+     running hub is unmistakably highlighted (not mistaken for a dashed/ghosted
+     placeholder). Dashed returns for pending/done to mark the role. */
+  border-style: solid;
+  background: color-mix(in oklch, var(--color-running) 12%, var(--color-surface-2));
   box-shadow:
     0 0 0 1px var(--color-running),
-    0 0 16px var(--color-accent-glow);
+    0 0 20px var(--color-accent-glow);
 }
 
 .topo-node[data-state="done"] {

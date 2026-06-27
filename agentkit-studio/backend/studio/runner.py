@@ -520,6 +520,24 @@ def _unresolved_block(weaknesses: list[str], repeat_failed: set[str], limit: int
     )
 
 
+def _strip_preamble(text: str) -> str:
+    """Strip any non-document preamble before the artifact's first markdown
+    heading (DESIGN §11.4). A reducer occasionally prepends review commentary
+    ('The artifact is complete... Weaknesses addressed: ✅... Remaining concern:')
+    instead of emitting the document. That commentary belongs in the chat (the
+    surfaced _unresolved_block), NEVER in the artifact — and the grow-only ratchet
+    would otherwise LOCK it into the seed forever (a clean-up that shortens the doc
+    is rejected as a regression). Applied at every artifact boundary (seed, reducer
+    read, write-back) so inherited corruption is sanitized and cannot propagate.
+
+    Strips everything before the first line beginning with '#'. No heading found =>
+    return unchanged (never destroy a genuinely heading-less document).
+    """
+    import re
+    m = re.search(r"^#", text, flags=re.MULTILINE)
+    return text[m.start():] if m else text
+
+
 def _weakness_score(prior_weaknesses: list[str], open_weaknesses: list[str]) -> float:
     """Deterministic hill-climb score = solved / total over the weakness set (§11.4).
 
@@ -914,8 +932,16 @@ class Runner:
                     # improvement" — a failed/thin run keeps the prior good doc
                     # instead of overwriting it (the regression that stranded the
                     # good 28KB report behind thin "search unavailable" output).
+                    # §11.4: SANITIZE inherited corruption first — an artifact a
+                    # prior reducer poisoned with a commentary preamble would
+                    # otherwise be locked in by the grow-only ratchet forever (a
+                    # clean-up that shortens it reads as a regression). Strip on seed
+                    # so _seed_len is the CLEAN baseline the run grows from.
                     try:
-                        _seed_len = (_curr_ws.root / "artifact.md").stat().st_size
+                        _seed_path = _curr_ws.root / "artifact.md"
+                        _seed_clean = _strip_preamble(_seed_path.read_text())
+                        _seed_path.write_text(_seed_clean)
+                        _seed_len = len(_seed_clean)
                     except OSError:
                         _seed_len = 0
                 # Accumulate weaknesses from this task's prior runs AND from
@@ -1271,7 +1297,9 @@ class Runner:
             if _artifact_copied and _eff_ws2 is not None:
                 _cur_art = ""
                 try:
-                    _cur_art = (_eff_ws2 / session.session_id / "artifact.md").read_text()
+                    _cur_art = _strip_preamble(
+                        (_eff_ws2 / session.session_id / "artifact.md").read_text()
+                    )
                 except OSError:
                     pass
                 _reducer = _make_section_reducer(
@@ -1347,12 +1375,13 @@ class Runner:
             # current artifact, then raise _seed_len — the doc grows monotonically
             # across phases AND epochs, never regresses (a thin/failed reduce keeps
             # the prior good doc).
+            _clean_out = _strip_preamble(sr.output)  # never persist reducer commentary
             if (_artifact_copied and _eff_ws2 is not None
-                    and len(sr.output.strip()) > 0
-                    and len(sr.output) >= _seed_len):
+                    and len(_clean_out.strip()) > 0
+                    and len(_clean_out) >= _seed_len):
                 try:
-                    (_eff_ws2 / session.session_id / "artifact.md").write_text(sr.output)
-                    _seed_len = len(sr.output)   # ratchet up for the next phase
+                    (_eff_ws2 / session.session_id / "artifact.md").write_text(_clean_out)
+                    _seed_len = len(_clean_out)   # ratchet up for the next phase
                 except OSError:
                     pass
 
