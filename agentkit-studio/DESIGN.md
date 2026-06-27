@@ -1330,3 +1330,92 @@ fixes are not enough; inherited state must be sanitized/normalized too.
   diagram nodes), not the durable GraphStore's own status, which drifted out of
   sync. (5) A running node uses a SOLID glowing border (dashed read as inactive
   for the hub/reduce role markers); late-mounted spoke nodes reveal-animate.
+
+---
+
+## 12. Persistence — `task_runs.db` (cross-session hill-climb store)
+
+A single SQLite file (`backend/tmp/task_runs.db`) is the entire durable state.
+One row per *run* of a *task*; it is what makes hill-climb work across sessions.
+
+```sql
+CREATE TABLE task_runs (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_hash             TEXT    NOT NULL,           -- sha256(requirement.strip().lower())[:12]
+  session_id            TEXT    NOT NULL,           -- the run that produced this row
+  version               INTEGER NOT NULL,           -- 1,2,3… per task_hash (the hill-climb epoch lineage)
+  score                 REAL    NOT NULL,           -- §11.10 weakness-ratio: solved/total, 1.0 = no weakness
+  weaknesses_json       TEXT    NOT NULL DEFAULT '[]', -- ["[## Section] gap", …] section-tagged (§11.4)
+  artifact_path         TEXT    NOT NULL DEFAULT '',-- workspace artifact.md for this run
+  requirement           TEXT    NOT NULL DEFAULT '',-- the original task text
+  created_at            TEXT    NOT NULL DEFAULT (datetime('now')),
+  result_text           TEXT    NOT NULL DEFAULT '',-- the deliverable shown in chat (preamble-stripped, §11.10)
+  requirement_embedding BLOB                        -- vector for R10 cross-task similarity (§2.4)
+);
+```
+
+**Design rules.**
+- **`task_hash` is the lineage key.** The SAME requirement (case/space-normalized)
+  shares a hash across sessions, so a later run finds the prior artifact + its
+  weaknesses and improves them — that IS hill-climb. Change the wording → new
+  hash → fresh lineage.
+- **`version` is monotonic per `task_hash`.** `next_version(task_hash)` = max+1.
+- **Seed = LATEST-with-content, not best-score** (`latest_with_content`). Self-eval
+  scores were noisy; the latest run carries the most accumulated work (the weakness
+  ratio is more trustworthy now, but latest is still the seed). The artifact is
+  sanitized (`_strip_preamble`) on seed so inherited corruption can't propagate.
+- **`requirement_embedding`** powers R10 (`similar_runs` / `accumulated_weaknesses`):
+  weaknesses from *semantically similar* prior tasks carry forward, not only the
+  exact `task_hash`. No-op without an embedder.
+- **Store is `TaskRunStore` (`studio/task_runs.py`).** Pure SQLite + numpy cosine;
+  no ORM. `record()`, `all_runs()`, `latest_with_content()`, `repeat_failures()`,
+  `accumulated_weaknesses()`, `next_version()`.
+
+## 13. Driving a run programmatically (the SSE API)
+
+The GUI is one client; the same three calls drive a run from any script (used for
+headless E2E / verification). All against the backend on `:8770`.
+
+1. **`POST /session`** → `{session_id}`. Body:
+   ```json
+   {"llm": {"profile": "haiku"}, "embed": {}, "mode": "llm",
+    "budget": {"ceiling": null}, "tools_enabled": true,
+    "loop_config": {"auto_improve": true, "max_agents": 5,
+                    "min_tasks_per_agent": 3, "max_tasks_per_agent": 5}}
+   ```
+   `mode`: `"llm"` (epic planner) or `"auto"` (deterministic). `tools_enabled`
+   gates web_search/web_fetch — **off ⇒ the loop fabricates** (no real sources).
+2. **`POST /session/{id}/hill-climb`** (optional) — `{auto_improve, max_epochs,
+   min_improvement, score_metric, max_agents, min_tasks_per_agent,
+   max_tasks_per_agent}`. The Agent-Sizing sliders ride here too and are synced
+   into `loop_config` (the runner reads sizing from `loop_config`, not
+   `hill_climb_config`).
+3. **`GET /run/{id}?requirement=<urlencoded>`** → an **SSE stream** (the ordered
+   event contract, SPEC §4: `session → plan → topology → graph → (per phase:
+   phase_start, router, token…, phase_done) → verify → loopdoctor → hill_climb →
+   done`). Optional `history` = JSON `[{role,content}]` for multi-turn.
+
+> **GOTCHA — drain the stream fully.** The runner records the row *as the SSE
+> stream is consumed*. A client that disconnects early (e.g. `urllib` raising
+> `IncompleteRead`, or closing on the first `done`) cancels the server-side
+> `StreamingResponse` generator → **the run may never record to `task_runs.db`**.
+> A browser `EventSource` holds the connection open and is fine; a script MUST
+> read every line until the server closes the stream.
+
+```python
+# minimal headless driver (stdlib only)
+import json, urllib.request, urllib.parse
+B = "http://localhost:8770"
+def post(p, body):
+    r = urllib.request.Request(B+p, json.dumps(body).encode(),
+                               {"content-type": "application/json"}, method="POST")
+    return json.loads(urllib.request.urlopen(r).read())
+sid = post("/session", {"llm": {"profile": "haiku"}, "embed": {}, "mode": "llm",
+           "tools_enabled": True, "budget": {"ceiling": None},
+           "loop_config": {"auto_improve": True, "max_agents": 5}})["session_id"]
+post(f"/session/{sid}/hill-climb", {"auto_improve": True, "max_epochs": 2, "max_agents": 5})
+q = urllib.parse.quote("your requirement here")
+with urllib.request.urlopen(f"{B}/run/{sid}?requirement={q}", timeout=1800) as r:
+    for line in r:            # <- drain EVERY line or the run won't record
+        pass
+```

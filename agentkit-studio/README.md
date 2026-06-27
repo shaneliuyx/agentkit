@@ -48,6 +48,34 @@ uv pip install pytest httpx  # dev/test deps
 .venv/bin/uvicorn studio.app:app --reload --port 8770
 ```
 
+### Driving a run via the SSE API
+
+The GUI is one client; three calls drive a run from any script (DESIGN §13):
+
+1. `POST /session` → `{session_id}` — body: `{llm:{profile}, embed, mode:"llm"|"auto",
+   budget:{ceiling}, tools_enabled, loop_config:{auto_improve, max_agents, …}}`.
+   `tools_enabled:false` ⇒ the loop fabricates (no real web sources).
+2. `POST /session/{id}/hill-climb` (optional) — `{auto_improve, max_epochs,
+   min_improvement, max_agents, …}` (Agent-Sizing sliders sync into `loop_config`).
+3. `GET /run/{id}?requirement=<urlencoded>` → an **SSE stream** of the ordered
+   event contract.
+
+> **Drain the stream fully.** The runner records the result *as the SSE is
+> consumed*; a client that disconnects early cancels the server generator and the
+> run may never persist to `task_runs.db`. A browser `EventSource` is fine; a
+> script must read every line until the server closes it.
+
+### Persistence — `task_runs.db`
+
+One SQLite file (`backend/tmp/task_runs.db`) is the entire durable state: one row
+per run in table `task_runs` (`task_hash, session_id, version, score,
+weaknesses_json, artifact_path, requirement, result_text, requirement_embedding`).
+`task_hash = sha256(requirement.strip().lower())[:12]` is the **hill-climb lineage
+key** — the same requirement shares a hash across sessions, so a later run seeds
+from the prior artifact + weaknesses and improves them. `version` is monotonic per
+hash; `score` is the §11.10 weakness-ratio; `requirement_embedding` powers R10
+cross-task similarity. See DESIGN §12 for the full schema + rules.
+
 ### Endpoints
 
 | Method | Route | Purpose |
