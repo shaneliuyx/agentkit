@@ -1828,19 +1828,12 @@ class Runner:
             try:
                 import json as _json
                 import os as _os
-                import re as _re
-                _cache_file = ".web_cache.json"
-                if _os.path.exists(_cache_file):
-                    with open(_cache_file) as _cf:
-                        _cache_data = _json.load(_cf)
-                    _cached_set: set[str] = set()
-                    for _cv in _cache_data.values():
-                        if isinstance(_cv, list):
-                            for _cr in _cv:
-                                if isinstance(_cr, dict) and "url" in _cr:
-                                    _cached_set.add(_cr["url"])
-                    _raw_urls = _re.findall(r"https?://\S+", _scored_text or "")
-                    _verified_urls = [u.rstrip(".,)") for u in _raw_urls if u.rstrip(".,)") in _cached_set]
+                from studio.task_runs import verified_urls_in_cache
+                if _os.path.exists(".web_cache.json"):
+                    with open(".web_cache.json") as _cf:
+                        _verified_urls = verified_urls_in_cache(
+                            _json.load(_cf), _scored_text or ""
+                        )
             except Exception:  # noqa: BLE001
                 pass
             _score, _scorer_feedback = score_result(

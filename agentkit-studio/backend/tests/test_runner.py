@@ -593,6 +593,59 @@ def test_executor_prompt_frames_research_not_planning() -> None:
     assert "planning hub" not in p                       # the bug framing is gone
 
 
+def test_ends_cleanly_authoritative_truncation_signal() -> None:
+    """P0: the deterministic truncation signal — a complete sentence or a URL-ending
+    reference line is clean; a mid-word cut or empty text is not. This is what the miner
+    trusts instead of inferring truncation from a window-excerpt boundary (the W3 fix)."""
+    from studio.task_runs import _ends_cleanly
+    assert _ends_cleanly("A complete sentence.")
+    assert _ends_cleanly("Body.\n\n- Author. 'Title.' https://x.example/p")  # URL-ending ref
+    assert _ends_cleanly("ends with a paren)")
+    assert not _ends_cleanly("designing loops that prom")   # mid-word (the W3 case)
+    assert not _ends_cleanly("   ")                         # empty
+
+
+def test_verified_urls_in_cache_counts_search_and_fetch() -> None:
+    """P0/W5 fix: a cited URL is verified if it is in a SEARCH-result list OR a
+    'fetch:{url}:{selector}' key (the fetched page). The fetch entries were previously
+    ignored, so a fetched-but-not-searched citation was wrongly flagged unverified."""
+    from studio.task_runs import verified_urls_in_cache
+    cache = {
+        "v2|searxng:q": [{"title": "t", "url": "https://searched.example"}],
+        "fetch:https://fetched.example:None": {"content": "..."},
+        "fetch:https://other.example:None": {"content": "..."},
+    }
+    text = ("see https://searched.example and https://fetched.example. "
+            "but https://uncached.example is not real")
+    out = verified_urls_in_cache(cache, text)
+    assert "https://searched.example" in out      # via search list
+    assert "https://fetched.example" in out       # via fetch entry (the W5 fix)
+    assert "https://uncached.example" not in out   # cited but never cached → unverified
+    assert "https://other.example" not in out      # cached but not cited in text
+
+
+def test_miner_prompt_has_completeness_fact_and_full_url_list() -> None:
+    """P0: the miner prompt carries the deterministic completeness fact (so it cannot
+    hallucinate truncation from a window edge) and ALL verified URLs, not just the first 20
+    (the cap that hid real citations and produced the W5 false positive)."""
+    from agentkit.types import ChatResult
+    from studio.task_runs import mine_weaknesses_from_outputs
+    cap: dict = {}
+
+    class _C:
+        def chat(self, messages, tools=None) -> ChatResult:
+            cap["p"] = messages[-1]["content"]
+            return ChatResult(text="[]", total_tokens=1)
+
+    urls = [f"https://real.example/{i}" for i in range(30)]   # > the old cap of 20
+    mine_weaknesses_from_outputs(
+        {"s1": "x"}, "A complete report. The end.", "task", _C(), verified_urls=urls,
+    )
+    p = cap["p"]
+    assert "ends CLEANLY" in p and "do not flag truncation" in p   # completeness fact present
+    assert "https://real.example/25" in p                          # 26th URL shown → cap > 20
+
+
 def test_miner_marks_cached_urls_verified() -> None:
     """Cache-as-oracle (§11.10): a URL in the fetch cache is real, so the miner is
     told NOT to flag it as unverified/fabricated."""

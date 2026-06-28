@@ -82,6 +82,53 @@ def _cosine(a, b) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
+_CLEAN_END_CHARS = frozenset(".!?)]\"'`|>*-_")
+
+
+def _ends_cleanly(text: str) -> bool:
+    """True if ``text`` ends at a sentence/structure boundary (not truncated mid-line).
+
+    Research reports end with reference lines like "- Author. 'Title.' https://url" where
+    the last WORD is a URL, not the line itself — that counts as clean. This is the
+    AUTHORITATIVE truncation signal: the miner must use it rather than infer truncation from
+    a windowed excerpt boundary (the W3 false positive)."""
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+    last_line = stripped.split("\n")[-1].strip()
+    last_word = last_line.split()[-1] if last_line.split() else ""
+    if last_word.startswith("http://") or last_word.startswith("https://"):
+        return True
+    return stripped[-1] in _CLEAN_END_CHARS
+
+
+def verified_urls_in_cache(cache_data: dict, text: str) -> list[str]:
+    """URLs cited in ``text`` that are REAL — present in the web cache as either a search
+    result (list-valued entries' ``url`` fields) OR a fetched page (key
+    ``fetch:{url}:{selector}``). The fetch entries were previously ignored, so a
+    fetched-but-not-searched citation was wrongly flagged unverified (the W5 false positive).
+    Order-preserving, deduped, trailing punctuation stripped."""
+    import re as _re
+    cached: set[str] = set()
+    for k, v in cache_data.items():
+        if isinstance(v, list):
+            for r in v:
+                if isinstance(r, dict) and "url" in r:
+                    cached.add(r["url"])
+        elif isinstance(k, str) and k.startswith("fetch:"):
+            fu = k[len("fetch:"):].rsplit(":", 1)[0].strip()
+            if fu.lower().startswith("http"):
+                cached.add(fu)
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in _re.findall(r"https?://\S+", text or ""):
+        u = u.rstrip(".,)")
+        if u in cached and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
 @dataclass
 class TaskRun:
     task_hash: str
@@ -394,7 +441,7 @@ def score_result(
         _url_note = (
             "VERIFIED SOURCES: the following URLs were confirmed real via actual web "
             "search (not fabricated) — treat them as genuine citations:\n"
-            + "\n".join(f"  - {u}" for u in verified_urls[:20])
+            + "\n".join(f"  - {u}" for u in verified_urls[:80])
             + "\n"
         )
     prompt = (
@@ -451,9 +498,22 @@ def mine_weaknesses_from_outputs(
         if len(result) <= 12_000:
             combined += f"\n\n[FINAL]: {result}"
         else:
+            # Both HEAD and TAIL are arbitrary excerpts. Trim each to a clean paragraph
+            # boundary so the miner can't read a window EDGE as document truncation (the W3
+            # false positive: the head cut landed mid-quote at "...loops that prom"; the tail
+            # STARTED mid-word at "odel's"). The deterministic completeness fact below is the
+            # authoritative truncation signal.
+            _head = result[:8_000]
+            _hc = _head.rfind("\n\n")
+            if _hc > 4_000:
+                _head = _head[:_hc]
+            _tail = result[-4_000:]
+            _tc = _tail.find("\n\n")
+            if 0 <= _tc < 2_000:
+                _tail = _tail[_tc:].lstrip()
             combined += (
-                f"\n\n[FINAL HEAD]: {result[:8_000]}"
-                f"\n\n[FINAL TAIL]: {result[-4_000:]}"
+                f"\n\n[FINAL HEAD — excerpt, boundary is NOT the document end]: {_head}"
+                f"\n\n[FINAL TAIL — excerpt ending at the TRUE document end]: {_tail}"
             )
     _today = datetime.date.today().isoformat()
     _scorer_section = (
@@ -469,15 +529,31 @@ def mine_weaknesses_from_outputs(
         "VERIFIED SOURCES — the following URLs were ACTUALLY FETCHED from live "
         "sites (they are in the fetch cache), so they are REAL, not fabricated. Do "
         "NOT flag these as unverified or unsubstantiated:\n"
-        + "\n".join(f"  - {u}" for u in (verified_urls or [])[:20])
+        + "\n".join(f"  - {u}" for u in (verified_urls or [])[:80])
         + "\n\n"
     ) if verified_urls else ""
+    # Deterministic truncation signal: do NOT let the LLM infer truncation from a windowed
+    # excerpt — it mis-reads window edges as document cut-offs (the W3 false positive).
+    # Compute whether the DOCUMENT actually ends cleanly and state it authoritatively.
+    _end = (result or "").rstrip()
+    _ends_clean = _ends_cleanly(result) if result else True
+    _trunc_fact = (
+        "DOCUMENT COMPLETENESS (computed — authoritative; trust over any excerpt boundary): "
+        + (f"the document ends CLEANLY at {_end[-45:]!r} — it is NOT truncated; do not flag "
+           "truncation.\n\n"
+           if _ends_clean else
+           f"the document ends at {_end[-45:]!r} WITHOUT terminal punctuation — it may be "
+           "truncated.\n\n")
+    ) if result else ""
     prompt = (
         f"Today's date is {_today}. "
         f"Review these agent phase outputs against the TASK. List up to 5 specific "
         f"weaknesses or gaps that would stop the output from fully satisfying the task. "
+        f"{_trunc_fact}"
         f"Always check, regardless of task type:\n"
-        f"1. Is the output truncated / cut off mid-sentence / missing a proper ending?\n"
+        f"1. Is the DOCUMENT truncated? Use the DOCUMENT COMPLETENESS fact above as the "
+        f"authoritative answer — do NOT infer truncation from an excerpt's ragged start or "
+        f"end (those are window boundaries, not the document).\n"
         f"2. Are claims substantiated and grounded rather than merely asserted? "
         f"Note: sources dated {_today[:7]} are current, not future.\n"
         f"3. If the TASK asks to FIND, DISCOVER, or LIST articles/sources/links: "
