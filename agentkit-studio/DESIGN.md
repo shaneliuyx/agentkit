@@ -110,7 +110,7 @@ class DocPatch:
 | Anchor destroyed by prior patch | Worker A deletes text that Worker B uses as anchor | Orphaned patch: append content at end wrapped in `<!-- conflict: anchor not found -->` |
 | Identical content | Two workers produce same insert | Deduplicate (skip second) |
 
-#### Reducer algorithm (`agentkit.artifacts.reducer`)
+#### Reducer algorithm (`agentkit.artifacts.patcher`)
 
 ```python
 @dataclass
@@ -1645,3 +1645,54 @@ Reused as-is: `loop.goal.check_goal` (deterministic verifier), `loop.chain.LoopC
 (goal-gated driver), `evolve.self_preference` (D2 gate). Modified in agentkit: `self_preference`
 parsing (D3). Not yet wired (planned Phase 3): `optimize_text` to own the epoch loop +
 autonomous heartbeat, replacing Studio's hand-rolled single-epoch advance.
+
+## §11.7 Substantiation levers + non-additive structure (2026-06-28)
+
+Two sibling efforts landed against the same hill-climb run. The **additive**
+levers raise grounding; the **structural** mechanisms attack the score ceiling
+the levers cannot move.
+
+### Substantiation Levers 1–3 (additive) — `agentkit` shared libs + runner
+
+| Lever | Mechanism | Effect |
+|---|---|---|
+| L1 — worker substantiation | Executor emits `RESEARCH_FINDING` blocks only (report prose forbidden); tool loop 5→8 iters + a forced tools-disabled synthesis turn on iteration exhaustion | Worker no longer cut off mid-`tool_use` returning only a preamble |
+| L2 — patch-based reducer | Parser accepts a bare `RESEARCH_FINDING` (was `##`-required → 0 patches, the load-bearing no-op); missing-anchor inserts demoted to clean appends | Findings actually reach the document instead of silently dropping |
+| L3 — woven evidence | Dual-oracle grounding (URL-fetched **OR** quote-verified), tolerant URL match + fuzzy quote match; fetch-density prefetch of cited-but-uncached URLs | Findings surviving a phase went **2 → 26**, doc **+7.4K**; real fetched sources stop being exact-match dropped |
+
+Plus **copy-paste-verbatim refinement**: the source's own words are the
+evidence — the fabrication-prone CLAIM-rephrase step is dropped.
+
+> **Verified finding (v29..v33).** Grounding throughput went broken → 26
+> findings/phase and the doc grew 38K → 46K, but the score held at **0.64–0.67**.
+> The binding constraint is **not grounding** (the handoff's premise) but
+> **structure** — ranking / metrics / completeness and inherited truncation —
+> which additive levers cannot fix by construction.
+
+### F4 — honest ranking synthesizer (`agentkit.artifacts.ranking`)
+
+`synthesize_ranking_table(findings, metrics)` replaces the source-selection
+section with an **honest SPLIT presentation**:
+
+- A **Measured popularity** table ranks only sources with a real,
+  independently-verifiable metric (citations, stars).
+- A separate **Reported / unranked** listing holds sources with only a stated
+  claim or no public number — the two are **never ranked together** (mixing a
+  citation count with a view count is apples-to-oranges an evaluator flags).
+- It **never invents a metric**: a source with no public number shows `—`. A
+  mostly-`—` table with marked gaps is the CORRECT output when metrics genuinely
+  do not exist, not a failure to paper over. A leading one-line methodology note
+  states how many sources are actually measurable.
+
+Numbers trace to source: a fetched citation/star count, a stated-but-`reported`
+claim (`parse_stated`, never re-derived), or in-corpus reference frequency.
+Backed by `agentkit.artifacts.metrics` (`Metric`); wired in `runner.py` as
+`_apply_ranking(doc, findings)`.
+
+### F2 — per-section ratchet (`agentkit.artifacts.sections`)
+
+`accept_rewrite` relaxes the writeback ratchet from whole-document grow-only to
+**per-section grow-only**: a reviser may REPLACE one section (repair, ranking
+table, dedup) even when net length shrinks, while still guaranteeing no sourced
+section is deleted. `split_sections` is the deterministic `##` split (0 LLM)
+that keys the per-section hashes.

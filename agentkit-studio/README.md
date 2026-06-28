@@ -28,6 +28,28 @@ A live hill-climb run surfaced a chain of carried-forward-state bugs; all fixed
   the legend derives from live phase state, and running nodes are clearly
   highlighted.
 
+## Recent hardening (2026-06-28)
+
+A second hill-climb pass added grounding and structure mechanisms (see
+DESIGN §11.6–§11.7):
+
+- **Deterministic rubric score** — a 5-criterion research-report rubric
+  (GUI-tunable weights + deliverable template) is now the recorded score and
+  hill-climb metric; gameable `solved/total` is retired. Weaknesses surface
+  below the report, not inside the document.
+- **Substantiation levers** — workers emit grounded `RESEARCH_FINDING` blocks
+  only, with dual-oracle grounding (URL-fetched or quote-verified); findings
+  surviving a phase went 2 → 26.
+- **Honest ranking** — the source section is a SPLIT table: measurable sources
+  (citations/stars) are ranked; sources with only a stated or no public metric
+  are listed separately as `—`, never invented and never mixed.
+- **Non-additive rewrites** — a per-section grow-only ratchet lets a reviser
+  replace one section (repair, ranking, dedup) without deleting any sourced
+  section.
+- **Reliable miner** — a moving-window weakness miner sweeps the full document
+  (no more blind middle), with semantic dedup of duplicate findings; inherited
+  `<!-- conflict -->` markers are sanitized from seeds.
+
 ## Backend quickstart
 
 The backend is a FastAPI server that streams an SSE event sequence (`GET /run`)

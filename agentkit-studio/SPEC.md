@@ -557,7 +557,7 @@ When set, `_schemas` appends `ARTIFACT_TOOL_SCHEMAS`.
 `runner.py` passes `artifact_path = _eff_ws2 / session.session_id / "artifact.md"`
 to `_maybe_tool_augment` when `_artifact_copied=True`.
 
-### 11.6 Production fixes landed (2026-06-26/27)
+### 11.6 Production fixes landed (2026-06-26/28)
 
 | File | Change | Why |
 |---|---|---|
@@ -581,3 +581,7 @@ to `_maybe_tool_augment` when `_artifact_copied=True`.
 | `task_runs.py` `mine_weaknesses_from_outputs` | Moving-window miner: sweeps full doc in ≤8 overlapping ~12K windows, union-deduped — DESIGN §11.6 | Old head+tail left the MIDDLE blind → present tail sections (Methodology @54K of 64K) reported missing |
 | `runner.py` + `rubric.sections_present` | Deterministic full-text section filter + semantic dedup (cosine ≥ 0.85); weaknesses surfaced via `HillClimbEvent`, rendered below the report in `ResultWindow` (NOT in the document) — DESIGN §11.6 | Kills the windowed scorer's false "missing X" echo; collapses one issue surfaced under two sections; keeps the deliverable clean |
 | `restart.sh` (new) | `kill_port` `|| return 0` (was `|| return`, propagated lsof exit 1 → `set -e` abort); `--reload` opt-in (`RELOAD=1`) | `./restart.sh` aborted after the kill → backend never restarted → GUI `/backends` 500 |
+| `runner.py` + agentkit shared libs | **Substantiation Levers 1–3** — L1 worker emits `RESEARCH_FINDING` only (tool loop 5→8 + forced synthesis turn); L2 parser accepts bare findings + missing-anchor inserts demoted to clean appends; L3 dual-oracle grounding (URL-fetched OR quote-verified) + fuzzy match + cited-URL prefetch — DESIGN §11.7 | Worker was cut off mid-`tool_use`; bare findings → 0 patches; exact-match dropped real fetched sources. Findings/phase **2 → 26** |
+| `agentkit.artifacts.ranking` (`synthesize_ranking_table`) + `metrics` + `runner._apply_ranking` | **F4 honest ranking** — SPLIT table: Measured (citations/stars, ranked) vs Reported/unranked (stated/`—`), never mixed, never invents a metric — DESIGN §11.7 | Mixing citation counts with view counts is apples-to-oranges an evaluator flags; `—` with a methodology note is the correct output when no public metric exists |
+| `agentkit.artifacts.sections` (`accept_rewrite`, `split_sections`) | **F2 per-section ratchet** — relaxes whole-doc grow-only to per-section grow-only; a reviser may REPLACE a section (repair / ranking / dedup) on net shrink, never deleting a sourced section — DESIGN §11.7 | Whole-doc length ratchet LOCKED a poisoned seed; per-section hashes let a non-additive rewrite land safely |
+| `agentkit.artifacts.dedup` + `templates.py` (report-template store) | F1 finding dedup (semantic); proven skeletons reused on first-document tasks | Duplicate findings inflate the doc; a vetted skeleton seeds structure the rubric rewards |
