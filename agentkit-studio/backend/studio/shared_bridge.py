@@ -33,6 +33,13 @@ from llm import (  # noqa: E402
     resolve,
 )
 
+# Studio-local backend-menu additions: local oMLX models not in the shared PROFILES.
+# Same oMLX endpoint (:8000) + key as the existing qwen/14b entries. setdefault so a
+# later shared-lib entry of the same name still wins.
+PROFILES.setdefault(
+    "gemma", ("http://localhost:8000/v1", "EMPTY", "gemma-4-26B-A4B-it-heretic-4bit")
+)
+
 __all__ = [
     "SHARED_PATH",
     "TokenAccounting",

@@ -1757,3 +1757,40 @@ remembers its own epoch budget across sessions and **survives a backend
 restart**, keyed by the same `task_hash` lineage the artifact carry-forward uses
 (§12). Config is captured at the same point as `_base_requirement` so attaching a
 goal/template never forks the task identity (§14.1 D1).
+
+### 14.5 Local-model format tolerance + topic-agnostic skeleton (2026-06-28)
+
+**Local (oMLX) models speak a different format than the harness assumed.**
+`qwen2.5-coder` emits tool calls as fenced JSON (` ```json {"name","arguments"} ``` `)
+and findings as JSON objects — not the `<tool_call>`-tagged / native `tool_calls`
+and plain `RESEARCH_FINDING:` lines the parsers expected. A live Pi/Craft run with
+the qwen worker therefore `fetched=0`, grounded nothing, and degraded to
+refusal-prose (score ~0.24), while a Haiku probe on the *same* task fetched 11
+pages and grounded the topic immediately — i.e. the run's "these frameworks can't
+be verified" conclusion was a **capability failure dressed as principle**, not a
+real input problem. Two parser fixes restore tolerance:
+
+- `_parse_inline_tool_calls` (`studio/tools.py`) now parses **fenced/bare JSON
+  tool calls** in addition to `<tag>` blocks, guarded by registered-tool names so
+  stray JSON can't fire a tool.
+- `_parse_findings` (`runner.py`) now parses **JSON-wrapped `RESEARCH_FINDING`**
+  (fenced/bare, incl. a `RESEARCH_FINDING` wrapper key) alongside the plain-text
+  format, through the same grounding oracle.
+
+Verified end-to-end: qwen `fetched 0 → 1`, the Pi/Craft run **0.236 → 0.80**.
+
+**Topic-agnostic skeleton.** That report drifted to a *"Loop Engineering"*
+title/ToC: `_build_skeleton` (a) LLM-derived goal-specific headings, (b) reused a
+semantically-similar **saved** skeleton (a prior loop-eng report) verbatim, and
+(c) used the goal text as the title — the topic leaked from the template, not the
+content. `_build_skeleton` now emits a **FIXED high-level, topic-agnostic ToC**
+(`rubric.DEFAULT_TEMPLATE`) for every goal with a content-derived title
+placeholder; no LLM call, no template-reuse for structure (deterministic +
+outage-robust). `DEFAULT_TEMPLATE` expanded to the standard research-report
+sections: Executive Summary, Background and Scope, Key Findings, Evidence and
+Analysis, Methodology, Limitations and Open Questions, Conclusion and
+Recommendations, Source References — generic, covering every rubric criterion.
+
+**Backend menu.** `gemma-4-26B-A4B-it-heretic-4bit` (oMLX :8000) registered in the
+`PROFILES` dropdown via `shared_bridge.py` (Studio-side; the shared lib is
+untouched).

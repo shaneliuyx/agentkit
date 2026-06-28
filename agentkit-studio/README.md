@@ -54,6 +54,15 @@ DESIGN §14.2–§14.3):
   of a single pass per click. `max_epochs` and the rest of the hill-climb config
   persist per requirement in `task_runs.db`, surviving a backend restart. See
   DESIGN §14.4.
+- **Local-model format tolerance** — oMLX models (qwen) emit tool calls as fenced
+  JSON and findings as JSON objects, which the XML-tag / plain-text parsers
+  dropped → the worker fetched nothing and degraded to refusal-prose (~0.24).
+  `_parse_inline_tool_calls` and `_parse_findings` now accept the JSON forms;
+  qwen went `fetched 0 → 1` and a real run scored **0.80**. See DESIGN §14.5.
+- **Topic-agnostic report skeleton** — the skeleton is now a fixed high-level
+  generic ToC (`DEFAULT_TEMPLATE`) with a content-derived title, instead of
+  goal-derived headings or a reused topic-specific skeleton (which had leaked a
+  prior "Loop Engineering" topic into an unrelated report).
 
 ## Backend quickstart
 
@@ -193,7 +202,9 @@ session → plan → topology → graph
 ### Backends
 
 The backend menu comes from `agent-prep/shared/llm.py` `PROFILES`:
-`haiku`/`opus` (VibeProxy → Claude) and `14b`/`qwen` (local oMLX). Studio builds
+`haiku`/`opus` (VibeProxy → Claude) and `14b`/`qwen`/`gemma` (local oMLX; `gemma`
+= `gemma-4-26B-A4B-it-heretic-4bit`, registered Studio-side in `shared_bridge.py`).
+Studio builds
 a usage-capturing `StudioChatClient` from the resolved `(base_url, model, key)`,
 so the token HUD gets the prompt/completion split that agentkit's own
 `OpenAIChatClient` discards. A backend without usage telemetry flips the run to
