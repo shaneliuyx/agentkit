@@ -1,4 +1,4 @@
-"""studio.epoch_gate — Phase-1 keep/discard gate for hill-climb epochs (DESIGN §11.5).
+"""studio.epoch_gate — Phase-1 keep/discard gate for hill-climb epochs (DESIGN §14.1).
 
 Closes Studio's open-loop accept. Before this gate the runner wrote any epoch's
 artifact back as long as it was not *shorter* than the seed (a length-only ratchet),
@@ -14,7 +14,7 @@ score — it reuses ``agentkit.evolve.self_preference`` (RHO pairwise preference
 only answers "is the new epoch better than the prior?".
 
 Kept deliberately tiny and dependency-light so it lives OUTSIDE the already-large
-runner.py (see "runner.py optimize" follow-up in DESIGN §11.5).
+runner.py (see "runner.py optimize" follow-up in DESIGN §14.1).
 """
 from __future__ import annotations
 
@@ -68,10 +68,10 @@ def make_rubric_preference(
     required_sections: Any = None,
     eps: float = 0.01,
 ) -> PreferFn:
-    """Build a DETERMINISTIC preference fn from the research-report rubric (DESIGN §11.6).
+    """Build a DETERMINISTIC preference fn from the research-report rubric (DESIGN §14.2).
 
     This is the DEFAULT gate judge: live testing proved an LLM "which is better?" judge
-    ties a strong report with a stub even on sonnet (DESIGN §11.5 D4), whereas
+    ties a strong report with a stub even on sonnet (DESIGN §14.1 D4), whereas
     ``studio.rubric.rubric_score`` separates them cleanly and reproducibly. ``weights`` and
     ``required_sections`` are the GUI-supplied rubric config + deliverable template; ``eps``
     is a minimum margin so micro-noise can't flip keep/discard (mirrors optimize_text's

@@ -874,3 +874,174 @@ def test_tool_loop_emits_tool_events(fake_client) -> None:
     assert tool_calls and tool_calls[0].tool == "web_search"
     assert tool_calls[0].step_id  # attributed to the running phase
     assert tool_results and tool_results[0].n_results == 1
+
+
+# --------------------------------------------------------------------------- #
+# §14.4 Epoch heartbeat — one Run auto-iterates to max_epochs                  #
+# --------------------------------------------------------------------------- #
+
+
+def _stub_inner(runner, monkeypatch, scripts):
+    """Replace runner._run_inner with a counter that emits a HillClimbEvent per
+    pass and returns scripted EpochResults — so we test run()'s loop driving in
+    isolation from the heavy pipeline. ``scripts`` is a list of statuses."""
+    from studio.events import HillClimbEvent
+    from studio.runner import EpochResult
+
+    calls = {"n": 0, "epochs": []}
+
+    def _fake(_req):
+        i = calls["n"]
+        calls["n"] += 1
+        status = scripts[min(i, len(scripts) - 1)]
+        version = i + 1
+        calls["epochs"].append(runner._epoch)
+        runner._emit(
+            HillClimbEvent(
+                epoch=version, score=0.1 * version, delta=0.1, status=status,
+                note=f"v{version}", weaknesses=[], task_hash="t",
+            )
+        )
+        runner._last_result = f"out{version}"
+        runner._last_cancelled = False
+        return EpochResult(version=version, score=0.1 * version, delta=0.1, status=status)
+
+    monkeypatch.setattr(runner, "_run_inner", _fake)
+    return calls
+
+
+def test_epoch_loop_runs_until_max_epochs(
+    fake_client_factory, tmp_path, monkeypatch
+) -> None:
+    """auto_improve + max_epochs=3, score always improving → _run_inner runs
+    exactly 3 times (converged at v3), 3 HillClimbEvents (epochs 1,2,3), and
+    exactly ONE terminal done for the whole stream."""
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    events: list[StudioEvent] = []
+    session = _make_session()
+    session.hill_climb_config = {"auto_improve": True, "max_epochs": 3}
+    runner = Runner(
+        session, events.append, client_factory=fake_client_factory,
+        embedder=None, workspace_root=tmp_path,
+    )
+    calls = _stub_inner(runner, monkeypatch, ["improving", "improving", "converged"])
+    runner.run("compare redis and postgres")
+
+    assert calls["n"] == 3
+    hc = [e for e in events if e.EVENT_TYPE == "hill_climb"]
+    assert [e.epoch for e in hc] == [1, 2, 3]
+    done = [e for e in events if e.EVENT_TYPE == "done"]
+    assert len(done) == 1
+    assert done[0].result == "out3"  # carries the last pass's output
+
+
+def test_epoch_loop_stops_on_plateau(
+    fake_client_factory, tmp_path, monkeypatch
+) -> None:
+    """Scores improve then flatten (delta < min_improvement at pass 2) → loop
+    breaks early (2 of 5 passes); last status is 'plateau'; one done."""
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    events: list[StudioEvent] = []
+    session = _make_session()
+    session.hill_climb_config = {"auto_improve": True, "max_epochs": 5}
+    runner = Runner(
+        session, events.append, client_factory=fake_client_factory,
+        embedder=None, workspace_root=tmp_path,
+    )
+    calls = _stub_inner(runner, monkeypatch, ["improving", "plateau"])
+    runner.run("compare redis and postgres")
+
+    assert calls["n"] == 2  # broke early, did NOT run all 5
+    hc = [e for e in events if e.EVENT_TYPE == "hill_climb"]
+    assert hc[-1].status == "plateau"
+    assert len([e for e in events if e.EVENT_TYPE == "done"]) == 1
+
+
+def test_single_pass_when_guard_off(
+    fake_client_factory, tmp_path, monkeypatch
+) -> None:
+    """Guard: the loop engages ONLY when auto_improve AND max_epochs > 1.
+    auto_improve=False OR max_epochs=1 → exactly one _run_inner pass, one done."""
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+
+    def _run_with(cfg: dict) -> tuple[int, int, list[int]]:
+        events: list[StudioEvent] = []
+        session = _make_session()
+        session.hill_climb_config = cfg
+        runner = Runner(
+            session, events.append, client_factory=fake_client_factory,
+            embedder=None, workspace_root=tmp_path,
+        )
+        calls = _stub_inner(runner, monkeypatch, ["improving"])
+        runner.run("compare redis and postgres")
+        n_done = len([e for e in events if e.EVENT_TYPE == "done"])
+        return calls["n"], n_done, calls["epochs"]
+
+    # auto_improve off → single pass (epoch left at 0 = un-prefixed)
+    n, d, epochs = _run_with({"auto_improve": False, "max_epochs": 5})
+    assert n == 1 and d == 1 and epochs == [0]
+    # max_epochs == 1 → single pass even with auto_improve on
+    n, d, epochs = _run_with({"auto_improve": True, "max_epochs": 1})
+    assert n == 1 and d == 1 and epochs == [0]
+
+
+def test_config_persists_per_task(tmp_path, monkeypatch) -> None:
+    """record() snapshots the hill-climb config; latest_config returns the most
+    recent NON-EMPTY one; and a fresh run with no session config seeds its
+    effective epoch budget from the store (survives a backend restart)."""
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    from studio.task_runs import TaskRun, TaskRunStore, task_hash
+
+    db = tmp_path / "task_runs.db"  # == _db_path() under this STUDIO_WORKSPACE_ROOT
+    store = TaskRunStore(db_path=db)
+    req = "compare redis and postgres for caching"
+    th = task_hash(req)
+    cfg = {"auto_improve": True, "max_epochs": 4, "min_improvement": 0.03}
+    store.record(TaskRun(
+        task_hash=th, session_id="s1", version=1, score=0.5, weaknesses=[],
+        artifact_path="", requirement=req, result_text="x", config=cfg,
+    ))
+    assert store.latest_config(th) == cfg
+    # A later non-hill-climb run (empty config) must NOT clobber the snapshot.
+    store.record(TaskRun(
+        task_hash=th, session_id="s2", version=2, score=0.6, weaknesses=[],
+        artifact_path="", requirement=req, result_text="y", config={},
+    ))
+    assert store.latest_config(th) == cfg  # still v1's non-empty config
+
+    # A fresh runner with NO session hill_climb_config seeds from the store.
+    session = _make_session()
+    runner = Runner(session, lambda _e: None, embedder=None, workspace_root=tmp_path)
+    eff = runner._resolve_hc_config(req)
+    assert eff.get("max_epochs") == 4 and eff.get("auto_improve") is True
+
+    # Session config always WINS over the persisted snapshot.
+    session2 = _make_session()
+    session2.hill_climb_config = {"auto_improve": True, "max_epochs": 2}
+    runner2 = Runner(session2, lambda _e: None, embedder=None, workspace_root=tmp_path)
+    assert runner2._resolve_hc_config(req).get("max_epochs") == 2
+
+
+def test_step_ids_namespaced_across_epochs(
+    fake_client_factory, tmp_path, monkeypatch
+) -> None:
+    """Across in-process epochs the real pipeline's emitted step ids are prefixed
+    per epoch (e1:*, e2:*) so each pass is a distinct, collision-free sub-DAG."""
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    events: list[StudioEvent] = []
+    session = _make_session()
+    # Constant fake scores plateau at v2 → loop runs exactly 2 passes (e1, e2).
+    session.hill_climb_config = {"auto_improve": True, "max_epochs": 2}
+    runner = Runner(
+        session, events.append, client_factory=fake_client_factory,
+        embedder=None, workspace_root=tmp_path,
+    )
+    runner.run("1. compare redis and postgres 2. write a recommendation")
+
+    phase_ids = [e.step_id for e in events if e.EVENT_TYPE == "phase_start"]
+    e1 = {s for s in phase_ids if s.startswith("e1:")}
+    e2 = {s for s in phase_ids if s.startswith("e2:")}
+    assert e1, phase_ids                 # epoch 1 emitted prefixed ids
+    assert e2, phase_ids                 # epoch 2 emitted prefixed ids
+    assert e1.isdisjoint(e2)             # no collision across epochs
+    assert len([e for e in events if e.EVENT_TYPE == "done"]) == 1

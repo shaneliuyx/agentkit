@@ -19,7 +19,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +139,9 @@ class TaskRun:
     artifact_path: str
     requirement: str
     result_text: str = ""
+    #: §14.4: snapshot of the hill-climb config this run used. Persisted as
+    #: ``config_json`` so a later run of the same task can recover its epoch budget.
+    config: dict = field(default_factory=dict)
 
 
 class TaskRunStore:
@@ -173,6 +176,11 @@ class TaskRunStore:
         if "requirement_embedding" not in cols:
             # NULL for existing rows; backfilled lazily by similar_runs().
             self._conn.execute("ALTER TABLE task_runs ADD COLUMN requirement_embedding BLOB")
+        if "config_json" not in cols:
+            # §14.4: per-task hill-climb config snapshot ('{}' for existing rows).
+            self._conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'"
+            )
         self._conn.commit()
 
     def next_version(self, task_hash_str: str) -> int:
@@ -192,8 +200,9 @@ class TaskRunStore:
         self._conn.execute(
             """INSERT INTO task_runs
                (task_hash, session_id, version, score, weaknesses_json,
-                artifact_path, requirement, result_text, requirement_embedding)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                artifact_path, requirement, result_text, requirement_embedding,
+                config_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run.task_hash,
                 run.session_id,
@@ -204,6 +213,7 @@ class TaskRunStore:
                 run.requirement,
                 run.result_text,
                 emb_blob,
+                json.dumps(run.config or {}),
             ),
         )
         self._conn.commit()
@@ -224,6 +234,27 @@ class TaskRunStore:
             (task_hash_str,),
         ).fetchone()
         return self._row_to_run(row) if row else None
+
+    def latest_config(self, task_hash_str: str) -> dict:
+        """Return the most recent NON-EMPTY hill-climb config for this task (§14.4).
+
+        Empty snapshots (``''`` / ``'{}'`` — recorded by non-hill-climb runs) are
+        skipped so they never enable the epoch loop. Returns ``{}`` when no run of
+        this task ever persisted a config.
+        """
+        row = self._conn.execute(
+            """SELECT config_json FROM task_runs
+               WHERE task_hash = ? AND config_json NOT IN ('', '{}')
+               ORDER BY version DESC LIMIT 1""",
+            (task_hash_str,),
+        ).fetchone()
+        if not row or not row[0]:
+            return {}
+        try:
+            parsed = json.loads(row[0])
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def best(self, task_hash_str: str) -> TaskRun | None:
         row = self._conn.execute(

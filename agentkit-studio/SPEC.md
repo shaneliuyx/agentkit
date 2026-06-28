@@ -364,6 +364,15 @@ claude-code -g -y`) is for the *developer agent* to design/audit Studio's own lo
 Cross-session iterative improvement via `task_runs.db`. Active when
 `session.hill_climb_config["auto_improve"] = true`.
 
+> **Epoch heartbeat (DESIGN §14.4).** One Run auto-iterates the pipeline up to
+> `max_epochs` passes: `run()` loops `_run_inner`, each pass seeding from the
+> prior artifact (carry-forward) and stopping early on **plateau**
+> (`delta < min_improvement`), `converged` (`version >= max_epochs`), or cancel.
+> The loop engages only when `auto_improve` and `max_epochs > 1`; otherwise a
+> single pass (back-compat). `hill_climb_config` persists **per task_hash** in
+> `task_runs.db` (`config_json` column + `latest_config()`), so a requirement
+> remembers its epoch budget across backend restarts.
+
 ### 11.1 Pipeline overview
 
 ```
@@ -515,7 +524,7 @@ Miner uses HEAD `[:8000]` + TAIL `[-4000:]` for docs > 12 K (sees references sec
 Mined weaknesses become next epoch's worker directives (numbered list, not bullets —
 numbered lists trigger actual tool calls; bullet `FIND AND OUTPUT` framing causes narration).
 
-### 11.7 OCC implementation — extracted to agentkit shared library
+### 11.6 OCC implementation — extracted to agentkit shared library
 
 OCC primitives live in **`agentkit`**, not in `studio/tools.py` directly.
 Studio is a thin dispatch wrapper.
@@ -557,7 +566,7 @@ When set, `_schemas` appends `ARTIFACT_TOOL_SCHEMAS`.
 `runner.py` passes `artifact_path = _eff_ws2 / session.session_id / "artifact.md"`
 to `_maybe_tool_augment` when `_artifact_copied=True`.
 
-### 11.6 Production fixes landed (2026-06-26/28)
+### 11.7 Production fixes landed (2026-06-26/28)
 
 | File | Change | Why |
 |---|---|---|
@@ -571,17 +580,17 @@ to `_maybe_tool_augment` when `_artifact_copied=True`.
 | `runner.py` | Reducer prompt injects seeded artifact as literal text when `_artifact_copied` | Reducer had no `read_file` tool; "use read_file" was silently ignored |
 | `runner.py` | Reducer write-back: `artifact.md <- sr.output` when `len > 5000` | Improved artifact was discarded; seeded content never updated |
 | `studio/tools.py` | `read_artifact` + `patch_artifact` tools with OCC + `threading.Lock` | Workers write artifact.md concurrently; without locking + hash check, writes collide |
-| `runner.py` | task_hash uses `_base_requirement` (pre-goal-block) — DESIGN §11.5 D1 | Attaching a goal forked the hill-climb lineage → cold-start v1, score 0.00 |
-| `studio/epoch_gate.py` (new) | Epoch keep/discard gate: keep new artifact only if label-free judge prefers it over the seed; else revert — DESIGN §11.5 D2 | Closes the open-loop accept (length-only ratchet kept worse same-length rewrites) |
-| `agentkit/evolve/core.py` | `self_preference` parsing hardened (`_extract_winner`: VERDICT-line/JSON/prose) + `VERDICT:` prompt — DESIGN §11.5 D3 | Strict-JSON parser silently tied a 58KB report with a 4KB stub (judge answered in prose) |
-| `studio/rubric.py` (new) + `GET /rubric/defaults`, `POST /session/{id}/rubric`, `Session.rubric_config` | Deterministic research-report rubric (5 criteria, GUI-tunable weights + deliverable template) — DESIGN §11.6 | Replaces gameable solved/total + unreliable LLM judge; separates good 0.925 vs thin 0.4531 where the live LLM tied |
-| `frontend LoopConfigPanel.tsx` "rubric" tab + `runStore.configuredRubric` | GUI rubric panel: weight sliders + editable template, seeded from defaults, POSTs `rubric_config` — DESIGN §11.6 | Makes the scoring standard a GUI parameter; criteria rendered from the defaults endpoint (no hardcoded keys) |
-| `runner.py` | Template injected into `requirement` when `rubric_config.template` set (after `_base_requirement` capture) — DESIGN §11.6 | Template STEERS generation toward its sections, not just scores them; only when configured, so non-research tasks aren't forced into report headings |
-| `runner.py` | `rubric_score` is the RECORDED score + hill-climb metric + template-save gate; `solved/total` retired — DESIGN §11.6 | Count-based score punished thoroughness (more weaknesses → lower) and rewarded empty docs (→1.0); rubric is deterministic + tracks quality (result(12) = 1.0 vs noisy 0.67) |
-| `task_runs.py` `mine_weaknesses_from_outputs` | Moving-window miner: sweeps full doc in ≤8 overlapping ~12K windows, union-deduped — DESIGN §11.6 | Old head+tail left the MIDDLE blind → present tail sections (Methodology @54K of 64K) reported missing |
-| `runner.py` + `rubric.sections_present` | Deterministic full-text section filter + semantic dedup (cosine ≥ 0.85); weaknesses surfaced via `HillClimbEvent`, rendered below the report in `ResultWindow` (NOT in the document) — DESIGN §11.6 | Kills the windowed scorer's false "missing X" echo; collapses one issue surfaced under two sections; keeps the deliverable clean |
+| `runner.py` | task_hash uses `_base_requirement` (pre-goal-block) — DESIGN §14.1 D1 | Attaching a goal forked the hill-climb lineage → cold-start v1, score 0.00 |
+| `studio/epoch_gate.py` (new) | Epoch keep/discard gate: keep new artifact only if label-free judge prefers it over the seed; else revert — DESIGN §14.1 D2 | Closes the open-loop accept (length-only ratchet kept worse same-length rewrites) |
+| `agentkit/evolve/core.py` | `self_preference` parsing hardened (`_extract_winner`: VERDICT-line/JSON/prose) + `VERDICT:` prompt — DESIGN §14.1 D3 | Strict-JSON parser silently tied a 58KB report with a 4KB stub (judge answered in prose) |
+| `studio/rubric.py` (new) + `GET /rubric/defaults`, `POST /session/{id}/rubric`, `Session.rubric_config` | Deterministic research-report rubric (5 criteria, GUI-tunable weights + deliverable template) — DESIGN §14.2 | Replaces gameable solved/total + unreliable LLM judge; separates good 0.925 vs thin 0.4531 where the live LLM tied |
+| `frontend LoopConfigPanel.tsx` "rubric" tab + `runStore.configuredRubric` | GUI rubric panel: weight sliders + editable template, seeded from defaults, POSTs `rubric_config` — DESIGN §14.2 | Makes the scoring standard a GUI parameter; criteria rendered from the defaults endpoint (no hardcoded keys) |
+| `runner.py` | Template injected into `requirement` when `rubric_config.template` set (after `_base_requirement` capture) — DESIGN §14.2 | Template STEERS generation toward its sections, not just scores them; only when configured, so non-research tasks aren't forced into report headings |
+| `runner.py` | `rubric_score` is the RECORDED score + hill-climb metric + template-save gate; `solved/total` retired — DESIGN §14.2 | Count-based score punished thoroughness (more weaknesses → lower) and rewarded empty docs (→1.0); rubric is deterministic + tracks quality (result(12) = 1.0 vs noisy 0.67) |
+| `task_runs.py` `mine_weaknesses_from_outputs` | Moving-window miner: sweeps full doc in ≤8 overlapping ~12K windows, union-deduped — DESIGN §14.2 | Old head+tail left the MIDDLE blind → present tail sections (Methodology @54K of 64K) reported missing |
+| `runner.py` + `rubric.sections_present` | Deterministic full-text section filter + semantic dedup (cosine ≥ 0.85); weaknesses surfaced via `HillClimbEvent`, rendered below the report in `ResultWindow` (NOT in the document) — DESIGN §14.2 | Kills the windowed scorer's false "missing X" echo; collapses one issue surfaced under two sections; keeps the deliverable clean |
 | `restart.sh` (new) | `kill_port` `|| return 0` (was `|| return`, propagated lsof exit 1 → `set -e` abort); `--reload` opt-in (`RELOAD=1`) | `./restart.sh` aborted after the kill → backend never restarted → GUI `/backends` 500 |
-| `runner.py` + agentkit shared libs | **Substantiation Levers 1–3** — L1 worker emits `RESEARCH_FINDING` only (tool loop 5→8 + forced synthesis turn); L2 parser accepts bare findings + missing-anchor inserts demoted to clean appends; L3 dual-oracle grounding (URL-fetched OR quote-verified) + fuzzy match + cited-URL prefetch — DESIGN §11.7 | Worker was cut off mid-`tool_use`; bare findings → 0 patches; exact-match dropped real fetched sources. Findings/phase **2 → 26** |
-| `agentkit.artifacts.ranking` (`synthesize_ranking_table`) + `metrics` + `runner._apply_ranking` | **F4 honest ranking** — SPLIT table: Measured (citations/stars, ranked) vs Reported/unranked (stated/`—`), never mixed, never invents a metric — DESIGN §11.7 | Mixing citation counts with view counts is apples-to-oranges an evaluator flags; `—` with a methodology note is the correct output when no public metric exists |
-| `agentkit.artifacts.sections` (`accept_rewrite`, `split_sections`) | **F2 per-section ratchet** — relaxes whole-doc grow-only to per-section grow-only; a reviser may REPLACE a section (repair / ranking / dedup) on net shrink, never deleting a sourced section — DESIGN §11.7 | Whole-doc length ratchet LOCKED a poisoned seed; per-section hashes let a non-additive rewrite land safely |
+| `runner.py` + agentkit shared libs | **Substantiation Levers 1–3** — L1 worker emits `RESEARCH_FINDING` only (tool loop 5→8 + forced synthesis turn); L2 parser accepts bare findings + missing-anchor inserts demoted to clean appends; L3 dual-oracle grounding (URL-fetched OR quote-verified) + fuzzy match + cited-URL prefetch — DESIGN §14.3 | Worker was cut off mid-`tool_use`; bare findings → 0 patches; exact-match dropped real fetched sources. Findings/phase **2 → 26** |
+| `agentkit.artifacts.ranking` (`synthesize_ranking_table`) + `metrics` + `runner._apply_ranking` | **F4 honest ranking** — SPLIT table: Measured (citations/stars, ranked) vs Reported/unranked (stated/`—`), never mixed, never invents a metric — DESIGN §14.3 | Mixing citation counts with view counts is apples-to-oranges an evaluator flags; `—` with a methodology note is the correct output when no public metric exists |
+| `agentkit.artifacts.sections` (`accept_rewrite`, `split_sections`) | **F2 per-section ratchet** — relaxes whole-doc grow-only to per-section grow-only; a reviser may REPLACE a section (repair / ranking / dedup) on net shrink, never deleting a sourced section — DESIGN §14.3 | Whole-doc length ratchet LOCKED a poisoned seed; per-section hashes let a non-additive rewrite land safely |
 | `agentkit.artifacts.dedup` + `templates.py` (report-template store) | F1 finding dedup (semantic); proven skeletons reused on first-document tasks | Duplicate findings inflate the doc; a vetted skeleton seeds structure the rubric rewards |

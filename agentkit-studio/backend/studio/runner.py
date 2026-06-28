@@ -23,7 +23,7 @@ from __future__ import annotations
 import json as _json
 import re as _re
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -435,7 +435,7 @@ def _dedupe_assignment(
 
 
 def _phase_search_failed(outputs: list[str]) -> bool:
-    """True iff every worker reported SEARCH: error and none produced findings (§11.6).
+    """True iff every worker reported SEARCH: error and none produced findings (§14.2).
 
     A phase where the search tool itself failed for ALL workers must HALT with a
     visible notice — not silently no-op (which would look like "doc is already
@@ -460,7 +460,7 @@ def _phase_search_failed(outputs: list[str]) -> bool:
 
 
 def _build_skeleton(goal: str, client, embedder=None) -> str:
-    """Build an initial document skeleton from the goal (DESIGN §11.5).
+    """Build an initial document skeleton from the goal (DESIGN §14.1).
 
     Template reuse (1st-document creation): if a prior research report's skeleton semantically
     matches this goal (cosine over the embedder, via TemplateStore), reuse its proven STRUCTURE
@@ -1069,6 +1069,21 @@ def _ends_cleanly(text: str) -> bool:
     return stripped[-1] in _CLEAN_END_CHARS
 
 
+@dataclass(frozen=True)
+class EpochResult:
+    """Per-epoch outcome returned by :meth:`Runner._run_inner` (DESIGN §14.4).
+
+    ``run()`` consumes it to decide whether the epoch loop continues. ``status``
+    is one of ``improving`` / ``plateau`` / ``converged`` — the same value the
+    pass's :class:`HillClimbEvent` carries for the frontend timeline.
+    """
+
+    version: int
+    score: float
+    delta: float
+    status: str
+
+
 class Runner:
     """Drives one studio run end-to-end, emitting the ordered SSE sequence.
 
@@ -1103,10 +1118,20 @@ class Runner:
         self._workspace_root = workspace_root
         #: Phase-1 epoch keep/discard judge (new, prior, requirement) -> net pref.
         #: Tests inject a deterministic stub; production builds one from
-        #: agentkit.evolve.self_preference (see studio.epoch_gate, DESIGN §11.5).
+        #: agentkit.evolve.self_preference (see studio.epoch_gate, DESIGN §14.1).
         self._prefer_fn = prefer_fn
         self._acc = TokenAccounting()
         self._current_step_id = ""
+        #: §14.4 epoch heartbeat: 1-based index of the current in-process pass when
+        #: the epoch loop is engaged (0 = single-pass mode → step ids un-prefixed).
+        self._epoch = 0
+        #: Effective hill-climb config for this run, resolved once in run() from the
+        #: session config + the persisted per-task snapshot (None until run() sets it).
+        self._effective_hc: dict | None = None
+        #: Final output / cancel flag of the last pass — run() reads these to emit the
+        #: single terminal `done` after the epoch loop (the done moved out of _run_inner).
+        self._last_result = ""
+        self._last_cancelled = False
         #: Wall-clock start of the run, stamped in run(); the done frame reports
         #: real elapsed time (per-phase wall_s lives on phase_done).
         self._t0: float | None = None
@@ -1159,17 +1184,71 @@ class Runner:
     # -- the run -----------------------------------------------------------
 
     def run(self, requirement: str) -> None:
-        """Execute the full pipeline for ``requirement``, emitting every event."""
+        """Execute the full pipeline for ``requirement``, emitting every event.
+
+        §14.4 epoch heartbeat: when ``auto_improve`` is on AND ``max_epochs > 1``
+        the run auto-iterates ``_run_inner`` up to ``max_epochs`` times — each pass
+        seeds from the prior via the existing ``latest_with_content`` carry-forward —
+        breaking early on plateau/converged or cancellation. Otherwise a single pass
+        runs, exactly as before. The terminal ``done`` is emitted once, after the loop.
+        """
         self._t0 = time.perf_counter()
         try:
-            self._run_inner(requirement)
+            cfg = self._resolve_hc_config(requirement)
+            self._effective_hc = cfg
+            auto = bool(cfg.get("auto_improve"))
+            max_epochs = int(cfg.get("max_epochs", 5))
+            if auto and max_epochs > 1:
+                for i in range(max_epochs):
+                    self._epoch = i + 1
+                    res = self._run_inner(requirement)
+                    if res.status in ("plateau", "converged"):
+                        break
+                    if self._session.cancel_requested:
+                        break
+            else:
+                self._epoch = 0
+                self._run_inner(requirement)
+            # Single terminal done for the whole stream (all epochs share one stream).
+            self._emit(
+                self._done_event(self._last_result, cancelled=self._last_cancelled)
+            )
         except Exception as exc:  # noqa: BLE001 - any failure becomes an error frame
             self._emit(ErrorEvent(message=str(exc), where="runner"))
             # Still emit a terminal done so the frontend leaves the running state.
             self._emit(self._done_event("", cancelled=False))
 
-    def _run_inner(self, requirement: str) -> None:
+    def _resolve_hc_config(self, requirement: str) -> dict:
+        """Resolve the effective hill-climb config (DESIGN §14.4 persistence).
+
+        Session config wins. When the session did not pin the epoch budget (no
+        config, or a config missing ``max_epochs``) the per-task snapshot recorded
+        by a prior run is loaded via ``TaskRunStore.latest_config`` — keyed by the
+        SAME base ``task_hash`` the artifact carry-forward uses — so a requirement
+        remembers its epoch budget across backend restarts. ``requirement`` here is
+        the base requirement (goal/template are injected inside ``_run_inner`` only),
+        so the key never forks the task identity (§14.1 D1).
+        """
+        session_cfg = dict(getattr(self._session, "hill_climb_config", None) or {})
+        if "max_epochs" not in session_cfg:
+            try:
+                from studio.task_runs import TaskRunStore, task_hash as _task_hash
+                persisted = TaskRunStore().latest_config(_task_hash(requirement))
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                persisted = {}
+            if persisted:
+                return {**persisted, **session_cfg}  # session always wins
+        return session_cfg
+
+    def _run_inner(self, requirement: str) -> EpochResult:
         session = self._session
+        # §14.4: reset per-pass step/phase accumulators so each in-process epoch is a
+        # clean sub-DAG (the panel trackers below are already rebuilt per pass).
+        self._current_step_id = ""
+        self._phase_captured = 0
+        # Default outcome — if a pass errors before scoring, the loop treats it as
+        # "improving" (score 0) and continues until max_epochs (DESIGN §14.4 #1).
+        _outcome = EpochResult(version=0, score=0.0, delta=0.0, status="improving")
 
         # Task IDENTITY for hill-climb continuity is the BASE requirement, captured
         # BEFORE the goal/constraints block (just below) and the per-iteration prefix
@@ -1193,7 +1272,7 @@ class Runner:
             if _parts:
                 requirement = "\n".join(_parts) + "\n\n" + requirement
 
-        # Wire the deliverable TEMPLATE into GENERATION (DESIGN §11.6): when the GUI
+        # Wire the deliverable TEMPLATE into GENERATION (DESIGN §14.2): when the GUI
         # has set a rubric template, instruct the agent to produce those sections, so
         # the template STEERS the report (the workers target the structure the gate
         # later scores) instead of only being graded after the fact. Injected into
@@ -1219,7 +1298,13 @@ class Runner:
         # Hill climb: if auto_improve is on and a prior run exists for this task,
         # copy its artifact into the current workspace and prefix the requirement
         # with the prior score + weaknesses so the agent edits rather than regenerates.
-        _hc_cfg = getattr(session, "hill_climb_config", None) or {}
+        # Effective config = the one run() resolved (session ⊕ persisted, §14.4); fall
+        # back to the raw session config when _run_inner is exercised directly.
+        _hc_cfg = (
+            self._effective_hc
+            if self._effective_hc is not None
+            else (getattr(session, "hill_climb_config", None) or {})
+        )
         _artifact_copied = False
         _eff_ws2 = None
         _weaknesses_block = ""  # prior-run lessons → planner/hub constraints
@@ -1371,6 +1456,23 @@ class Runner:
             )
         else:
             plan_obj = plan(_original_requirement)
+        # §14.4 re-entrancy: when the epoch loop replays _run_inner in-process, prefix
+        # every step id (and its depends_on edges) with the epoch index so each pass is
+        # a distinct sub-DAG and ids never collide across epochs (e.g. e2:s3). Single-pass
+        # runs keep epoch 0 and are left un-prefixed (back-compat for existing tests).
+        if self._epoch > 0:
+            _pfx = f"e{self._epoch}:"
+            plan_obj = replace(
+                plan_obj,
+                steps=tuple(
+                    replace(
+                        s,
+                        id=_pfx + s.id,
+                        depends_on=tuple(_pfx + d for d in s.depends_on),
+                    )
+                    for s in plan_obj.steps
+                ),
+            )
         # Capture the plan-as-dicts once: the PlanEvent payload AND the input the
         # Loop Doctor audits (its clear_stopping check walks this DAG at run end).
         plan_step_dicts = [
@@ -1441,7 +1543,7 @@ class Runner:
         outputs: dict[str, str] = {}
         _reducer_gaps: list[str] = []   # §11.4 last-phase gaps → next-run weaknesses
 
-        # §11.5: create == improve. When improving but NO prior doc exists yet,
+        # §14.1: create == improve. When improving but NO prior doc exists yet,
         # bootstrap a skeleton (headings + placeholders from the goal, no search) so
         # the phase loop fills it ADDITIVELY — the same pipeline as improving an
         # existing doc, instead of asking one LLM to author the whole report.
@@ -1643,7 +1745,7 @@ class Runner:
             outputs[step.id] = sr.output
             final_output = sr.output
 
-            # §11.6: if the search tool itself failed for this whole phase, surface
+            # §14.2: if the search tool itself failed for this whole phase, surface
             # it as a visible gate check — a broken-search run must not masquerade
             # as a finished one (and the anti-regression guard keeps the seed).
             if _phase_search_failed([sr.output]):
@@ -2000,7 +2102,7 @@ class Runner:
             if _reducer_gaps:
                 _seen_w = set(_weaknesses)
                 _weaknesses = [g for g in _reducer_gaps if g not in _seen_w] + _weaknesses
-            # Deterministic section guard (DESIGN §11.6): the moving-window miner now sees the
+            # Deterministic section guard (DESIGN §14.2): the moving-window miner now sees the
             # whole artifact, but the SCORER still windows (20K) and its UNMET line is fed to
             # the miner as a starting point — so a tail section past the scorer's window can
             # still echo through as a false "missing X". Drop any missing/absent-section
@@ -2043,10 +2145,10 @@ class Runner:
             # constraints — NOT the score. The recorded score is the deterministic rubric,
             # computed AFTER the keep/discard gate below so it scores the artifact actually
             # kept. (solved/total retired: a count-based score punished thoroughness — more
-            # mined weaknesses lowered it even as the document improved; DESIGN §11.6.)
+            # mined weaknesses lowered it even as the document improved; DESIGN §14.2.)
             # (Remaining weaknesses are surfaced below the report via HillClimbEvent.weaknesses
             # — the frontend renders them — never written into result_output / the document.)
-            # Phase-1 keep/discard gate (DESIGN §11.5): when this epoch seeded from a
+            # Phase-1 keep/discard gate (DESIGN §14.1): when this epoch seeded from a
             # prior best, KEEP its artifact only if a label-free judge strictly prefers
             # it over the seed. On reject, restore the prior so the carry-forward seed
             # never regresses (worst case = prior good report retained). Cold start
@@ -2059,9 +2161,9 @@ class Runner:
                     _pf = self._prefer_fn
                     _prefer = lambda _n, _p: _pf(_n, _p, _original_requirement)
                 else:
-                    # DEFAULT judge = deterministic research-report rubric (DESIGN §11.6).
+                    # DEFAULT judge = deterministic research-report rubric (DESIGN §14.2).
                     # An LLM "which is better?" judge ties strong-vs-stub even on sonnet
-                    # (§11.5 D4); the rubric separates them reproducibly. _verified_urls
+                    # (§14.1 D4); the rubric separates them reproducibly. _verified_urls
                     # is the accuracy oracle (URLs confirmed real via the web cache).
                     # Weights + deliverable template come from the GUI rubric_config.
                     _rc = getattr(session, "rubric_config", None) or {}
@@ -2081,7 +2183,7 @@ class Runner:
                 except Exception:  # noqa: BLE001 — gate must never crash the run
                     pass
             # Recorded score = deterministic RUBRIC over the FINAL (post-gate) artifact —
-            # the metric that actually tracks quality (DESIGN §11.6). Computed from the clean
+            # the metric that actually tracks quality (DESIGN §14.2). Computed from the clean
             # _scored_text BEFORE the weakness annotation is appended, so the score is not
             # polluted by it. Weights + template come from the GUI rubric_config.
             from studio.rubric import rubric_score
@@ -2108,6 +2210,9 @@ class Runner:
                     artifact_path=_art_path,
                     requirement=_original_requirement,
                     result_text=result_output,
+                    # §14.4: snapshot the effective hill-climb config so a later run of
+                    # this task can recover its epoch budget across backend restarts.
+                    config=_hc_cfg or {},
                 )
             )
             # Template reuse: save a decent report's heading SKELETON so the next
@@ -2126,7 +2231,7 @@ class Runner:
                 if len(_prev) >= 2:
                     _prev_score = _prev[-2].score
             _delta = _score - _prev_score
-            _hc_cfg2 = getattr(session, "hill_climb_config", None) or {}
+            _hc_cfg2 = _hc_cfg
             _min_delta = float(_hc_cfg2.get("min_improvement", 0.02))
             _max_epochs = int(_hc_cfg2.get("max_epochs", 5))
             if _version >= _max_epochs:
@@ -2135,6 +2240,10 @@ class Runner:
                 _status = "plateau"
             else:
                 _status = "improving"
+            # §14.4: hand this pass's outcome back to run() so it can drive the loop.
+            _outcome = EpochResult(
+                version=_version, score=_score, delta=_delta, status=_status
+            )
             self._emit(
                 HillClimbEvent(
                     epoch=_version,
@@ -2149,8 +2258,12 @@ class Runner:
         except Exception:  # noqa: BLE001 — scoring failure must never crash the run
             pass
 
-        # done
-        self._emit(self._done_event(result_output, cancelled=cancelled))
+        # §14.4: the terminal `done` now lives in run() (emitted once after the epoch
+        # loop). Stash this pass's final output + cancel flag so run() can build it,
+        # and hand back the per-epoch outcome that drives continue/stop.
+        self._last_result = result_output
+        self._last_cancelled = cancelled
+        return _outcome
 
     # -- helpers -----------------------------------------------------------
 

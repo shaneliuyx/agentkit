@@ -31,7 +31,7 @@ A live hill-climb run surfaced a chain of carried-forward-state bugs; all fixed
 ## Recent hardening (2026-06-28)
 
 A second hill-climb pass added grounding and structure mechanisms (see
-DESIGN §11.6–§11.7):
+DESIGN §14.2–§14.3):
 
 - **Deterministic rubric score** — a 5-criterion research-report rubric
   (GUI-tunable weights + deliverable template) is now the recorded score and
@@ -49,6 +49,11 @@ DESIGN §11.6–§11.7):
 - **Reliable miner** — a moving-window weakness miner sweeps the full document
   (no more blind middle), with semantic dedup of duplicate findings; inherited
   `<!-- conflict -->` markers are sanitized from seeds.
+- **Epoch heartbeat** — one Run now auto-iterates up to `max_epochs` passes
+  (each seeded from the prior, stopping early when the score plateaus), instead
+  of a single pass per click. `max_epochs` and the rest of the hill-climb config
+  persist per requirement in `task_runs.db`, surviving a backend restart. See
+  DESIGN §14.4.
 
 ## Backend quickstart
 
@@ -553,18 +558,18 @@ curl -X POST http://localhost:8000/chain/run \
 | Token meter shows `~` everywhere | backend returns no usage telemetry | expected on usage-less backends; switch to one with telemetry for exact counts |
 | Memory panel empty + notice | oMLX/Qdrant down or no embedder | start the services, or ignore (degrades by design) |
 | Port `:8000` "address in use" | you pointed the backend at oMLX's port | use `:8770` — see §2.1 |
-| Hill-climb score 0.00 / report regressed after attaching a goal | task_hash forked the lineage (fixed) | re-run; identity now goal-invariant — DESIGN §11.5 D1 |
+| Hill-climb score 0.00 / report regressed after attaching a goal | task_hash forked the lineage (fixed) | re-run; identity now goal-invariant — DESIGN §14.1 D1 |
 
-## Decisions (2026-06-28) — see DESIGN §11.5
+## Decisions (2026-06-28) — see DESIGN §14.1
 
 - **D1** task_hash = base requirement (goal-invariant) → attaching a goal no longer cold-starts the hill-climb lineage.
 - **D2** epoch keep/discard gate (`studio/epoch_gate.py`) → an epoch is kept only if preferred over the prior best; else the prior good report is retained (no quality regression).
 - **D3** `agentkit/evolve/core.py::self_preference` parsing hardened (judge replied in prose; strict JSON silently tied a 58 KB report with a 4 KB stub).
-- **D4 (resolved)** LLM pairwise preference proved unreliable for large reports (haiku & sonnet both tied good-vs-thin) → the scoring standard / gate signal is now a **deterministic rubric** (`studio/rubric.py`, 5 criteria), not an LLM "which is better?". Separates good 0.925 vs thin 0.4531 where the LLM tied — DESIGN §11.6.
-- **D6** rubric is a **GUI parameter** — a "rubric" tab in Loop Config (weight sliders + editable deliverable template), seeded from `GET /rubric/defaults`, POSTs to `POST /session/{id}/rubric`. Criteria rendered from the endpoint (no hardcoded keys) — DESIGN §11.6.
-- **D7** the deliverable **template steers generation**, not just scoring — when `rubric_config.template` is set, the runner appends the sections to the requirement (after `_base_requirement`, so `task_hash` is unchanged); only when explicitly configured, so non-research tasks aren't forced into report headings — DESIGN §11.6.
-- **D9** `rubric_score` is now the **recorded score** + hill-climb metric + template-save gate (solved/total retired) — a count-based score punished thoroughness (more weaknesses → lower score on an improving doc) and rewarded empty docs (→1.0). Verified on `result (12).md`: rubric 1.0 vs the old noisy 0.67 — DESIGN §11.6.
-- **D10** miner reads the **whole document** via a moving window (≤8 overlapping ~12K windows) — the old head+tail left the middle blind, so present tail sections were reported missing. Plus a deterministic full-text **section filter** (kills the scorer's windowed false "missing X" echo) and **semantic dedup** (cosine ≥ 0.85 collapses the same issue surfaced under two sections). Weaknesses render **below the report** in the result view, never written into the document — DESIGN §11.6.
+- **D4 (resolved)** LLM pairwise preference proved unreliable for large reports (haiku & sonnet both tied good-vs-thin) → the scoring standard / gate signal is now a **deterministic rubric** (`studio/rubric.py`, 5 criteria), not an LLM "which is better?". Separates good 0.925 vs thin 0.4531 where the LLM tied — DESIGN §14.2.
+- **D6** rubric is a **GUI parameter** — a "rubric" tab in Loop Config (weight sliders + editable deliverable template), seeded from `GET /rubric/defaults`, POSTs to `POST /session/{id}/rubric`. Criteria rendered from the endpoint (no hardcoded keys) — DESIGN §14.2.
+- **D7** the deliverable **template steers generation**, not just scoring — when `rubric_config.template` is set, the runner appends the sections to the requirement (after `_base_requirement`, so `task_hash` is unchanged); only when explicitly configured, so non-research tasks aren't forced into report headings — DESIGN §14.2.
+- **D9** `rubric_score` is now the **recorded score** + hill-climb metric + template-save gate (solved/total retired) — a count-based score punished thoroughness (more weaknesses → lower score on an improving doc) and rewarded empty docs (→1.0). Verified on `result (12).md`: rubric 1.0 vs the old noisy 0.67 — DESIGN §14.2.
+- **D10** miner reads the **whole document** via a moving window (≤8 overlapping ~12K windows) — the old head+tail left the middle blind, so present tail sections were reported missing. Plus a deterministic full-text **section filter** (kills the scorer's windowed false "missing X" echo) and **semantic dedup** (cosine ≥ 0.85 collapses the same issue surfaced under two sections). Weaknesses render **below the report** in the result view, never written into the document — DESIGN §14.2.
 - **D5 (follow-up)** `studio/runner.py` (~2.1k lines) to be decomposed.
 - Restart both services with `./restart.sh` (kills by port, relaunches; `backend|frontend|both`). `RELOAD=1 ./restart.sh` for uvicorn `--reload` (dev); default is a stable no-reload server.
 - **D8 (restart.sh fix, 2026-06-28)** two `set -e` aborts made `./restart.sh` exit after the kill step → backend never restarted → GUI `GET /backends` 500. (1) `kill_port`'s `lsof … || return` propagated lsof's exit 1 when a graceful kill freed the port → `return 0`. (2) `--reload` is now opt-in (`RELOAD=1`): a reload onto a half-saved `.py` left the worker dead and 500-ing `/backends`. Verified: `./restart.sh both` → both ports up, `/backends` 200 direct + via vite proxy.

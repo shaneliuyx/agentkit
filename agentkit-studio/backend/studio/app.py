@@ -611,7 +611,7 @@ def set_hill_climb(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
 @app.get("/rubric/defaults")
 def rubric_defaults() -> dict[str, Any]:
     """Default rubric weights + deliverable template, so the GUI can seed the rubric
-    panel with the same values the scorer uses (DESIGN §11.6)."""
+    panel with the same values the scorer uses (DESIGN §14.2)."""
     from studio.rubric import DEFAULT_TEMPLATE, DEFAULT_WEIGHTS
 
     return {"weights": DEFAULT_WEIGHTS, "template": DEFAULT_TEMPLATE}
@@ -619,7 +619,7 @@ def rubric_defaults() -> dict[str, Any]:
 
 @app.post("/session/{session_id}/rubric")
 def set_rubric(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    """Set the GUI rubric + deliverable template for a session (DESIGN §11.6).
+    """Set the GUI rubric + deliverable template for a session (DESIGN §14.2).
 
     Body: {"weights": {criterion: float}, "template": [section, ...]}. Both optional;
     omitted falls back to studio.rubric defaults. The keep/discard gate scores each epoch

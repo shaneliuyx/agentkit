@@ -12,9 +12,11 @@ venv/
 
 # Local caches / state (not part of the library)
 .web_cache.json
+*.bak
 .tokensave/
 .omc/
 tasks/
+tmp/
 .cache/
 *.db
 

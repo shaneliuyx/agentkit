@@ -44,6 +44,22 @@ def _clear_fetch_cache() -> Any:
     _fetch_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_studio_state(tmp_path_factory, monkeypatch) -> Any:
+    """Isolate the studio workspace + task_runs DB per test.
+
+    The default workspace root (``tmp/studio-workspaces``) puts the cross-session
+    ``task_runs.db`` at the *production* location — so tests that record runs leak
+    state into each other (and into the real DB). Since §14.4 persists each run's
+    hill-climb config, a prior auto_improve test would otherwise resurrect that
+    config for a later bare run of the same requirement (e.g. flipping topology).
+    Point each test at a fresh tmp root; tests that set ``STUDIO_WORKSPACE_ROOT``
+    themselves override this (their setenv runs after the autouse fixture)."""
+    root = tmp_path_factory.mktemp("studio_ws") / "ws"
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(root))
+    yield
+
+
 @pytest.fixture
 def fake_client() -> FakeClient:
     return FakeClient()

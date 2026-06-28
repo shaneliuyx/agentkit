@@ -1,6 +1,6 @@
-"""studio.rubric — research-report evaluation rubric (DESIGN §11.6).
+"""studio.rubric — research-report evaluation rubric (DESIGN §14.2).
 
-WHY this exists: live testing (DESIGN §11.5 D4) showed an LLM "which report is better?"
+WHY this exists: live testing (DESIGN §14.1 D4) showed an LLM "which report is better?"
 judge is unreliable for large reports — haiku AND sonnet both tied a 58 KB sourced
 report with a 4.5 KB stub. The loop-engineering literature says the same: "LLM-as-judge
 can be gamed or collude; put a DETERMINISTIC check in the cycle wherever one exists."
@@ -103,7 +103,7 @@ def score_breakdown(
 
     req = [s.strip() for s in (required_sections or []) if s and s.strip()]
     if req:                                                   # template-coverage structure
-        # Concept-level coverage (DESIGN §11.6 calibration): a required section counts as
+        # Concept-level coverage (DESIGN §14.2 calibration): a required section counts as
         # present if the exact phrase appears OR some heading shares a content word with it.
         # Exact substring alone scored a genuinely good report 0.5 because its headings used
         # real-world synonyms ("Verified Sources" for "Source References", "Core Finding" for

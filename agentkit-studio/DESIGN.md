@@ -1422,7 +1422,11 @@ with urllib.request.urlopen(f"{B}/run/{sid}?requirement={q}", timeout=1800) as r
 
 ---
 
-## §11.5 Loop-Engineering Closure — Decision Log (2026-06-28)
+## 14. Decision Log & Changelog (2026-06-28)
+
+*Chronological as-built decisions and changes elaborating §11 (hill-climb). Numbered separately from the §11 architecture spec above.*
+
+### 14.1 Loop-Engineering Closure — Decision Log
 
 Context: an evaluation of Studio against the loop-engineering literature found the
 self-improvement path was an **open loop** — it accepted every epoch's artifact as long
@@ -1430,7 +1434,7 @@ as it was not *shorter* (a length-only ratchet), with no quality keep/discard. T
 genuine optimizer (`agentkit.evolve.optimize_text` / `loop.hill_climb`) was **not wired
 in**; Studio reimplemented a thinner version. Decisions below, each grounded in a test.
 
-### D1 — task_hash identity is the BASE requirement (goal-invariant)
+#### D1 — task_hash identity is the BASE requirement (goal-invariant)
 `runner._run_inner` prepended the goal/constraints block into the requirement BEFORE
 hashing, so attaching a goal forked the hill-climb lineage → cold-start v1, no artifact
 carry-forward, weakness-score `0/N = 0.00`. **Decision:** hash `_base_requirement`
@@ -1438,7 +1442,7 @@ captured before the goal block (and before the per-iteration prefix). Verified: 
 lineage `find the most popular…report` already hashes to `4ca9b03811b7`; a goal-attached
 run now rejoins it. Guard: `tests/test_runner.py::test_task_hash_invariant_to_attached_goal`.
 
-### D2 — Epoch keep/discard gate (close the open loop)
+#### D2 — Epoch keep/discard gate (close the open loop)
 **Decision:** new module `studio/epoch_gate.py` (`accept_epoch`, `make_preference`). At
 the epoch boundary the new artifact is KEPT only if a **label-free judge strictly prefers
 it over the seed** (prior best); otherwise the prior is restored. Worst case = prior good
@@ -1447,7 +1451,7 @@ is noisy and has changed across versions); it reuses `agentkit.evolve.self_prefe
 (RHO pairwise preference). Placed in its own module to avoid growing `runner.py` (see D5).
 Guards: `test_accept_epoch_keep_discard_gate`, `test_accept_epoch_with_real_reports`.
 
-### D3 — Hardened `self_preference` parsing (agentkit modified)
+#### D3 — Hardened `self_preference` parsing (agentkit modified)
 **Real-report test finding:** with the strict `{"winner":…}` JSON parser, the judge tied
 a 58 KB good report with a 4.5 KB stub in BOTH directions — because haiku/sonnet answer in
 markdown prose ("**Artifact A is significantly better**") and `json.loads` failed →
@@ -1456,7 +1460,7 @@ trailing `VERDICT:` line → embedded JSON → prose → TIE, and `_PREFERENCE_S
 for a trailing `VERDICT:` line. The judge's *judgment* was correct all along; only
 extraction was lossy.
 
-### D4 — OPEN: LLM pairwise preference is an unreliable gate; use a STRUCTURED rubric
+#### D4 — OPEN: LLM pairwise preference is an unreliable gate; use a STRUCTURED rubric
 **Findings (live, real 58 KB good vs 4.5 KB thin report fixtures):**
 - haiku, strict-JSON parser → TIE (D3 parser bug: judge said "A better" in prose).
 - haiku, hardened parser + rubric → TIE (model *hedges*: "neither acceptable").
@@ -1480,11 +1484,22 @@ earlier "self_preference is the gate" plan — disproven by the three TIE result
 The `studio/epoch_gate.accept_epoch` machinery is unchanged; only the injected `prefer`
 implementation changes (`make_preference` → a rubric scorer diff).
 
+#### D5 — Follow-up: `runner.py` is too large
+`runner.py` (~2.1k lines) should be decomposed (record/scoring block, seed/auto-improve
+block, reduce/writeback block → modules). Tracked, not yet done; D2 logic was deliberately
+placed in `studio/epoch_gate.py` rather than added inline to avoid making it worse.
+
+#### Reuse vs. rebuild
+Reused as-is: `loop.goal.check_goal` (deterministic verifier), `loop.chain.LoopChain`
+(goal-gated driver), `evolve.self_preference` (D2 gate). Modified in agentkit: `self_preference`
+parsing (D3). Not yet wired (planned Phase 3): `optimize_text` to own the epoch loop +
+autonomous heartbeat, replacing Studio's hand-rolled single-epoch advance.
+
 ---
 
-## §11.6 Research-report rubric — scoring standard + deliverable template (2026-06-28)
+### 14.2 Research-report rubric — scoring standard + deliverable template
 
-Resolves §11.5 D4. The keep/discard gate's default judge is now a **deterministic
+Resolves §14.1 D4. The keep/discard gate's default judge is now a **deterministic
 research-report rubric** (`studio/rubric.py`), not an LLM preference. Synthesized from web
 research on report-quality standards:
 - DEER (arXiv:2512.17776) & DeepResearch-Bench (arXiv:2506.11763): deep-research report
@@ -1492,7 +1507,7 @@ research on report-quality standards:
 - CRAAP test (Currency, Relevance, Authority, Accuracy, Purpose) — source credibility.
 - Academic report rubrics (sourcing, evidence depth, methodology, structure).
 
-### Criteria (default weights, GUI-tunable)
+#### Criteria (default weights, GUI-tunable)
 | Criterion | Weight | Signal (deterministic) |
 | --- | --- | --- |
 | sourcing | 0.25 | # distinct cited source URLs (target 8) |
@@ -1504,12 +1519,12 @@ research on report-quality standards:
 `rubric_score(text, verified_urls, weights, required_sections) -> [0,1]`, weighted sum;
 `resolve_weights` L1-normalizes a partial GUI override and drops unknown keys.
 
-### Verified result (the point)
+#### Verified result (the point)
 On the real fixtures the live LLM judge tied (haiku & sonnet), the rubric scores
 **good = 0.925 vs thin = 0.4531** — a clean, reproducible separation. Guarded by
 `tests/test_rubric.py` (5 tests) + `test_accept_epoch_with_real_reports`.
 
-### Rubric is GUI-input + attached to a deliverable template
+#### Rubric is GUI-input + attached to a deliverable template
 - `Session.rubric_config = {"weights": {criterion: float}, "template": [section, ...]}`.
 - API: `POST /session/{id}/rubric` (set), `GET /rubric/defaults` (seed the panel).
 - The **template** (`DEFAULT_TEMPLATE`: Executive Summary, Key Findings, Evidence and
@@ -1518,7 +1533,7 @@ On the real fixtures the live LLM judge tied (haiku & sonnet), the rubric scores
 - The runner gate reads `session.rubric_config` → `make_rubric_preference(verified_urls,
   weights=…, required_sections=…)`. Falls back to defaults when unset.
 
-### Frontend rubric panel — BUILT (2026-06-28)
+#### Frontend rubric panel — BUILT (2026-06-28)
 A "rubric" tab in the Loop Config dialog (`LoopConfigPanel.tsx`):
 - Seeds from `GET /rubric/defaults`, renders a slider per criterion and an
   editable template section list, POSTs `{weights, template}` to
@@ -1529,7 +1544,7 @@ A "rubric" tab in the Loop Config dialog (`LoopConfigPanel.tsx`):
   needs zero frontend change. Weights normalized server-side (`resolve_weights`).
 - Typechecks clean (only pre-existing `TS2882` CSS side-effect import warnings).
 
-### Template → GENERATION wiring — BUILT (2026-06-28)
+#### Template → GENERATION wiring — BUILT (2026-06-28)
 The deliverable template now STEERS generation, not just scoring. In
 `runner._run_inner`, when `session.rubric_config["template"]` is set, the section
 list is appended to `requirement` ("Structure the deliverable with these sections…")
@@ -1540,7 +1555,7 @@ compromise their generation quality (the no-compromise constraint). Guarded by
 `test_rubric_template_steers_generation` (asserts sections reach the `plan` event's
 task when set, absent when unset). 51 backend tests pass.
 
-### Structure matching — concept-aware (FIXED 2026-06-28)
+#### Structure matching — concept-aware (FIXED 2026-06-28)
 `structure` now counts a required section as covered if the exact phrase appears OR a
 heading shares a content word with it (`_content_tokens`). WHY: the DB report skeleton
 (`studio/templates.py`, a real good report) scored only **0.5** against the default rubric
@@ -1551,14 +1566,14 @@ skeleton scores **structure = 1.0**; good fixture stays 1.0 and thin stays 0.478
 structure rises to ~0.83 via loose token overlap, but structure is only 0.15 weight and
 sourcing+verification+evidence = 0.70 correctly tank the thin total — separation intact).
 
-### Two distinct "template" mechanisms (do not confuse them)
+#### Two distinct "template" mechanisms (do not confuse them)
 There are TWO templates with overlapping purpose; the structure fix above reconciles them:
 | | **Rubric template** (`rubric.DEFAULT_TEMPLATE` / `rubric_config.template`) | **DB skeleton** (`studio/templates.py`, table `report_templates`) |
 | --- | --- | --- |
 | Shape | flat list of ~6 canonical section NAMES | full heading TREE (40+ nested `#`/`##`/`###`) extracted from a real report |
 | Source | authored / GUI-edited (the agreed deliverable shape) | learned — `extract_skeleton(result)` saved when `_score ≥ 0.6` (runner:2073) |
 | Keyed by | nothing (one set per session) | requirement embedding (cosine match, `find_template`, threshold 0.6) |
-| Used for | `structure` scoring + generation steering (§11.6 #2) | seed the FIRST document's structure (runner:478), per-requirement |
+| Used for | `structure` scoring + generation steering (§14.2 #2) | seed the FIRST document's structure (runner:478), per-requirement |
 
 Both now steer report STRUCTURE, so they are competing signals: the skeleton says "Verified
 Sources", the rubric injection says "Source References". Concept-aware `structure` matching is
@@ -1566,7 +1581,7 @@ what lets a report generated from the (good) DB skeleton still score 1.0 against
 template — they no longer have to share exact heading vocabulary, only the concepts. Empirical
 check: the one stored skeleton went 0.5 → 1.0 against `DEFAULT_TEMPLATE` after the fix.
 
-### Windowed-judge false "missing section" — moving-window miner + section filter (2026-06-28)
+#### Windowed-judge false "missing section" — moving-window miner + section filter (2026-06-28)
 SYMPTOM: V36 of the loop-engineering report (`result (12).md`, 64,389 chars) recorded
 weaknesses "Required section 'Methodology'/'Conclusion' is missing" although both exist
 (`## Methodology` @ char 54,764, `## Conclusion` @ 55,929). ROOT CAUSE: the LLM scorer
@@ -1595,7 +1610,7 @@ RESIDUAL (follow-up): `score_result` itself still windows at 20K — its discard
 harmless, but its UNMET feedback pollutes the miner (the filter cleans the section part only).
 Candidate fix: give the scorer the same full-text section/truncation oracle, or moving-window it.
 
-### Semantic weakness dedup + why solved/total "regresses" (2026-06-28)
+#### Semantic weakness dedup + why solved/total "regresses" (2026-06-28)
 OBSERVED: the loop-engineering task (`4ca9b03811b7`) recorded scores that oscillate while the
 artifact grows monotonically — v25 0.80 (38K chars) → v36 0.67 (64K chars). Same task, BIGGER
 and more complete document, LOWER score. This is NOT a quality regression: `_weakness_score =
@@ -1615,7 +1630,7 @@ Two amplifiers, both fixed:
    better verification lowers it. This is the core argument for making `rubric_score` (not
    solved/total) the recorded/convergence metric — see the decoupling gap below.
 
-### Rubric is now the recorded score (solved/total retired, 2026-06-28)
+#### Rubric is now the recorded score (solved/total retired, 2026-06-28)
 RESOLVED the decoupling: `rubric_score` (deterministic, full-text) is now the score RECORDED
 (`task_runs.score`), the hill-climb delta/convergence signal, the template-save gate
 (`≥ 0.6`), AND the epoch keep/discard judge — one metric end to end, no more gate-vs-score
@@ -1635,24 +1650,13 @@ noisy 0.67 solved/total); remaining weaknesses = 2 distinct real issues (popular
 citation redundancy) after the duplicate pair collapsed via semantic dedup. 274 backend tests
 pass; frontend tsc clean.
 
-### D5 — Follow-up: `runner.py` is too large
-`runner.py` (~2.1k lines) should be decomposed (record/scoring block, seed/auto-improve
-block, reduce/writeback block → modules). Tracked, not yet done; D2 logic was deliberately
-placed in `studio/epoch_gate.py` rather than added inline to avoid making it worse.
-
-### Reuse vs. rebuild
-Reused as-is: `loop.goal.check_goal` (deterministic verifier), `loop.chain.LoopChain`
-(goal-gated driver), `evolve.self_preference` (D2 gate). Modified in agentkit: `self_preference`
-parsing (D3). Not yet wired (planned Phase 3): `optimize_text` to own the epoch loop +
-autonomous heartbeat, replacing Studio's hand-rolled single-epoch advance.
-
-## §11.7 Substantiation levers + non-additive structure (2026-06-28)
+### 14.3 Substantiation levers + non-additive structure
 
 Two sibling efforts landed against the same hill-climb run. The **additive**
 levers raise grounding; the **structural** mechanisms attack the score ceiling
 the levers cannot move.
 
-### Substantiation Levers 1–3 (additive) — `agentkit` shared libs + runner
+#### Substantiation Levers 1–3 (additive) — `agentkit` shared libs + runner
 
 | Lever | Mechanism | Effect |
 |---|---|---|
@@ -1669,7 +1673,7 @@ evidence — the fabrication-prone CLAIM-rephrase step is dropped.
 > **structure** — ranking / metrics / completeness and inherited truncation —
 > which additive levers cannot fix by construction.
 
-### F4 — honest ranking synthesizer (`agentkit.artifacts.ranking`)
+#### F4 — honest ranking synthesizer (`agentkit.artifacts.ranking`)
 
 `synthesize_ranking_table(findings, metrics)` replaces the source-selection
 section with an **honest SPLIT presentation**:
@@ -1689,10 +1693,67 @@ claim (`parse_stated`, never re-derived), or in-corpus reference frequency.
 Backed by `agentkit.artifacts.metrics` (`Metric`); wired in `runner.py` as
 `_apply_ranking(doc, findings)`.
 
-### F2 — per-section ratchet (`agentkit.artifacts.sections`)
+#### F2 — per-section ratchet (`agentkit.artifacts.sections`)
 
 `accept_rewrite` relaxes the writeback ratchet from whole-document grow-only to
 **per-section grow-only**: a reviser may REPLACE one section (repair, ranking
 table, dedup) even when net length shrinks, while still guaranteeing no sourced
 section is deleted. `split_sections` is the deterministic `##` split (0 LLM)
 that keys the per-section hashes.
+
+### 14.4 Epoch heartbeat — one Run auto-iterates to `max_epochs` (2026-06-28)
+
+**Problem.** `max_epochs` was a dead label. Each Run did exactly ONE pass:
+`_run_inner` produced a document, scored it, recorded v+1, emitted a
+`HillClimbEvent` whose `status` flipped to `converged` only when the DB version
+count happened to reach `max_epochs` — and **nothing consumed that status to run
+another pass**. Reaching `max_epochs` required the user (or a driver script) to
+press Run repeatedly. `hill_climb_config` also lived only in memory on `Session`,
+so it was lost on every backend restart.
+
+**Design — drive the loop in `run()`.**
+
+1. **Loop location.** `run(requirement)` wraps `_run_inner` in an epoch loop;
+   `_run_inner` is refactored to RETURN its per-epoch outcome
+   (`EpochResult(version, score, delta, status)`) instead of emitting the
+   terminal `done` itself. `run()` decides continue/stop and emits the single
+   terminal `done` AFTER the loop. One SSE stream spans all epochs; the existing
+   `HillClimbEvent(epoch=version, …)` per pass is what the frontend timeline
+   already renders.
+
+2. **Carry-forward (unchanged).** Each pass seeds from the prior via the existing
+   `auto_improve` path (`latest_with_content` → prior `artifact.md` + weaknesses).
+   Because pass N records its artifact before pass N+1's seed-lookup, epoch N+1
+   **improves epoch N's document incrementally** — it is NOT a from-scratch
+   rebuild. The per-section ratchet (§14.3 F2) guarantees no regression across
+   passes.
+
+3. **Early stop = plateau.** After each pass `run()` breaks when:
+   - `status == "plateau"` — `version > 1 and delta < min_improvement` (the gain
+     no longer pays for the tokens), **or**
+   - `status == "converged"` — `version >= max_epochs`, **or**
+   - the run was cancelled.
+
+   The loop always runs **≥ 1** pass. `min_improvement` (default 0.02) is the
+   plateau threshold; both it and `max_epochs` come from the hill-climb config.
+
+4. **Re-entrancy — per-epoch step-id namespacing.** `_run_inner` emits DAG /
+   phase events keyed by `step_id`; replaying it in-process would collide ids and
+   corrupt the frontend graph. Each epoch prefixes its step ids with the epoch
+   index (e.g. `e2:s3`) so every pass is a distinct sub-DAG; `HillClimbEvent.epoch`
+   keeps the score timeline unambiguous. The graph store is reset per epoch.
+
+5. **Guard / back-compat.** The loop engages only when `auto_improve` is on AND
+   `max_epochs > 1`. Otherwise `run()` does a single `_run_inner` pass exactly as
+   before — non-hill-climb tasks are untouched.
+
+**Persistence — per-task in `task_runs.db`.** Add a `config_json` column to
+`task_runs` (`ALTER TABLE … ADD COLUMN`, same migration pattern as
+`requirement_embedding`). `record()` snapshots the hill-climb config used for
+that run; `TaskRunStore.latest_config(task_hash)` returns the most recent
+snapshot. On a new run with `auto_improve` and **no** explicit session config,
+the runner seeds the config from `latest_config(task_hash)` — so a requirement
+remembers its own epoch budget across sessions and **survives a backend
+restart**, keyed by the same `task_hash` lineage the artifact carry-forward uses
+(§12). Config is captured at the same point as `_base_requirement` so attaching a
+goal/template never forks the task identity (§14.1 D1).
