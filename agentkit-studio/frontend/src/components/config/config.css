@@ -107,6 +107,10 @@
 /* layout-only: padding/font-size inherited from .btn-sm; white-space from .btn */
 .loop-config-btn {
   font-family: var(--font-mono);
+  /* The top bar is `align-items: stretch`; this button is a direct child, so
+     without this it stretches to full bar height instead of its own. Match the
+     natural-height, bottom-aligned controls (e.g. Connect session). */
+  align-self: flex-end;
 }
 
 .loop-config-dialog {

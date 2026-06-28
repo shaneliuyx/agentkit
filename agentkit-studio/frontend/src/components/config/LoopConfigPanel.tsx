@@ -287,7 +287,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   return (
     <>
       <button
-        className="btn btn-sm loop-config-btn"
+        className="btn loop-config-btn"
         onClick={open}
         title="Loop configuration — Goal, Scheduler, Chain"
         aria-label="Open loop configuration"
