@@ -1088,6 +1088,7 @@ class Runner:
         search_fn: Callable[..., list[Any]] | None = None,
         fetch_fn: Callable[..., Any] | None = None,
         workspace_root: Any = None,
+        prefer_fn: Callable[[str, str, str], int] | None = None,
     ) -> None:
         self._session = session
         self._emit = emit
@@ -1100,6 +1101,10 @@ class Runner:
         self._fetch_fn = fetch_fn
         #: Workspace root override for the file-tool jail (tests pass a tmp dir).
         self._workspace_root = workspace_root
+        #: Phase-1 epoch keep/discard judge (new, prior, requirement) -> net pref.
+        #: Tests inject a deterministic stub; production builds one from
+        #: agentkit.evolve.self_preference (see studio.epoch_gate, DESIGN §11.5).
+        self._prefer_fn = prefer_fn
         self._acc = TokenAccounting()
         self._current_step_id = ""
         #: Wall-clock start of the run, stamped in run(); the done frame reports
@@ -1166,6 +1171,15 @@ class Runner:
     def _run_inner(self, requirement: str) -> None:
         session = self._session
 
+        # Task IDENTITY for hill-climb continuity is the BASE requirement, captured
+        # BEFORE the goal/constraints block (just below) and the per-iteration prefix
+        # (~L1281) are prepended. Hashing the augmented string forked the lineage every
+        # time a goal was attached: same task, new task_hash → cold-start v1, no artifact
+        # carry-forward, weakness-score 0/N = 0.00. The goal still STEERS the agent (it
+        # stays in `requirement` for planning); it just no longer changes the task's
+        # identity. Used at the auto_improve seed lookup and the run-record block below.
+        _base_requirement = requirement
+
         # Inject goal end_state and constraints into requirement so the agent
         # sees them during planning — not just during post-phase verification.
         _goal = getattr(session, "goal", None)
@@ -1179,6 +1193,25 @@ class Runner:
             if _parts:
                 requirement = "\n".join(_parts) + "\n\n" + requirement
 
+        # Wire the deliverable TEMPLATE into GENERATION (DESIGN §11.6): when the GUI
+        # has set a rubric template, instruct the agent to produce those sections, so
+        # the template STEERS the report (the workers target the structure the gate
+        # later scores) instead of only being graded after the fact. Injected into
+        # `requirement` AFTER `_base_requirement` is captured, so it never changes
+        # task_hash. Only when explicitly configured — defaulting to DEFAULT_TEMPLATE
+        # would force report headings (Executive Summary, Methodology…) onto non-research
+        # tasks and compromise their generation quality.
+        _rc = getattr(session, "rubric_config", None) or {}
+        _template = _rc.get("template")
+        if _template:
+            _sections = "\n".join(f"- {s}" for s in _template)
+            requirement = (
+                requirement
+                + "\n\nStructure the deliverable with these sections (use them as "
+                + "top-level headings, in order):\n"
+                + _sections
+            )
+
         # Stash the original requirement so task_hash is stable across iterations
         # (the seeder may rewrite requirement with "ITERATION N —..." prefix).
         _original_requirement = requirement
@@ -1191,6 +1224,7 @@ class Runner:
         _eff_ws2 = None
         _weaknesses_block = ""  # prior-run lessons → planner/hub constraints
         _seed_len = 0           # length of the seeded prior artifact (anti-regression)
+        _seed_text = ""         # full prior artifact text (Phase-1 keep/discard gate)
         # §11.4 loop-closure check: normalized weaknesses recorded in >= REPEAT_LIMIT
         # prior runs of this task were injected and never fixed. The reducer drops
         # them from its handoff (below) instead of grinding on them forever. Empty
@@ -1199,7 +1233,7 @@ class Runner:
         if _hc_cfg.get("auto_improve"):
             import shutil
             from studio.task_runs import TaskRunStore, task_hash as _task_hash
-            _thash = _task_hash(requirement)
+            _thash = _task_hash(_base_requirement)
             # Pass the embedder so each run's requirement is embedded for R10
             # cross-task similarity retrieval (no-op when embedder is None).
             _store = TaskRunStore(embedder=self._embedder)
@@ -1232,8 +1266,10 @@ class Runner:
                         _seed_clean = _strip_preamble(_seed_path.read_text())
                         _seed_path.write_text(_seed_clean)
                         _seed_len = len(_seed_clean)
+                        _seed_text = _seed_clean  # Phase-1 gate: prior best to beat
                     except OSError:
                         _seed_len = 0
+                        _seed_text = ""
                 # Accumulate weaknesses from this task's prior runs AND from
                 # semantically SIMILAR prior tasks (R10) — every failure lesson,
                 # including cross-task ones, carries forward. Deduplicated by
@@ -1895,7 +1931,10 @@ class Runner:
             # Embedder wired so this run's requirement is embedded on record()
             # → future runs can find it via similar_runs() (R10).
             _store = TaskRunStore(embedder=self._embedder)
-            _thash = _task_hash(_original_requirement)
+            # Hash the BASE requirement (goal-invariant identity) — must match the
+            # auto_improve seed-lookup hash above so a run records under the same
+            # task_hash it seeded from.
+            _thash = _task_hash(_base_requirement)
             from studio.workspace import workspace_root as _ws_root_fn
             _effective_ws_root = self._workspace_root or _ws_root_fn()
             _art_file = _effective_ws_root / session.session_id / "artifact.md"
@@ -1961,26 +2000,103 @@ class Runner:
             if _reducer_gaps:
                 _seen_w = set(_weaknesses)
                 _weaknesses = [g for g in _reducer_gaps if g not in _seen_w] + _weaknesses
-            # §11.4 SCORE = solved / total over the weakness set (deterministic;
-            # overrides the noisy LLM self-eval, which emitted impossible values
-            # like 0.1 and rated good output low). total = prior accumulated UNION
-            # still-open; solved = total - still-open. No weakness anywhere => nothing
-            # to fix => 1.0. score_result still runs above, but only for the
-            # scorer_feedback that mining consumes — its score is discarded here.
-            _score = _weakness_score(
-                getattr(session, "weaknesses", []) or [], _weaknesses,
-                embedder=self._embedder,
+            # Deterministic section guard (DESIGN §11.6): the moving-window miner now sees the
+            # whole artifact, but the SCORER still windows (20K) and its UNMET line is fed to
+            # the miner as a starting point — so a tail section past the scorer's window can
+            # still echo through as a false "missing X". Drop any missing/absent-section
+            # weakness for a section the concept-aware FULL-TEXT check confirms is present, so
+            # a complete report is not penalised for a blind spot. Only when a rubric template
+            # is configured (else there is no authoritative section list).
+            _tmpl = (getattr(session, "rubric_config", None) or {}).get("template")
+            if _tmpl and _weaknesses:
+                from studio.rubric import sections_present
+                _present = {s.lower() for s in sections_present(_scored_text, _tmpl)}
+                if _present:
+                    _weaknesses = [
+                        _w for _w in _weaknesses
+                        if not (
+                            ("missing" in _w.lower() or "absent" in _w.lower())
+                            and any(_s in _w.lower() for _s in _present)
+                        )
+                    ]
+            # Semantic dedup: the moving-window miner can surface the SAME issue under two
+            # section prefixes (e.g. the popularity-ranking gap as both [## Source Selection]
+            # and [## Key Findings]). Exact-string dedup misses these re-phrasings, so they
+            # count as two unsolved items and depress solved/total — part of why the recorded
+            # score jitters epoch-to-epoch on an improving document. Collapse near-duplicates
+            # (cosine >= the same 0.85 threshold _weakness_score uses), keeping the first.
+            if self._embedder is not None and len(_weaknesses) > 1:
+                from studio.task_runs import _cosine
+                try:
+                    _wvecs = self._embedder.embed(_weaknesses)
+                    _kept: list[str] = []
+                    _kept_vecs: list = []
+                    for _wk, _wv in zip(_weaknesses, _wvecs):
+                        if any(_cosine(_wv, _kv) >= 0.85 for _kv in _kept_vecs):
+                            continue
+                        _kept.append(_wk)
+                        _kept_vecs.append(_wv)
+                    _weaknesses = _kept
+                except Exception:  # noqa: BLE001 — dedup is best-effort; embedder may be down
+                    pass
+            # Weaknesses are now an IMPROVEMENT SIGNAL only — they seed the next run's
+            # constraints — NOT the score. The recorded score is the deterministic rubric,
+            # computed AFTER the keep/discard gate below so it scores the artifact actually
+            # kept. (solved/total retired: a count-based score punished thoroughness — more
+            # mined weaknesses lowered it even as the document improved; DESIGN §11.6.)
+            # (Remaining weaknesses are surfaced below the report via HillClimbEvent.weaknesses
+            # — the frontend renders them — never written into result_output / the document.)
+            # Phase-1 keep/discard gate (DESIGN §11.5): when this epoch seeded from a
+            # prior best, KEEP its artifact only if a label-free judge strictly prefers
+            # it over the seed. On reject, restore the prior so the carry-forward seed
+            # never regresses (worst case = prior good report retained). Cold start
+            # (no seed) always accepts. Reuses agentkit.evolve.self_preference via
+            # studio.epoch_gate; a judge failure fails OPEN (no worse than the old
+            # ungated length ratchet).
+            if _artifact_copied and _seed_text.strip():
+                from studio.epoch_gate import accept_epoch, make_rubric_preference
+                if self._prefer_fn is not None:
+                    _pf = self._prefer_fn
+                    _prefer = lambda _n, _p: _pf(_n, _p, _original_requirement)
+                else:
+                    # DEFAULT judge = deterministic research-report rubric (DESIGN §11.6).
+                    # An LLM "which is better?" judge ties strong-vs-stub even on sonnet
+                    # (§11.5 D4); the rubric separates them reproducibly. _verified_urls
+                    # is the accuracy oracle (URLs confirmed real via the web cache).
+                    # Weights + deliverable template come from the GUI rubric_config.
+                    _rc = getattr(session, "rubric_config", None) or {}
+                    _prefer = make_rubric_preference(
+                        _verified_urls or None,
+                        weights=_rc.get("weights"),
+                        required_sections=_rc.get("template"),
+                    )
+                try:
+                    if not accept_epoch(_scored_text, _seed_text, _prefer):
+                        _art_file.write_text(_seed_text)   # revert carry-forward seed
+                        result_output = _seed_text
+                        _scored_text = _seed_text
+                        _dbg("epoch gate: reverted to prior (new not preferred)")
+                    else:
+                        _dbg("epoch gate: kept new epoch (preferred over prior)")
+                except Exception:  # noqa: BLE001 — gate must never crash the run
+                    pass
+            # Recorded score = deterministic RUBRIC over the FINAL (post-gate) artifact —
+            # the metric that actually tracks quality (DESIGN §11.6). Computed from the clean
+            # _scored_text BEFORE the weakness annotation is appended, so the score is not
+            # polluted by it. Weights + template come from the GUI rubric_config.
+            from studio.rubric import rubric_score
+            _rcfg = getattr(session, "rubric_config", None) or {}
+            _score = rubric_score(
+                _scored_text or result_output or "",
+                verified_urls=_verified_urls or None,
+                weights=_rcfg.get("weights"),
+                required_sections=_rcfg.get("template"),
             )
-            # §11.4 surface (never hide): a repeat-failure (>= REPEAT_LIMIT prior runs)
-            # that is STILL recorded this run was attempted again — including the last
-            # phase — and remains open. Append it visibly below the result shown in the
-            # chat window so the user knows what could not be resolved, instead of
-            # silently dropping it.
-            if _repeat_failed:
-                from studio.task_runs import REPEAT_LIMIT
-                result_output = (result_output or "").rstrip() + _unresolved_block(
-                    _weaknesses, _repeat_failed, REPEAT_LIMIT
-                )
+            # Remaining weaknesses are surfaced BELOW the report in the result view via the
+            # HillClimbEvent.weaknesses emitted below (the frontend renders them) — they must
+            # NOT be concatenated into result_output, which IS the deliverable document
+            # (saved, downloaded, recorded as result_text). Keeping them out keeps the report
+            # clean and keeps the next-run seed uncontaminated.
             _version = _store.next_version(_thash)
             _store.record(
                 TaskRun(

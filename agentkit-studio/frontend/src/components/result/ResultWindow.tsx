@@ -25,6 +25,11 @@ export function ResultWindow() {
   const sessionId = useRunStore((s) => s.sessionId);
   const task = useRunStore((s) => s.task);
   const setContinue = useRunStore((s) => s.setContinue);
+  const hillClimb = useRunStore((s) => s.hillClimb);
+  // Remaining weaknesses come from the latest hill-climb epoch event — rendered BELOW the
+  // report as a separate block, never concatenated into result.result (the deliverable
+  // document stays clean; these are next-epoch improvement targets, not report content).
+  const remaining = hillClimb.length ? hillClimb[hillClimb.length - 1].weaknesses : [];
 
   const [dismissed, setDismissed] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -167,6 +172,19 @@ export function ResultWindow() {
                 {result.result}
               </ReactMarkdown>
             </div>
+            {remaining.length > 0 && (
+              <div className="chat-weaknesses">
+                <div className="chat-weaknesses-head mono">
+                  Remaining weaknesses ({remaining.length})
+                  <span className="muted"> — next-epoch targets, not part of the report</span>
+                </div>
+                <ul className="chat-weaknesses-list">
+                  {remaining.map((w, i) => (
+                    <li key={i} className="mono">{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         </div>
 

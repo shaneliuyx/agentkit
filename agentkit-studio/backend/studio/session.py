@@ -88,6 +88,10 @@ class Session:
     #: and auto-seeds the next run from prior artifact (edit-in-place improvement).
     #: {score_metric: str, min_improvement: float, max_epochs: int, auto_improve: bool}
     hill_climb_config: dict | None = None
+    #: GUI rubric + deliverable template (DESIGN §11.6): the keep/discard gate's scoring
+    #: standard. Shape: {"weights": {criterion: float}, "template": [section, ...]}.
+    #: None → studio.rubric defaults (DEFAULT_WEIGHTS / DEFAULT_TEMPLATE).
+    rubric_config: dict | None = None
     #: Loop Config panel settings — deliverable path, auto-improve, sizing sliders.
     loop_config: LoopConfig | None = None
 

@@ -724,6 +724,120 @@ def test_no_hill_climb_keeps_auto_topology(fake_client_factory) -> None:
     assert "mesh" in tops, tops
 
 
+def test_task_hash_invariant_to_attached_goal(
+    fake_client_factory, tmp_path, monkeypatch
+) -> None:
+    """Attaching a goal/constraints must NOT change a task's hill-climb identity.
+
+    The goal block is prepended into `requirement` for steering, but task_hash is
+    computed from the BASE requirement — so a goal-augmented run records under the
+    SAME task_hash as a bare run, preserving artifact carry-forward. Regression guard
+    for the bug where attaching a goal forked the lineage → cold-start v1, score 0.00.
+    """
+    import sqlite3
+    from types import SimpleNamespace
+
+    from studio.task_runs import task_hash
+
+    # Isolate the run DB + workspace under tmp (both derive from this env root).
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    base = "1. compare redis and postgres 2. write a recommendation"
+
+    def _run_and_get_recorded_hash(attach_goal: bool) -> str:
+        session = _make_session()
+        if attach_goal:
+            session.goal = SimpleNamespace(
+                end_state="produce a sourced recommendation",
+                constraints=["cite sources", "be concise"],
+            )
+        runner = Runner(
+            session, lambda _e: None,
+            client_factory=fake_client_factory, embedder=None,
+        )
+        runner.run(base)
+        con = sqlite3.connect(tmp_path / "task_runs.db")
+        try:
+            row = con.execute(
+                "select task_hash from task_runs order by rowid desc limit 1"
+            ).fetchone()
+        finally:
+            con.close()
+        assert row is not None, "run did not record a task_runs row"
+        return row[0]
+
+    h_bare = _run_and_get_recorded_hash(attach_goal=False)
+    h_goal = _run_and_get_recorded_hash(attach_goal=True)
+    assert h_bare == h_goal == task_hash(base), (h_bare, h_goal, task_hash(base))
+
+
+def test_rubric_template_steers_generation(fake_client_factory) -> None:
+    """A configured rubric TEMPLATE is injected into the requirement the planner sees,
+    so the report is generated toward those sections (DESIGN §11.6) — not only scored
+    against them after the fact. With no rubric_config the requirement is untouched, so
+    report headings are NOT forced onto non-research tasks (the no-compromise constraint).
+    """
+
+    def _plan_task(template: list[str] | None) -> str:
+        events: list[StudioEvent] = []
+        session = _make_session()
+        if template is not None:
+            session.rubric_config = {"weights": None, "template": template}
+        runner = Runner(
+            session, events.append, client_factory=fake_client_factory, embedder=None
+        )
+        runner.run("compare redis and postgres")
+        return [e for e in events if e.EVENT_TYPE == "plan"][0].task
+
+    with_tpl = _plan_task(["Executive Summary", "Methodology", "Conclusion"])
+    without = _plan_task(None)
+    assert "Executive Summary" in with_tpl and "Methodology" in with_tpl, with_tpl
+    assert "Executive Summary" not in without, without  # untouched when unconfigured
+
+
+def test_accept_epoch_keep_discard_gate() -> None:
+    """Phase-1 gate (DESIGN §11.5): keep an epoch ONLY if strictly preferred over the
+    prior. Closes the open-loop accept (the old length-only ratchet would write any
+    non-shorter rewrite). Never reads the noisy absolute score — asks a label-free
+    judge new-vs-prior, so a changing/gameable scorer can't drive acceptance.
+    """
+    from studio.epoch_gate import accept_epoch
+
+    better = lambda _n, _p: 1   # noqa: E731
+    worse = lambda _n, _p: -1   # noqa: E731
+    tie = lambda _n, _p: 0      # noqa: E731
+
+    assert accept_epoch("new report", "", worse) is True       # cold start → accept
+    assert accept_epoch("", "prior report", better) is False   # empty epoch → keep prior
+    assert accept_epoch("new", "prior", better) is True        # preferred → keep new
+    assert accept_epoch("new", "prior", worse) is False        # worse → revert to prior
+    assert accept_epoch("new", "prior", tie) is False          # tie → keep prior (strict)
+
+
+def test_accept_epoch_with_real_reports() -> None:
+    """Real-report input (DESIGN §11.5): the gate must KEEP the 58KB good report over
+    the 4.5KB thin one, and revert a thin epoch back to a good prior.
+
+    Uses a DETERMINISTIC quality proxy (verified-source density) so CI stays offline;
+    the live LLM judge on these same fixtures is exercised manually (it exposed both
+    the parser bug and the no-rubric hedging — see DESIGN §11.5 findings).
+    """
+    import pathlib
+
+    from studio.epoch_gate import accept_epoch
+
+    fx = pathlib.Path(__file__).parent / "fixtures"
+    good = (fx / "report_good.md").read_text()
+    thin = (fx / "report_thin.md").read_text()
+
+    def _sig(s: str) -> int:  # verified-source density as a stand-in for the LLM judge
+        return s.lower().count("verified") + s.lower().count("source:") + s.count("http")
+
+    prefer = lambda _n, _p: _sig(_n) - _sig(_p)   # noqa: E731
+    assert _sig(good) > _sig(thin)
+    assert accept_epoch(good, thin, prefer) is True    # good epoch vs thin prior → keep new
+    assert accept_epoch(thin, good, prefer) is False   # thin epoch vs good prior → revert
+
+
 def test_tool_loop_emits_tool_events(fake_client) -> None:
     """With tools enabled + a mocked search_fn, a tool-calling client fires
     tool_call/tool_result during a phase (web_search runs, no network)."""

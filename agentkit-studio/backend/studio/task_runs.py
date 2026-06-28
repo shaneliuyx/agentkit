@@ -474,6 +474,15 @@ def score_result(
     return 0.5, ""
 
 
+#: Moving-window miner sizing. _WINDOW = chars shown per LLM call; _STEP = advance between
+#: windows (_WINDOW - _STEP = overlap); _MAX_WINDOWS caps cost on a very long report;
+#: _MAX_WEAKNESSES caps the deduped union the next run turns into constraints.
+_MINE_WINDOW = 12_000
+_MINE_STEP = 10_000
+_MINE_MAX_WINDOWS = 8
+_MINE_MAX_WEAKNESSES = 8
+
+
 def mine_weaknesses_from_outputs(
     outputs: dict[str, str],
     result: str,
@@ -489,32 +498,7 @@ def mine_weaknesses_from_outputs(
     ``scorer_feedback`` is the semicolon-separated list of unmet criteria from
     ``score_result`` — passing it avoids re-deriving what the scorer already found.
     """
-    combined = "\n\n---\n\n".join(f"[{k}]: {v[:400]}" for k, v in outputs.items())
-    if result:
-        # Show the FINAL output's head AND tail. Truncation/cutoff happens at the end,
-        # so a head-only window (the old 6000-char bug) never saw it and the miner
-        # reported "no weaknesses" on a clearly-truncated report. Head+tail lets the
-        # miner catch a missing conclusion or a mid-sentence cutoff.
-        if len(result) <= 12_000:
-            combined += f"\n\n[FINAL]: {result}"
-        else:
-            # Both HEAD and TAIL are arbitrary excerpts. Trim each to a clean paragraph
-            # boundary so the miner can't read a window EDGE as document truncation (the W3
-            # false positive: the head cut landed mid-quote at "...loops that prom"; the tail
-            # STARTED mid-word at "odel's"). The deterministic completeness fact below is the
-            # authoritative truncation signal.
-            _head = result[:8_000]
-            _hc = _head.rfind("\n\n")
-            if _hc > 4_000:
-                _head = _head[:_hc]
-            _tail = result[-4_000:]
-            _tc = _tail.find("\n\n")
-            if 0 <= _tc < 2_000:
-                _tail = _tail[_tc:].lstrip()
-            combined += (
-                f"\n\n[FINAL HEAD — excerpt, boundary is NOT the document end]: {_head}"
-                f"\n\n[FINAL TAIL — excerpt ending at the TRUE document end]: {_tail}"
-            )
+    _outputs_block = "\n\n---\n\n".join(f"[{k}]: {v[:400]}" for k, v in outputs.items())
     _today = datetime.date.today().isoformat()
     _scorer_section = (
         f"A quality scorer already evaluated this output and found these UNMET criteria:\n"
@@ -545,43 +529,87 @@ def mine_weaknesses_from_outputs(
            f"the document ends at {_end[-45:]!r} WITHOUT terminal punctuation — it may be "
            "truncated.\n\n")
     ) if result else ""
-    prompt = (
-        f"Today's date is {_today}. "
-        f"Review these agent phase outputs against the TASK. List up to 5 specific "
-        f"weaknesses or gaps that would stop the output from fully satisfying the task. "
-        f"{_trunc_fact}"
-        f"Always check, regardless of task type:\n"
-        f"1. Is the DOCUMENT truncated? Use the DOCUMENT COMPLETENESS fact above as the "
-        f"authoritative answer — do NOT infer truncation from an excerpt's ragged start or "
-        f"end (those are window boundaries, not the document).\n"
-        f"2. Are claims substantiated and grounded rather than merely asserted? "
-        f"Note: sources dated {_today[:7]} are current, not future.\n"
-        f"3. If the TASK asks to FIND, DISCOVER, or LIST articles/sources/links: "
-        f"does every cited article or source include an actual URL "
-        f"(starting with http:// or https://)? Flag missing URLs as a weakness.\n"
-        f"4. If the TASK asks for 'most popular' or 'top' items: is there evidence "
-        f"(views, stars, engagement metrics) justifying the ranking?\n\n"
-        f"{_scorer_section}"
-        f"{_verified_section}"
-        f"TASK: {requirement[:400]}\n\n{combined}\n\n"
-        f"Return a JSON array of short strings. PREFIX each weakness with the artifact "
-        f"SECTION it concerns, in square brackets — because the next run assigns each "
-        f"section to one agent, and an agent can only fix weaknesses for its own "
-        f"section. Use the section's verbatim heading (e.g. '## Sources'); use "
-        f"'[document]' only for whole-document or structural issues that no single "
-        f'section owns. Example: ["[## Sources] Missing URLs on three articles", '
-        f'"[## Findings] Truncated mid-sentence", "[document] No conclusion section"]. '
-        f"Return [] ONLY if the work is genuinely complete and strong."
-    )
-    try:
-        resp = client.chat([{"role": "user", "content": prompt}])
-        text = (getattr(resp, "text", "") or "").strip()
-        # Greedy match for the OUTERMOST bracket pair — a lazy match (the old `.*?`)
-        # stops at the first "]", truncating a weakness string that itself contains one.
-        m = re.search(r"\[.*\]", text, re.DOTALL)
-        if m:
-            items = json.loads(m.group())
-            return [str(x).strip() for x in items if x][:5]
-    except Exception:  # noqa: BLE001
-        pass
-    return []
+    def _build_prompt(combined: str) -> str:
+        return (
+            f"Today's date is {_today}. "
+            f"Review these agent phase outputs against the TASK. List up to 5 specific "
+            f"weaknesses or gaps that would stop the output from fully satisfying the task. "
+            f"{_trunc_fact}"
+            f"Always check, regardless of task type:\n"
+            f"1. Is the DOCUMENT truncated? Use the DOCUMENT COMPLETENESS fact above as the "
+            f"authoritative answer — do NOT infer truncation from an excerpt's ragged start or "
+            f"end (those are window boundaries, not the document).\n"
+            f"2. Are claims substantiated and grounded rather than merely asserted? "
+            f"Note: sources dated {_today[:7]} are current, not future.\n"
+            f"3. If the TASK asks to FIND, DISCOVER, or LIST articles/sources/links: "
+            f"does every cited article or source include an actual URL "
+            f"(starting with http:// or https://)? Flag missing URLs as a weakness.\n"
+            f"4. If the TASK asks for 'most popular' or 'top' items: is there evidence "
+            f"(views, stars, engagement metrics) justifying the ranking?\n\n"
+            f"{_scorer_section}"
+            f"{_verified_section}"
+            f"TASK: {requirement[:400]}\n\n{combined}\n\n"
+            f"Return a JSON array of short strings. PREFIX each weakness with the artifact "
+            f"SECTION it concerns, in square brackets — because the next run assigns each "
+            f"section to one agent, and an agent can only fix weaknesses for its own "
+            f"section. Use the section's verbatim heading (e.g. '## Sources'); use "
+            f"'[document]' only for whole-document or structural issues that no single "
+            f'section owns. Example: ["[## Sources] Missing URLs on three articles", '
+            f'"[## Findings] Truncated mid-sentence", "[document] No conclusion section"]. '
+            f"Return [] ONLY if the work is genuinely complete and strong."
+        )
+
+    # Moving window over the FULL document so no region sits in a blind spot. The old
+    # head+tail (8K head + 4K tail) left the MIDDLE invisible — a 64K report's Methodology
+    # /Conclusion at char ~55K fell between the two windows, so the miner falsely reported
+    # PRESENT tail sections as "missing". Each window is labelled "chars A-B of T" so the
+    # LLM reads it as an excerpt, not a document cut-off (the deterministic _trunc_fact stays
+    # the authoritative truncation signal). One LLM call per window — cost scales with length,
+    # bounded by _MINE_MAX_WINDOWS; overlap (_WINDOW - _STEP) keeps a boundary-straddling
+    # section whole in at least one window.
+    if not result or len(result) <= _MINE_WINDOW:
+        _windows = [("[FINAL]", result or "")]
+    else:
+        _windows = []
+        _T = len(result)
+        _start = 0
+        _n = 0
+        while _start < _T and _n < _MINE_MAX_WINDOWS:
+            _e = min(_start + _MINE_WINDOW, _T)
+            _windows.append(
+                (
+                    f"[FINAL — window {_n + 1}, chars {_start}-{_e} of {_T}; an excerpt, "
+                    f"NOT the document end]",
+                    result[_start:_e],
+                )
+            )
+            if _e >= _T:
+                break
+            _start += _MINE_STEP
+            _n += 1
+
+    def _mine_one(combined: str) -> list[str]:
+        try:
+            resp = client.chat([{"role": "user", "content": _build_prompt(combined)}])
+            text = (getattr(resp, "text", "") or "").strip()
+            # Greedy match for the OUTERMOST bracket pair — a lazy match (the old `.*?`)
+            # stops at the first "]", truncating a weakness string that itself contains one.
+            m = re.search(r"\[.*\]", text, re.DOTALL)
+            if m:
+                return [str(x).strip() for x in json.loads(m.group()) if x][:5]
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    # Union across windows, deduped by normalized weakness so the same gap seen in two
+    # overlapping windows is counted once.
+    _seen: set[str] = set()
+    _merged: list[str] = []
+    for _lbl, _win in _windows:
+        _combined = _outputs_block + (f"\n\n{_lbl}: {_win}" if _win else "")
+        for _w in _mine_one(_combined):
+            _k = _norm_weakness(_w)
+            if _k and _k not in _seen:
+                _seen.add(_k)
+                _merged.append(_w)
+    return _merged[:_MINE_MAX_WEAKNESSES]

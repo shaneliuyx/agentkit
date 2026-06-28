@@ -22,6 +22,7 @@ import type {
   LoopMatch,
   LoopSeedPayload,
   RouterPayload,
+  RubricConfig,
   RunMode,
   SelfImprovePayload,
   SessionPayload,
@@ -147,6 +148,9 @@ export interface RunState {
   setConfiguredGoal: (g: RunState["configuredGoal"]) => void;
   configuredHillClimb: { score_metric: string; min_improvement: number; max_epochs: number; auto_improve?: boolean } | null;
   setConfiguredHillClimb: (c: RunState["configuredHillClimb"]) => void;
+  /** GUI rubric weights + deliverable template (DESIGN §11.6); null → backend defaults. */
+  configuredRubric: RubricConfig | null;
+  setConfiguredRubric: (r: RubricConfig | null) => void;
   setSchedulerTriggers: (p: SchedulerPayload) => void;
   hillClimb: HillClimbPayload[];
   currentTaskHash: string | null;
@@ -194,6 +198,7 @@ const initialState = {
   goalMet: null as GoalMetPayload | null,
   configuredGoal: null as RunState["configuredGoal"],
   configuredHillClimb: null as RunState["configuredHillClimb"],
+  configuredRubric: null as RubricConfig | null,
   hillClimb: [] as HillClimbPayload[],
   currentTaskHash: null as string | null,
   schedulerTriggers: null as SchedulerPayload | null,
@@ -249,11 +254,13 @@ export const useRunStore = create<RunState>((set) => ({
       // Preserve loop config across run start — already sent to backend.
       configuredHillClimb: state.configuredHillClimb,
       configuredGoal: state.configuredGoal,
+      configuredRubric: state.configuredRubric,
     })),
 
   reset: () => set({ ...initialState }),
   setConfiguredGoal: (g) => set({ configuredGoal: g }),
   setConfiguredHillClimb: (c) => set({ configuredHillClimb: c }),
+  setConfiguredRubric: (r) => set({ configuredRubric: r }),
   setSchedulerTriggers: (p) => set({ schedulerTriggers: p }),
 
   setContinue: (req) => set({ pendingContinue: req }),
