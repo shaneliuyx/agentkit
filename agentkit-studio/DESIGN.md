@@ -1795,14 +1795,24 @@ Recommendations, Source References — generic, covering every rubric criterion.
 `PROFILES` dropdown via `shared_bridge.py` (Studio-side; the shared lib is
 untouched).
 
-**Duplicate-phase dedup.** A goal listing several sub-tasks (Pi/Craft) made the
-planner emit the **same phase twice** — different ids, identical description — and
-*every* planner path can do it (seeded `make_seeded_decomposer`, LLM-epic
-`_plan_from_epics`, deterministic `plan()`). The first fix wrongly lived inside
-`_plan_from_epics` (the LLM path only), so a seeded/auto run still duplicated.
-`_dedupe_plan_steps` now runs at the **choke point** — on the final `plan_obj`
-*after* all three paths converge — collapsing phases with an identical normalized
-description and remapping the dropped duplicate's `depends_on` to the kept sibling
-(no dangling deps; no-op when clean). A planner-prompt "each phase must be
-DISTINCT" line is defense in depth (a weak model can ignore it; the code guard is
-load-bearing). Lesson: dedup where the paths MEET, not on one branch.
+**Duplicate phases — goal injection, NOT the planner.** A goal whose `end_state`
+overlaps the requirement produced duplicate phases (the Pi/Craft run: `"Craft…"` /
+`"create a report"` twice). The runner prepended `Goal: {end_state}` to the
+requirement for steering; when that ≈ the task, the planner split the **doubled**
+text on "and" into duplicate phases. Proven deterministically:
+`plan(goal+requirement)` → **5 dup phases** vs `plan(requirement)` → **3 clean**.
+*Every* planner (deterministic, gemma-epic) is clean on a clean input — the bug
+was the input, not the renderer.
+
+**Fix:** the planner now reads `_plan_requirement = base + deliverable-template`
+(**no goal**). The goal still steers via the worker goal + keep/discard gate +
+verification; the template stays in the planner input (distinct section names
+never duplicate the task, so rubric-template steering is preserved). Two earlier
+fixes were upstream-blind and are kept only as belt-and-suspenders: content-dedup
+inside `_plan_from_epics` (LLM path only — a seeded/auto run still duplicated),
+then a path-agnostic `_dedupe_plan_steps` at the choke point after all planner
+paths converge (right placement, but exact-match can't collapse the *near*-dups a
+slightly-different goal yields). A planner-prompt "each phase must be DISTINCT"
+line is also defense in depth. **Lesson:** reproduce the exact input the failing
+run *constructs* — the cause was an input transform (goal prepend), upstream of
+every layer first patched.
