@@ -1077,37 +1077,30 @@ def test_parse_findings_accepts_json_format() -> None:
     assert _parse_findings("see ```python\nprint('hi')\n```") == []
 
 
-def test_plan_from_epics_dedups_duplicate_phases() -> None:
-    """The planner LLM sometimes emits the SAME phase twice under different ids (the
-    Pi/Craft run showed 'Craft…' and 'create a report' duplicated). _plan_from_epics
-    must collapse content-duplicates and rewire depends_on so the DAG has no dup phases."""
-    from studio.runner import _plan_from_epics
+def test_dedupe_plan_steps_collapses_duplicate_phases() -> None:
+    """Any planner (seeded / LLM-epic / deterministic) can emit the same phase twice (the
+    Pi/Craft run showed 'craft agent' and 'create a report' duplicated). The path-agnostic
+    _dedupe_plan_steps collapses content-duplicates and remaps depends_on so the DAG has no
+    duplicate phases and no dangling deps — applied to the FINAL plan, not one planner."""
+    from agentkit.planner.core import Plan, PlanStep
+    from studio.runner import _dedupe_plan_steps
 
-    class _Client:
-        def chat(self, messages, tools=None):  # noqa: ANN001
-            class _R:
-                text = (
-                    'EPIC_PLAN:\n```json\n{"epics": ['
-                    '{"id":"epic-1","title":"Pi","description":"study pi","depends_on":[]},'
-                    '{"id":"epic-2","title":"Craft","description":"craft agent","depends_on":["epic-1"]},'
-                    '{"id":"epic-3","title":"Report","description":"create a report","depends_on":["epic-2"]},'
-                    '{"id":"epic-4","title":"Craft","description":"craft agent","depends_on":["epic-1"]},'
-                    '{"id":"epic-5","title":"Report","description":"create a report","depends_on":["epic-4"]}'
-                    ']}\n```'
-                )
-            return _R()
-
-    plan = _plan_from_epics("study pi, craft agent, create a report", _Client())
-    descs = [s.description for s in plan.steps]
-    assert descs.count("craft agent") == 1        # duplicate phase collapsed
+    steps = (
+        PlanStep(id="s1", description="study pi", depends_on=()),
+        PlanStep(id="s2", description="craft agent", depends_on=("s1",)),
+        PlanStep(id="s3", description="create a report", depends_on=("s2",)),
+        PlanStep(id="s4", description="craft agent", depends_on=("s1",)),       # dup of s2
+        PlanStep(id="s5", description="create a report", depends_on=("s4",)),   # dup of s3
+    )
+    out = _dedupe_plan_steps(Plan(task="t", steps=steps))
+    descs = [s.description for s in out.steps]
+    assert descs.count("craft agent") == 1         # duplicate phase collapsed
     assert descs.count("create a report") == 1
-    assert len(plan.steps) == 3                    # Pi, Craft, Report — no duplicates
+    assert len(out.steps) == 3                       # study pi, craft agent, create a report
+    kept_ids = {s.id for s in out.steps}
+    for s in out.steps:
+        assert all(d in kept_ids for d in s.depends_on)  # no dangling deps (s4 remapped → s2)
 
-    # the kept Report phase's dep resolves to the kept Craft phase (not a dropped dup)
-    report = next(s for s in plan.steps if s.description == "create a report")
-    craft = next(s for s in plan.steps if s.description == "craft agent")
-    assert craft.id in report.depends_on
-    # no dependency points at a dropped duplicate id (epic-4 / epic-5)
-    kept_ids = {s.id for s in plan.steps}
-    for s in plan.steps:
-        assert all(d in kept_ids for d in s.depends_on)
+    # no-op when there are no duplicates (returns the plan unchanged)
+    clean = _dedupe_plan_steps(Plan(task="t", steps=steps[:3]))
+    assert len(clean.steps) == 3

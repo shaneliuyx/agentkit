@@ -160,46 +160,20 @@ def _plan_from_epics(
     if not epics:
         return plan(requirement)
 
-    # Content-dedup: the LLM sometimes emits the SAME phase twice under DIFFERENT ids
-    # (e.g. "Craft agent to develop agent" as epic-2 AND epic-4) — the id-set alone won't
-    # catch it, so each became a duplicate phase in the DAG. Keep the first epic per
-    # normalized title+description; remap a dropped id → the kept one so depends_on still
-    # resolves to a real sibling.
-    deduped: list = []
-    remap: dict[str, str] = {}
-    seen_key: dict[str, str] = {}
-    for e in epics:
-        if not e.get("id"):
-            continue
-        eid = str(e["id"])
-        key = " ".join(str(e.get("description") or e.get("title") or "").lower().split())
-        if key and key in seen_key:
-            remap[eid] = seen_key[key]      # duplicate → fold into the kept epic
-            continue
-        if key:
-            seen_key[key] = eid
-        deduped.append(e)
-
-    epic_ids = {str(e["id"]) for e in deduped}
-
-    def _resolve(dep: str) -> str:
-        return remap.get(dep, dep)
-
+    epic_ids = {str(e.get("id")) for e in epics if e.get("id")}
     steps = tuple(
         PlanStep(
             id=str(e["id"]),
             description=str(e.get("description") or e.get("title") or e["id"]),
-            # remap deps through dropped duplicates, then keep only resolved siblings
-            # (no self/dangling deps); dict.fromkeys de-dups deps after the remap.
+            # keep only deps that resolve to a sibling epic (no self/dangling deps)
             depends_on=tuple(
-                dict.fromkeys(
-                    _resolve(str(d)) for d in e.get("depends_on", ())
-                    if _resolve(str(d)) in epic_ids and _resolve(str(d)) != str(e["id"])
-                )
+                str(d) for d in e.get("depends_on", ())
+                if str(d) in epic_ids and str(d) != str(e["id"])
             ),
             topology=STAR,
         )
-        for e in deduped
+        for e in epics
+        if e.get("id")
     )
     if not steps:
         return plan(requirement)
@@ -207,6 +181,48 @@ def _plan_from_epics(
         return Plan(task=requirement, steps=steps)
     except Exception:  # noqa: BLE001 — bad DAG → deterministic fallback
         return plan(requirement)
+
+
+def _dedupe_plan_steps(plan_obj: Plan) -> Plan:
+    """Collapse phases with an identical normalized description — PATH-AGNOSTIC.
+
+    Applied to the FINAL plan, after the seeded / LLM-epic / deterministic planner has
+    run, because any of them can emit the same phase twice (the Pi/Craft run showed
+    "Craft agent…" and "create a research report" duplicated under the seeded planner —
+    `_plan_from_epics`'s id-dedup never saw it). Keeps the first step per normalized
+    description and remaps a dropped duplicate's id into its `depends_on` users so the DAG
+    stays connected. No-op (returns the original) when there are no duplicates.
+    """
+    seen: dict[str, str] = {}      # normalized description → kept step id
+    remap: dict[str, str] = {}     # dropped duplicate id → kept id
+    kept: list = []
+    for s in plan_obj.steps:
+        key = " ".join((s.description or "").lower().split())
+        if key and key in seen:
+            remap[s.id] = seen[key]
+            continue
+        if key:
+            seen[key] = s.id
+        kept.append(s)
+    if not remap:
+        return plan_obj
+    kept_ids = {s.id for s in kept}
+    new_steps = tuple(
+        replace(
+            s,
+            depends_on=tuple(
+                dict.fromkeys(
+                    remap.get(d, d) for d in s.depends_on
+                    if remap.get(d, d) in kept_ids and remap.get(d, d) != s.id
+                )
+            ),
+        )
+        for s in kept
+    )
+    try:
+        return replace(plan_obj, steps=new_steps)
+    except Exception:  # noqa: BLE001 — bad DAG → leave the plan as-is
+        return plan_obj
 
 
 def _today_note() -> str:
@@ -1506,6 +1522,10 @@ class Runner:
             )
         else:
             plan_obj = plan(_original_requirement)
+        # Collapse duplicate phases regardless of which planner produced them (seeded,
+        # epic-LLM, or deterministic): a goal listing several sub-tasks otherwise yields
+        # the same phase twice in the DAG (the Pi/Craft run), doubling agents + tokens.
+        plan_obj = _dedupe_plan_steps(plan_obj)
         # §14.4 re-entrancy: when the epoch loop replays _run_inner in-process, prefix
         # every step id (and its depends_on edges) with the epoch index so each pass is
         # a distinct sub-DAG and ids never collide across epochs (e.g. e2:s3). Single-pass
