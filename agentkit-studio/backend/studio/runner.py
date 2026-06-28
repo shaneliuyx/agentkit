@@ -670,6 +670,67 @@ def _dbg(msg: str) -> None:
         pass
 
 
+def _apply_ranking(doc: str, findings: list) -> str:
+    """F4/F5: replace the source-selection section with the honest split ranking table.
+
+    Ranks EVERY source cited in the doc (this phase's rich findings supply title/popularity;
+    others are added bare from the doc's URLs for completeness). Best-effort: no findings / no
+    target section / a metric failure → doc unchanged. The S2/GitHub lookups go through
+    ``fetch_metrics`` (ONE S2 batch, cached in .web_cache.json under metric:<url>, degrade to
+    None) so they never block or crash a run."""
+    if not findings:
+        return doc
+    import json as _json
+    import os as _os
+    from agentkit.artifacts.metrics import fetch_metrics
+    from agentkit.artifacts.patcher import DocPatch, reduce_patches
+    from agentkit.artifacts.ranking import synthesize_ranking_table
+    from agentkit.artifacts.sections import split_sections
+    from agentkit.artifacts.types import Finding
+
+    target = next((h for h, _b in split_sections(doc)
+                   if 'source selection' in h.lower()
+                   or h.lower().strip().endswith('sources')
+                   or 'popularity' in h.lower()), None)
+    if target is None:
+        return doc
+    body = dict(split_sections(doc)).get(target, '')
+    if not body:
+        return doc
+    # rank ALL sources cited in the doc, enriched by this phase's findings
+    rich = {f.url: f for f in findings}
+    all_findings = [rich.get(u) or Finding(url=u)
+                    for u in {x.rstrip('.,)') for x in _re.findall(r'https?://\S+', doc)}]
+    if not all_findings:
+        return doc
+    from agentkit.artifacts.metrics import source_kind
+    # Only touch the network/cache file when a source actually HAS a fetchable metric
+    # (arxiv/github). A blog-only doc (e.g. offline tests) skips file I/O entirely → all
+    # sources are 'reported', no network, no .web_cache.json read/write.
+    if not any(source_kind(f.url)[0] for f in all_findings):
+        metrics = {f.url: None for f in all_findings}
+    else:
+        cache: dict = {}
+        try:
+            if _os.path.exists('.web_cache.json'):
+                with open('.web_cache.json') as _cf:
+                    cache = _json.load(_cf)
+        except Exception:  # noqa: BLE001
+            cache = {}
+        try:
+            metrics = fetch_metrics([f.url for f in all_findings],
+                                    s2_key=_os.environ.get('SEMANTIC_SCHOLAR_API_KEY'), cache=cache)
+            with open('.web_cache.json', 'w') as _cf:   # persist metric:<url> entries
+                _json.dump(cache, _cf)
+        except Exception:  # noqa: BLE001 — metrics best-effort; never block
+            metrics = {}
+    table = synthesize_ranking_table(all_findings, metrics)
+    return reduce_patches(
+        doc, [[DocPatch(op='replace', anchor=body, content=f"{target}\n\n{table}\n",
+                        source='ranking')]]
+    ).text
+
+
 def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], embedder=None):
     """Build the section-aware STAR reducer closure (DESIGN §4.5; Lever 3).
 
@@ -754,10 +815,13 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], emb
                 p.op, p.anchor = "append", None
         from agentkit.artifacts.patcher import reduce_patches
         rr = reduce_patches(art_block, [patches])
+        # F4/F5: replace the source-selection section with the honest split ranking table.
+        merged = _apply_ranking(rr.text, findings)
         _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
              f"llm={len(llm_patches)} floor={len(floor_patches)} dedup={n_dedup} "
-             f"applied_delta={len(rr.text) - len(art_block)} conflicts={len(rr.conflicts)}")
-        return rr.text.strip(), tokens
+             f"applied_delta={len(rr.text) - len(art_block)} conflicts={len(rr.conflicts)} "
+             f"ranked_delta={len(merged) - len(rr.text)}")
+        return merged.strip(), tokens
 
     return reduce
 

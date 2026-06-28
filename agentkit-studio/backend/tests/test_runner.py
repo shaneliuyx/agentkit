@@ -241,15 +241,33 @@ def test_section_reducer_deterministic_floor_from_findings() -> None:
         def chat(self, messages, tools=None) -> ChatResult:
             return ChatResult(text="no patches here", total_tokens=3)
 
-    reduce = _make_section_reducer(_Empty(), "## Sources\n_(pending)_", [])
+    # '## Findings' (not a source-selection heading) so the F5 ranking pass doesn't replace it —
+    # this test isolates the deterministic floor, not F5.
+    reduce = _make_section_reducer(_Empty(), "## Findings\n_(pending)_", [])
     draft = (
         "## RESEARCH_FINDING\nARTICLE_TITLE: Loop\nURL: https://addy.example/loop\n"
-        "PATCH_TARGET: ## Sources\nCLAIM: Verifier is the bottleneck.\n"
+        "PATCH_TARGET: ## Findings\nCLAIM: Verifier is the bottleneck.\n"
     )
     text, _ = reduce([draft])
-    assert "## Sources" in text and "_(pending)_" in text  # seed kept (woven between)
-    assert "addy.example/loop" in text                     # finding woven in (no LLM patch)
+    assert "## Findings" in text and "_(pending)_" in text  # seed kept (woven between)
+    assert "addy.example/loop" in text                      # finding woven in (no LLM patch)
     assert "Verifier is the bottleneck" in text
+
+
+def test_apply_ranking_replaces_source_section_offline() -> None:
+    """F5: _apply_ranking replaces the source-selection section with the honest split table.
+    Blog-only sources → no fetchable metric → NO network/cache file I/O, all 'reported'."""
+    from agentkit.artifacts.types import Finding
+    from studio.runner import _apply_ranking
+    doc = "# R\n\n## Source Selection\nold https://blog.example/a\n\n## Other\nkeep me\n"
+    findings = [Finding(url="https://blog.example/a", title="Blog A")]
+    out = _apply_ranking(doc, findings)
+    assert "Popularity evidence." in out                # methodology note
+    assert "Reported / unranked" in out                 # split presentation
+    assert "no public engagement metric" in out         # blog honestly marked, no fabrication
+    assert "## Other\nkeep me" in out                   # other sections untouched
+    assert _apply_ranking(doc, []) == doc               # no findings → unchanged
+    assert _apply_ranking("# R\n\n## Intro\nx\n", findings) == "# R\n\n## Intro\nx\n"  # no target
 
 
 def test_section_reducer_demotes_missing_anchor_no_conflict_marker() -> None:
