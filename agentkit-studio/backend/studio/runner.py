@@ -459,14 +459,27 @@ def _phase_search_failed(outputs: list[str]) -> bool:
     return saw_error
 
 
-def _build_skeleton(goal: str, client) -> str:
+def _build_skeleton(goal: str, client, embedder=None) -> str:
     """Build an initial document skeleton from the goal (DESIGN §11.5).
+
+    Template reuse (1st-document creation): if a prior research report's skeleton semantically
+    matches this goal (cosine over the embedder, via TemplateStore), reuse its proven STRUCTURE
+    instead of LLM-generating one — faster, consistent, grounded in a report that worked. Falls
+    back to LLM generation when no template matches or no embedder is wired.
 
     Headings + placeholder bodies only — NO search needed, so it is robust to a
     search outage. Workers then fill each section additively, the SAME pipeline as
     improving an existing doc (create == improve). Falls back to a generic skeleton
     if the LLM is unavailable or returns nothing usable.
     """
+    if embedder is not None:
+        try:
+            from studio.templates import TemplateStore
+            tmpl = TemplateStore(embedder=embedder).find_template(goal)
+            if tmpl:
+                return tmpl
+        except Exception:  # noqa: BLE001 — template store optional; fall back to LLM
+            pass
     prompt = (
         "Set up a document SKELETON for the goal below. Output ONLY markdown:\n"
         "  - one title line (#)\n"
@@ -1391,7 +1404,8 @@ class Runner:
         # existing doc, instead of asking one LLM to author the whole report.
         if (_hc_cfg.get("auto_improve") and not _artifact_copied
                 and _eff_ws2 is not None and use_llm):
-            _skel = _build_skeleton(plan_obj.task or requirement, base_client)
+            _skel = _build_skeleton(plan_obj.task or requirement, base_client,
+                                    embedder=self._embedder)
             if _skel:
                 _skel_file = _eff_ws2 / session.session_id / "artifact.md"
                 _skel_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1973,6 +1987,16 @@ class Runner:
                     result_text=result_output,
                 )
             )
+            # Template reuse: save a decent report's heading SKELETON so the next
+            # semantically-similar research can seed its first document from it (best-effort;
+            # dedups identical skeletons; needs an embedder to be searchable).
+            if _score >= 0.6 and self._embedder is not None:
+                try:
+                    from studio.templates import TemplateStore, extract_skeleton
+                    TemplateStore(embedder=self._embedder).save_template(
+                        _original_requirement, extract_skeleton(result_output))
+                except Exception:  # noqa: BLE001 — template save is non-critical
+                    pass
             _prev_score = 0.0
             if _version > 1:
                 _prev = _store.all_runs(_thash)
