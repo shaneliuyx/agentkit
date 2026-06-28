@@ -887,6 +887,53 @@ def _parse_findings(text: str) -> list:
             quote_verified=quote_verified,
             grounded=grounded,
         ))
+
+    # JSON-wrapped findings: oMLX local models (qwen2.5-coder) emit the finding as a
+    # JSON object — fenced ```json {"RESEARCH_FINDING": {...}}``` or bare — which the
+    # plain ARTICLE_TITLE:/URL: parse above misses (``"URL":`` doesn't match ``URL:`` so
+    # the url comes out empty and the finding is dropped → 0 findings, fetched pages
+    # never reach the doc). Parse those too, through the SAME grounding oracle. Haiku
+    # uses the plain format + native tool_calls, so its text has no fences → no-op here.
+    import json as _json
+    _blocks = _re.findall(r"```[a-zA-Z_]*\s*\n?(.*?)```", text, _re.DOTALL)
+    _stripped = text.strip()
+    if _stripped.startswith("{") and _stripped.endswith("}"):
+        _blocks.append(_stripped)
+    for _blk in _blocks:
+        try:
+            _obj = _json.loads(_blk.strip())
+        except Exception:  # noqa: BLE001 — a non-JSON fence is not a finding
+            continue
+        for _rec in (_obj if isinstance(_obj, list) else [_obj]):
+            _r = _rec.get("RESEARCH_FINDING", _rec) if isinstance(_rec, dict) else None
+            if not isinstance(_r, dict):
+                continue
+
+            def _jf(*keys: str, _r: dict = _r) -> str:
+                for k in keys:
+                    v = _r.get(k)
+                    if v not in (None, ""):
+                        return str(v)
+                return ""
+
+            j_url = _jf("URL", "url")
+            if not j_url.lower().startswith("http"):
+                continue
+            j_quote = _jf("QUOTE", "quote").strip().strip('"')
+            j_qv = bool(j_quote) and _quote_in_cache(j_quote)
+            j_grounded = (not cache_active) or _url_in_cache(j_url) or j_qv
+            if cache_active and not j_grounded:
+                continue
+            out.append(Finding(
+                url=j_url,
+                title=_jf("ARTICLE_TITLE", "title"),
+                quote=j_quote,
+                why=_jf("WHY", "why", "CLAIM", "CONTENT", "KEY_INSIGHT"),
+                popularity=_jf("POPULARITY", "popularity"),
+                patch_target=_jf("PATCH_TARGET", "patch_target"),
+                quote_verified=j_qv,
+                grounded=j_grounded,
+            ))
     return out
 
 

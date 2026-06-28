@@ -1045,3 +1045,33 @@ def test_step_ids_namespaced_across_epochs(
     assert e2, phase_ids                 # epoch 2 emitted prefixed ids
     assert e1.isdisjoint(e2)             # no collision across epochs
     assert len([e for e in events if e.EVENT_TYPE == "done"]) == 1
+
+
+def test_parse_findings_accepts_json_format() -> None:
+    """oMLX local models (qwen) emit the finding as JSON, not the plain
+    ARTICLE_TITLE:/URL: lines — which the line-parser misses (the Pi/Craft run
+    fetched but parsed 0 findings). JSON-wrapped findings must parse too; a plain
+    code fence must NOT false-positive."""
+    from studio.tools import _fetch_cache
+    from studio.runner import _parse_findings
+    _fetch_cache.clear()  # empty cache → a valid-URL finding is kept (isolate parsing)
+
+    qwen = (
+        '```json\n{ "RESEARCH_FINDING": {'
+        ' "ARTICLE_TITLE": "Custom Agent Framework with PI",'
+        ' "URL": "https://nader.substack.com/p/pi",'
+        ' "QUOTE": "PI is a TypeScript toolkit.", "WHY": "Explains PI." } }\n```'
+    )
+    fs = _parse_findings(qwen)
+    assert len(fs) == 1
+    assert fs[0].url == "https://nader.substack.com/p/pi"
+    assert fs[0].title == "Custom Agent Framework with PI"
+
+    plain = (
+        "RESEARCH_FINDING:\nARTICLE_TITLE: Custom Agent Framework with PI\n"
+        "URL: https://nader.substack.com/p/pi\nQUOTE: PI is a TypeScript toolkit."
+    )
+    assert len(_parse_findings(plain)) == 1  # plain-text path unchanged
+
+    # a non-finding code fence must not become a finding
+    assert _parse_findings("see ```python\nprint('hi')\n```") == []
