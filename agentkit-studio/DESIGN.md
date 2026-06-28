@@ -1794,3 +1794,15 @@ Recommendations, Source References — generic, covering every rubric criterion.
 **Backend menu.** `gemma-4-26B-A4B-it-heretic-4bit` (oMLX :8000) registered in the
 `PROFILES` dropdown via `shared_bridge.py` (Studio-side; the shared lib is
 untouched).
+
+**Duplicate-phase dedup.** A goal listing several sub-tasks (Pi/Craft) made the
+planner emit the **same phase twice** — different ids, identical description — and
+*every* planner path can do it (seeded `make_seeded_decomposer`, LLM-epic
+`_plan_from_epics`, deterministic `plan()`). The first fix wrongly lived inside
+`_plan_from_epics` (the LLM path only), so a seeded/auto run still duplicated.
+`_dedupe_plan_steps` now runs at the **choke point** — on the final `plan_obj`
+*after* all three paths converge — collapsing phases with an identical normalized
+description and remapping the dropped duplicate's `depends_on` to the kept sibling
+(no dangling deps; no-op when clean). A planner-prompt "each phase must be
+DISTINCT" line is defense in depth (a weak model can ignore it; the code guard is
+load-bearing). Lesson: dedup where the paths MEET, not on one branch.
