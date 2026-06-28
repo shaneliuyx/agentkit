@@ -193,11 +193,19 @@ DEFAULT_WEIGHTS = dict(_WEIGHTS)
 #: should contain (synthesized from DEER/DeepResearch-Bench + academic report structure).
 #: The GUI seeds its editable template field from this; the loop uses it BOTH to steer
 #: generation (expected sections) and to score the `structure` criterion (coverage).
+# High-level, TOPIC-AGNOSTIC research-report table of contents. Generic on purpose:
+# these sections fit any subject so the report's topic is carried by its CONTENT, not
+# named by the template (the loop-eng drift came from reusing a topic-specific skeleton).
+# Mirrors standard research/technical-report structure (exec summary → background →
+# findings → analysis → methodology → limitations → conclusion → references) and covers
+# every rubric criterion (summary, findings, evidence, sourcing, methodology, conclusion).
 DEFAULT_TEMPLATE = [
     "Executive Summary",
+    "Background and Scope",
     "Key Findings",
     "Evidence and Analysis",
-    "Source References",
     "Methodology",
-    "Conclusion",
+    "Limitations and Open Questions",
+    "Conclusion and Recommendations",
+    "Source References",
 ]

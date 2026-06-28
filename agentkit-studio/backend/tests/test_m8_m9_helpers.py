@@ -31,13 +31,18 @@ from studio.runner import (
 )
 
 
-def test_build_skeleton_uses_llm_output_when_valid() -> None:
-    client = _FakeClient("# Loop Report\n## Intro\n_(pending — needs sourced content)_\n"
-                         "## Sources\n_(pending — needs sourced content)_\n")
+def test_build_skeleton_is_generic_and_topic_agnostic() -> None:
+    # The skeleton is now a FIXED high-level ToC (DEFAULT_TEMPLATE) — NOT derived from the
+    # goal and NOT the goal as a title — so the report's topic comes from its CONTENT, not
+    # the template (removes the loop-eng template-reuse drift). The LLM is not consulted.
+    from studio.rubric import DEFAULT_TEMPLATE
+    client = _FakeClient("# Loop Report\n## Intro\n_(pending — needs sourced content)_\n")
     skel = _build_skeleton("research loop engineering", client)
-    assert skel.count("##") >= 2
-    assert "_(pending" in skel
-    assert "GOAL: research loop engineering" in (client.seen or "")
+    for section in DEFAULT_TEMPLATE:
+        assert f"## {section}" in skel          # every generic section present
+    assert "loop engineering" not in skel.lower()  # goal/topic never named in the skeleton
+    assert "GOAL:" not in (client.seen or "")      # deterministic — no LLM call
+    assert "_(pending — needs sourced content)_" in skel
 
 
 def test_build_skeleton_falls_back_on_bad_llm() -> None:
