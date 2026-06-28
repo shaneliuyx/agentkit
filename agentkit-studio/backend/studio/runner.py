@@ -330,10 +330,23 @@ def _build_executor_prompt(goal: str, artifact_text: str, weaknesses_block: str)
         "  URL: <the EXACT url you fetched — REQUIRED, never omit>\n"
         "  POPULARITY: <metric if stated, else n/a>\n"
         "  PATCH_TARGET: <the '## Section' heading this improves>\n"
-        "  CONTENT: <2-4 sentences of substance FROM the fetched page>\n\n"
+        "  QUOTE: <COPY-PASTE one sentence EXACTLY from the fetched page — character "
+        "for character, no paraphrase, no edits, no ellipsis. This verbatim text IS "
+        "the evidence; do not summarize or restate it.>\n"
+        "  WHY: <why this quote matters to the GOAL, one sentence in your words>\n\n"
+        "Citing without substantiating is the #1 failure: a bare URL is NOT enough. "
+        "COPY the QUOTE verbatim from the page — do NOT restate the article in your own "
+        "words, PASTE its words. The quote is checked against the fetched page (a "
+        "fabricated one is dropped); WHY only frames the quote's relevance.\n"
         "Rules: emit a RESEARCH_FINDING ONLY for a URL you actually fetched (so it "
-        "is real and verifiable); every finding MUST carry its URL; found nothing "
-        "for a weakness → emit nothing for it (no narration, no plan).\n"
+        "is real and verifiable); every finding MUST carry its URL AND a verbatim "
+        "QUOTE; found nothing for a weakness → emit nothing for it (no narration, "
+        "no plan).\n"
+        "OUTPUT FORMAT (critical): your ENTIRE response is RESEARCH_FINDING blocks and "
+        "nothing else. Do NOT write a report, executive summary, section prose, or any "
+        "'#'/'##' markdown headings — the reducer assembles the report FROM your "
+        "findings. A response that is prose instead of RESEARCH_FINDING blocks is "
+        "discarded and the document gains nothing.\n"
     )
 
 
@@ -446,14 +459,27 @@ def _phase_search_failed(outputs: list[str]) -> bool:
     return saw_error
 
 
-def _build_skeleton(goal: str, client) -> str:
+def _build_skeleton(goal: str, client, embedder=None) -> str:
     """Build an initial document skeleton from the goal (DESIGN §11.5).
+
+    Template reuse (1st-document creation): if a prior research report's skeleton semantically
+    matches this goal (cosine over the embedder, via TemplateStore), reuse its proven STRUCTURE
+    instead of LLM-generating one — faster, consistent, grounded in a report that worked. Falls
+    back to LLM generation when no template matches or no embedder is wired.
 
     Headings + placeholder bodies only — NO search needed, so it is robust to a
     search outage. Workers then fill each section additively, the SAME pipeline as
     improving an existing doc (create == improve). Falls back to a generic skeleton
     if the LLM is unavailable or returns nothing usable.
     """
+    if embedder is not None:
+        try:
+            from studio.templates import TemplateStore
+            tmpl = TemplateStore(embedder=embedder).find_template(goal)
+            if tmpl:
+                return tmpl
+        except Exception:  # noqa: BLE001 — template store optional; fall back to LLM
+            pass
     prompt = (
         "Set up a document SKELETON for the goal below. Output ONLY markdown:\n"
         "  - one title line (#)\n"
@@ -568,8 +594,15 @@ def _strip_preamble(text: str) -> str:
 
     Strips everything before the first line beginning with '#'. No heading found =>
     return unchanged (never destroy a genuinely heading-less document).
+
+    Also removes inherited '<!-- conflict(...): anchor not found -->' markers that
+    reduce_patches emitted on a missing anchor in an EARLIER version (before the
+    anchor-demotion fix) and that the additive merge then froze into the seed forever.
+    Anchor-demotion prevents NEW markers; this strips the old ones (the content beneath
+    a marker is kept — only the noise comment line is removed).
     """
     import re
+    text = re.sub(r"[ \t]*<!--\s*conflict.*?-->[ \t]*\n?", "", text)
     m = re.search(r"^#", text, flags=re.MULTILINE)
     return text[m.start():] if m else text
 
@@ -616,65 +649,219 @@ def _weakness_score(
     return 1.0 if not total_set else round(len(total_set - on) / len(total_set), 2)
 
 
-def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
-    """Build the section-aware STAR reducer closure (DESIGN §4.5).
+#: Max cited URLs to prefetch per reduce phase (bounds added fetch latency/cost).
+_PREFETCH_LIMIT = 8
 
-    Returns a callable matching ``run_plan``'s reducer hook:
-    ``(worker_drafts: list[str]) -> (merged_text, tokens)``. It MERGES / REFINES
-    / REVIEWS each worker's per-section output into the CURRENT artifact, using
-    the section-tagged weakness list as the per-section review checklist. Additive
-    + preserve-verbatim; the runner's grow-only writeback ratchet rejects any
-    shrink. Sections are the artifact's ``##`` headings — no separate Section type
-    is threaded through core; the structure lives in the markdown + weakness tags.
+
+def _prefetch_cited(drafts: list[str], limit: int = _PREFETCH_LIMIT) -> int:
+    """Fetch cited-but-uncached URLs from the worker drafts so genuine sources pass the
+    grounding guard (the fetch-density fix). No-op when the fetch cache is empty — that
+    means no grounding drop happens (cache_active is False), so there is nothing to fix,
+    and tests stay offline. Bounded by ``limit`` to cap latency. Returns how many cited
+    URLs are now cached."""
+    from studio.tools import _fetch_cache, prefetch_url
+    if not _fetch_cache:
+        return 0
+    seen: list[str] = []
+    for d in drafts:
+        for m in _re.finditer(r'URL:\s*(https?://\S+)', d):
+            u = m.group(1).strip().rstrip('.,)')
+            if u not in seen:
+                seen.append(u)
+    fetched = sum(1 for u in seen[:limit] if prefetch_url(u))
+    _dbg(f"prefetch cited={len(seen)} fetched_ok={fetched} (cap {limit})")
+    return fetched
+
+
+def _dbg(msg: str) -> None:
+    """Append a throughput-diagnostic line to the file named by OMC_THROUGHPUT_DEBUG.
+
+    A no-op unless that env var is set, so production and tests write nothing. Used to
+    localize where findings are lost between the spokes and the artifact (raw findings →
+    grounded floor patches → patches actually applied → grow-only writeback)."""
+    import os
+    path = os.environ.get("OMC_THROUGHPUT_DEBUG")
+    if not path:
+        return
+    try:
+        with open(path, "a") as fh:
+            fh.write(msg + "\n")
+    except OSError:
+        pass
+
+
+def _apply_ranking(doc: str, findings: list) -> str:
+    """F4/F5: replace the source-selection section with the honest split ranking table.
+
+    Ranks EVERY source cited in the doc (this phase's rich findings supply title/popularity;
+    others are added bare from the doc's URLs for completeness). Best-effort: no findings / no
+    target section / a metric failure → doc unchanged. The S2/GitHub lookups go through
+    ``fetch_metrics`` (ONE S2 batch, cached in .web_cache.json under metric:<url>, degrade to
+    None) so they never block or crash a run."""
+    if not findings:
+        return doc
+    import json as _json
+    import os as _os
+    from agentkit.artifacts.metrics import fetch_metrics
+    from agentkit.artifacts.patcher import DocPatch, reduce_patches
+    from agentkit.artifacts.ranking import synthesize_ranking_table
+    from agentkit.artifacts.sections import split_sections
+    from agentkit.artifacts.types import Finding
+
+    target = next((h for h, _b in split_sections(doc)
+                   if 'source selection' in h.lower()
+                   or h.lower().strip().endswith('sources')
+                   or 'popularity' in h.lower()), None)
+    if target is None:
+        return doc
+    body = dict(split_sections(doc)).get(target, '')
+    if not body:
+        return doc
+    # rank ALL sources cited in the doc, enriched by this phase's findings
+    rich = {f.url: f for f in findings}
+    all_findings = [rich.get(u) or Finding(url=u)
+                    for u in {x.rstrip('.,)') for x in _re.findall(r'https?://\S+', doc)}]
+    if not all_findings:
+        return doc
+    from agentkit.artifacts.metrics import source_kind
+    # Only touch the network/cache file when a source actually HAS a fetchable metric
+    # (arxiv/github). A blog-only doc (e.g. offline tests) skips file I/O entirely → all
+    # sources are 'reported', no network, no .web_cache.json read/write.
+    if not any(source_kind(f.url)[0] for f in all_findings):
+        metrics = {f.url: None for f in all_findings}
+    else:
+        cache: dict = {}
+        try:
+            if _os.path.exists('.web_cache.json'):
+                with open('.web_cache.json') as _cf:
+                    cache = _json.load(_cf)
+        except Exception:  # noqa: BLE001
+            cache = {}
+        try:
+            metrics = fetch_metrics([f.url for f in all_findings],
+                                    s2_key=_os.environ.get('SEMANTIC_SCHOLAR_API_KEY'), cache=cache)
+            with open('.web_cache.json', 'w') as _cf:   # persist metric:<url> entries
+                _json.dump(cache, _cf)
+        except Exception:  # noqa: BLE001 — metrics best-effort; never block
+            metrics = {}
+    table = synthesize_ranking_table(all_findings, metrics)
+    return reduce_patches(
+        doc, [[DocPatch(op='replace', anchor=body, content=f"{target}\n\n{table}\n",
+                        source='ranking')]]
+    ).text
+
+
+def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], embedder=None):
+    """Build the section-aware STAR reducer closure (DESIGN §4.5; Lever 3).
+
+    Returns ``run_plan``'s reducer hook ``(worker_drafts) -> (merged_text, tokens)``.
+
+    PATCH-BASED (Lever 3): instead of re-emitting the full ~38K document — whose
+    output a completion cap (``max_tokens``) truncates mid-section (the v29
+    truncation/incomplete weaknesses) — the reducer asks the model for a SMALL list
+    of section PATCHES and applies them MECHANICALLY via ``reduce_patches``. The
+    model never re-emits the document, so truncation is impossible and output tokens
+    drop ~10x. As a deterministic floor, the workers' own RESEARCH_FINDING blocks are
+    converted to additive patches too — so a phase always makes grounded progress even
+    if the model emits no usable PATCHES. Additive only; the runner's grow-only
+    writeback ratchet still rejects any shrink. Sections are the artifact's ``##``
+    headings — the structure lives in the markdown + weakness tags, no Section type.
     """
     wk_block = "\n".join(f"- {w}" for w in (weaknesses or [])) or "(none)"
-    art_block = artifact_text.strip() or "(empty — create the sections from worker output)"
+    art_block = artifact_text.strip()
 
     def reduce(drafts: list[str]) -> tuple[str, int]:
         workers = "\n\n".join(f"[worker {i + 1}]\n{d}" for i, d in enumerate(drafts))
         prompt = (
             _today_note() +
             "You are the section-aware reducer of a multi-worker research phase.\n"
-            "MERGE / REFINE / REVIEW each worker output into the CURRENT ARTIFACT, "
-            "section by section (sections are the '##' headings).\n\n"
+            "Do NOT re-emit the document. Emit a SMALL JSON list of PATCHES that fold "
+            "each worker's SOURCED finding into the CURRENT ARTIFACT, section by "
+            "section (sections are the '##' headings).\n\n"
+            "Each patch is one object:\n"
+            '  {"op": "insert_after", "anchor": "## <exact section heading from the '
+            'artifact>", "content": "<a substantiating SENTENCE woven from the '
+            'finding: its central claim + a short verbatim quote + the source URL>"}\n'
+            '  - op is "insert_after" (add prose under a heading) or "replace" (swap a '
+            "placeholder line for grounded prose).\n"
+            "  - anchor MUST be text that already exists in the CURRENT ARTIFACT.\n"
+            "  - content ADDS grounded prose and keeps every source URL.\n\n"
             "RULES — violating these REGRESSES the deliverable:\n"
-            "  - PRESERVE every existing section VERBATIM; only ADD sourced content "
-            "from a worker output. Output length MUST be >= the current artifact.\n"
-            "  - Every claim you ADD MUST keep its source URL from the worker's "
-            "RESEARCH_FINDING (fetched content always has a URL) — never add a "
-            "sourced claim without its URL.\n"
-            "  - Treat each section's weaknesses below as a review checklist: if a "
-            "worker resolves one (with a real source/URL), fold it in.\n"
-            "  - No worker content for a section -> leave that section exactly as-is.\n\n"
+            "  - Additive only: a patch may ADD substance, never delete or shorten "
+            "existing sourced content.\n"
+            "  - Every added claim keeps its source URL from the worker's "
+            "RESEARCH_FINDING.\n"
+            "  - A weakness below resolved by a worker (with a real URL) → weave it in "
+            "as a sentence, not a bare citation line.\n"
+            "  - No worker content for a section → emit no patch for it.\n\n"
             f"SECTION WEAKNESSES (review checklist):\n{wk_block}\n\n"
-            f"CURRENT ARTIFACT:\n--- BEGIN ---\n{art_block}\n--- END ---\n\n"
+            f"CURRENT ARTIFACT:\n--- BEGIN ---\n{art_block or '(empty)'}\n--- END ---\n\n"
             f"WORKER OUTPUTS:\n{workers}\n\n"
-            "Output ONLY the full updated artifact markdown, beginning at its very "
-            "first heading. Do NOT prepend any preamble, status line, review summary, "
-            "weakness checklist, or commentary about what you changed or verified — "
-            "emit the document itself and nothing else. Keep every original section "
-            "intact. Do NOT include the '--- BEGIN ---' / '--- END ---' delimiter "
-            "lines — they frame the input only."
+            "Output ONLY:\nPATCHES:\n```json\n[ ... ]\n```\n"
+            "Nothing else — no document, no preamble, no commentary."
         )
         res = client.chat([{"role": "user", "content": prompt}])
-        return (res.text or "").strip(), int(getattr(res, "total_tokens", 0) or 0)
+        tokens = int(getattr(res, "total_tokens", 0) or 0)
+        llm_patches = _parse_patches_from_output(res.text or "")
+        # Deterministic floor: convert the workers' own RESEARCH_FINDING blocks to
+        # additive patches. Guarantees grounded progress when the model emits no
+        # usable PATCHES, and folds in any finding it skipped. The reduce_patches
+        # duplicate-guard makes the overlap idempotent.
+        # Fetch-density fix: spokes cite ~12 URLs/phase but fetch ~1, so the grounding
+        # guard dropped 80-100% of real findings. Fetch the cited-but-uncached URLs now
+        # so genuine sources survive grounding (a 404/fabricated URL still drops).
+        _prefetch_cited(drafts)
+        findings: list = []
+        raw_findings = 0
+        for d in drafts:
+            raw_findings += len(_re.findall(r'#{0,6}\s*RESEARCH_FINDING', d))
+            findings += _parse_findings(d)
+        # F1: collapse near-duplicate findings (STRUM merge) BEFORE they become patches, so
+        # the additive merge stops dumping ~26 repetitive citations as an unordered block.
+        from agentkit.artifacts.dedup import dedupe_findings
+        findings, n_dedup = dedupe_findings(findings, embedder)
+        floor_patches = _findings_to_patches(findings)
+        patches = llm_patches + floor_patches
+        if not patches:
+            _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
+                 f"llm={len(llm_patches)} floor=0 dedup={n_dedup} → NO PATCHES (no findings survived)")
+            return art_block, tokens  # nothing to add → unchanged (no truncation)
+        # Resolve anchors before merging: a finding's PATCH_TARGET that is not a real
+        # heading in the doc would otherwise become a '<!-- conflict -->' marker that
+        # pollutes the artifact (the throughput fix surfaced 13 such markers in one
+        # phase). Demote any insert_after with a missing anchor to a clean append.
+        for p in patches:
+            if getattr(p, "op", "") == "insert_after" and p.anchor and p.anchor not in art_block:
+                p.op, p.anchor = "append", None
+        from agentkit.artifacts.patcher import reduce_patches
+        rr = reduce_patches(art_block, [patches])
+        # F4/F5: replace the source-selection section with the honest split ranking table.
+        merged = _apply_ranking(rr.text, findings)
+        _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
+             f"llm={len(llm_patches)} floor={len(floor_patches)} dedup={n_dedup} "
+             f"applied_delta={len(rr.text) - len(art_block)} conflicts={len(rr.conflicts)} "
+             f"ranked_delta={len(merged) - len(rr.text)}")
+        return merged.strip(), tokens
 
     return reduce
 
 
-def _research_findings_to_patches(text: str) -> list:
-    """Convert RESEARCH_FINDING blocks → ADDITIVE DocPatches (DESIGN §11.3).
+def _parse_findings(text: str) -> list:
+    """Parse RESEARCH_FINDING blocks → grounded ``agentkit.artifacts.types.Finding`` objects.
 
-    Each finding with a real URL becomes an `insert_after` its PATCH_TARGET (or an
-    `append` if no target) — a citation line. Additive only: it can add content but
-    never remove or shorten the existing doc, so the merge cannot regress. Findings
-    without a real URL are dropped (§11 grounding: content needs a source).
-    """
-    from agentkit.artifacts.patcher import DocPatch
+    Bare ``RESEARCH_FINDING:`` and ``## RESEARCH_FINDING`` both parse. Dual grounding oracle
+    (Lever 1): keep a finding iff its URL is http(s) AND — when the fetch cache holds pages —
+    its URL was fetched OR its verbatim quote appears on a fetched page; else drop (a true
+    fabrication: invented URL AND invented quote). ``quote_verified`` gates whether the
+    verbatim quote is later woven. CLAIM/CONTENT/KEY_INSIGHT fold into ``why`` (the schema
+    dropped the rephrased CLAIM — the verbatim QUOTE is the evidence)."""
+    from agentkit.artifacts.types import Finding
+    from studio.tools import _fetch_cache, _quote_in_cache, _url_in_cache
 
-    patches: list = []
+    cache_active = bool(_fetch_cache)
+    out: list = []
     for m in _re.finditer(
-        r'##\s*RESEARCH_FINDING(.*?)(?=##\s*RESEARCH_FINDING|\Z)', text, _re.DOTALL
+        r'#{0,6}\s*RESEARCH_FINDING(.*?)(?=#{0,6}\s*RESEARCH_FINDING|\Z)', text, _re.DOTALL
     ):
         block = m.group(1)
 
@@ -685,16 +872,54 @@ def _research_findings_to_patches(text: str) -> list:
         url = _f('URL')
         if not url.lower().startswith('http'):
             continue  # not a sourced finding → not content
-        title, target = _f('ARTICLE_TITLE'), _f('PATCH_TARGET')
-        insight, pop = _f('KEY_INSIGHT'), _f('POPULARITY')
-        line = (f"\n- [{title or url}]({url})"
-                + (f" — {insight}" if insight else "")
-                + (f" ({pop})" if pop else ""))
-        if target:
-            patches.append(DocPatch(op="insert_after", anchor=target, content=line, source="finding"))
+        quote = _f('QUOTE').strip().strip('"')
+        quote_verified = bool(quote) and _quote_in_cache(quote)
+        grounded = (not cache_active) or _url_in_cache(url) or quote_verified
+        if cache_active and not grounded:
+            continue
+        out.append(Finding(
+            url=url,
+            title=_f('ARTICLE_TITLE'),
+            quote=quote,
+            why=_f('WHY') or _f('CLAIM') or _f('CONTENT') or _f('KEY_INSIGHT'),
+            popularity=_f('POPULARITY'),
+            patch_target=_f('PATCH_TARGET'),
+            quote_verified=quote_verified,
+            grounded=grounded,
+        ))
+    return out
+
+
+def _findings_to_patches(findings: list) -> list:
+    """Grounded ``Finding`` objects → additive, WOVEN DocPatches (Lever 2: verbatim copy-paste
+    evidence). The verbatim QUOTE is the evidence when verified; ``why`` frames it. Each becomes
+    an ``insert_after`` its PATCH_TARGET (or ``append`` if none). Additive only."""
+    from agentkit.artifacts.patcher import DocPatch
+
+    patches: list = []
+    for f in findings:
+        cite = f"[{f.title or f.url}]({f.url})"
+        has_pop = bool(f.popularity and f.popularity.lower() != 'n/a')
+        pop_clause = f", {f.popularity}" if has_pop else ""
+        lead = f"{f.why.rstrip('.')}: " if f.why else ""
+        if f.quote_verified:  # COPY-PASTE: the verbatim source excerpt IS the evidence
+            content = f'\n\n{lead}"{f.quote}" ({cite}{pop_clause}).\n'
+        elif f.why:           # no verifiable quote → grounded by URL; framing + citation
+            content = f"\n\n{f.why.rstrip('.')} ({cite}{pop_clause}).\n"
+        else:                 # nothing to weave → bare citation line
+            content = f"\n- {cite}{(' (' + f.popularity + ')') if has_pop else ''}\n"
+        if f.patch_target:
+            patches.append(DocPatch(op="insert_after", anchor=f.patch_target, content=content, source="finding"))
         else:
-            patches.append(DocPatch(op="append", anchor=None, content=line, source="finding"))
+            patches.append(DocPatch(op="append", anchor=None, content=content, source="finding"))
     return patches
+
+
+def _research_findings_to_patches(text: str) -> list:
+    """Back-compat one-shot: parse + ground + weave (the post-loop patch path). The reducer
+    uses _parse_findings + dedupe_findings + _findings_to_patches separately so it can collapse
+    near-duplicate findings before they become patches (F1)."""
+    return _findings_to_patches(_parse_findings(text))
 
 
 def _parse_patches_from_output(text: str) -> list:
@@ -863,6 +1088,7 @@ class Runner:
         search_fn: Callable[..., list[Any]] | None = None,
         fetch_fn: Callable[..., Any] | None = None,
         workspace_root: Any = None,
+        prefer_fn: Callable[[str, str, str], int] | None = None,
     ) -> None:
         self._session = session
         self._emit = emit
@@ -875,6 +1101,10 @@ class Runner:
         self._fetch_fn = fetch_fn
         #: Workspace root override for the file-tool jail (tests pass a tmp dir).
         self._workspace_root = workspace_root
+        #: Phase-1 epoch keep/discard judge (new, prior, requirement) -> net pref.
+        #: Tests inject a deterministic stub; production builds one from
+        #: agentkit.evolve.self_preference (see studio.epoch_gate, DESIGN §11.5).
+        self._prefer_fn = prefer_fn
         self._acc = TokenAccounting()
         self._current_step_id = ""
         #: Wall-clock start of the run, stamped in run(); the done frame reports
@@ -941,6 +1171,15 @@ class Runner:
     def _run_inner(self, requirement: str) -> None:
         session = self._session
 
+        # Task IDENTITY for hill-climb continuity is the BASE requirement, captured
+        # BEFORE the goal/constraints block (just below) and the per-iteration prefix
+        # (~L1281) are prepended. Hashing the augmented string forked the lineage every
+        # time a goal was attached: same task, new task_hash → cold-start v1, no artifact
+        # carry-forward, weakness-score 0/N = 0.00. The goal still STEERS the agent (it
+        # stays in `requirement` for planning); it just no longer changes the task's
+        # identity. Used at the auto_improve seed lookup and the run-record block below.
+        _base_requirement = requirement
+
         # Inject goal end_state and constraints into requirement so the agent
         # sees them during planning — not just during post-phase verification.
         _goal = getattr(session, "goal", None)
@@ -954,6 +1193,25 @@ class Runner:
             if _parts:
                 requirement = "\n".join(_parts) + "\n\n" + requirement
 
+        # Wire the deliverable TEMPLATE into GENERATION (DESIGN §11.6): when the GUI
+        # has set a rubric template, instruct the agent to produce those sections, so
+        # the template STEERS the report (the workers target the structure the gate
+        # later scores) instead of only being graded after the fact. Injected into
+        # `requirement` AFTER `_base_requirement` is captured, so it never changes
+        # task_hash. Only when explicitly configured — defaulting to DEFAULT_TEMPLATE
+        # would force report headings (Executive Summary, Methodology…) onto non-research
+        # tasks and compromise their generation quality.
+        _rc = getattr(session, "rubric_config", None) or {}
+        _template = _rc.get("template")
+        if _template:
+            _sections = "\n".join(f"- {s}" for s in _template)
+            requirement = (
+                requirement
+                + "\n\nStructure the deliverable with these sections (use them as "
+                + "top-level headings, in order):\n"
+                + _sections
+            )
+
         # Stash the original requirement so task_hash is stable across iterations
         # (the seeder may rewrite requirement with "ITERATION N —..." prefix).
         _original_requirement = requirement
@@ -966,6 +1224,7 @@ class Runner:
         _eff_ws2 = None
         _weaknesses_block = ""  # prior-run lessons → planner/hub constraints
         _seed_len = 0           # length of the seeded prior artifact (anti-regression)
+        _seed_text = ""         # full prior artifact text (Phase-1 keep/discard gate)
         # §11.4 loop-closure check: normalized weaknesses recorded in >= REPEAT_LIMIT
         # prior runs of this task were injected and never fixed. The reducer drops
         # them from its handoff (below) instead of grinding on them forever. Empty
@@ -974,7 +1233,7 @@ class Runner:
         if _hc_cfg.get("auto_improve"):
             import shutil
             from studio.task_runs import TaskRunStore, task_hash as _task_hash
-            _thash = _task_hash(requirement)
+            _thash = _task_hash(_base_requirement)
             # Pass the embedder so each run's requirement is embedded for R10
             # cross-task similarity retrieval (no-op when embedder is None).
             _store = TaskRunStore(embedder=self._embedder)
@@ -1007,8 +1266,10 @@ class Runner:
                         _seed_clean = _strip_preamble(_seed_path.read_text())
                         _seed_path.write_text(_seed_clean)
                         _seed_len = len(_seed_clean)
+                        _seed_text = _seed_clean  # Phase-1 gate: prior best to beat
                     except OSError:
                         _seed_len = 0
+                        _seed_text = ""
                 # Accumulate weaknesses from this task's prior runs AND from
                 # semantically SIMILAR prior tasks (R10) — every failure lesson,
                 # including cross-task ones, carries forward. Deduplicated by
@@ -1186,7 +1447,8 @@ class Runner:
         # existing doc, instead of asking one LLM to author the whole report.
         if (_hc_cfg.get("auto_improve") and not _artifact_copied
                 and _eff_ws2 is not None and use_llm):
-            _skel = _build_skeleton(plan_obj.task or requirement, base_client)
+            _skel = _build_skeleton(plan_obj.task or requirement, base_client,
+                                    embedder=self._embedder)
             if _skel:
                 _skel_file = _eff_ws2 / session.session_id / "artifact.md"
                 _skel_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1360,7 +1622,8 @@ class Runner:
                 except OSError:
                     pass
                 _reducer = _make_section_reducer(
-                    client, _cur_art, getattr(session, "weaknesses", []) or []
+                    client, _cur_art, getattr(session, "weaknesses", []) or [],
+                    embedder=self._embedder,   # F1: dedup near-duplicate findings
                 )
 
             try:
@@ -1433,14 +1696,30 @@ class Runner:
             # across phases AND epochs, never regresses (a thin/failed reduce keeps
             # the prior good doc).
             _clean_out = _strip_preamble(sr.output)  # never persist reducer commentary
-            if (_artifact_copied and _eff_ws2 is not None
-                    and len(_clean_out.strip()) > 0
-                    and len(_clean_out) >= _seed_len):
+            # F2: per-section ratchet. The old whole-doc grow-only rule (len >= _seed_len)
+            # rejected ANY shrink, blocking dedup/replace/repair. accept_rewrite allows a
+            # rewrite (even shorter) as long as no section that had CONTENT is deleted or
+            # gutted — preserving anti-regression at section granularity.
+            _art_path = (_eff_ws2 / session.session_id / "artifact.md") if _eff_ws2 is not None else None
+            _old_art = ""
+            if _art_path is not None:
                 try:
-                    (_eff_ws2 / session.session_id / "artifact.md").write_text(_clean_out)
-                    _seed_len = len(_clean_out)   # ratchet up for the next phase
+                    _old_art = _art_path.read_text()
                 except OSError:
                     pass
+            from agentkit.artifacts.sections import accept_rewrite
+            if (_artifact_copied and _art_path is not None
+                    and len(_clean_out.strip()) > 0
+                    and accept_rewrite(_old_art, _clean_out)):
+                try:
+                    _art_path.write_text(_clean_out)
+                    _dbg(f"writeback ACCEPT step={step.id} {len(_old_art)}→{len(_clean_out)}")
+                    _seed_len = len(_clean_out)   # track current length for the next phase
+                except OSError:
+                    pass
+            elif _artifact_copied and _art_path is not None:
+                _dbg(f"writeback REJECT step={step.id} clean_len={len(_clean_out)} "
+                     f"(accept_rewrite: a sourced section was deleted/gutted)")
 
             # Reconcile tokens run_plan counted that on_usage did not capture.
             # A StudioChatClient fires on_usage per call (with the in/out split);
@@ -1652,7 +1931,10 @@ class Runner:
             # Embedder wired so this run's requirement is embedded on record()
             # → future runs can find it via similar_runs() (R10).
             _store = TaskRunStore(embedder=self._embedder)
-            _thash = _task_hash(_original_requirement)
+            # Hash the BASE requirement (goal-invariant identity) — must match the
+            # auto_improve seed-lookup hash above so a run records under the same
+            # task_hash it seeded from.
+            _thash = _task_hash(_base_requirement)
             from studio.workspace import workspace_root as _ws_root_fn
             _effective_ws_root = self._workspace_root or _ws_root_fn()
             _art_file = _effective_ws_root / session.session_id / "artifact.md"
@@ -1684,19 +1966,12 @@ class Runner:
             try:
                 import json as _json
                 import os as _os
-                import re as _re
-                _cache_file = ".web_cache.json"
-                if _os.path.exists(_cache_file):
-                    with open(_cache_file) as _cf:
-                        _cache_data = _json.load(_cf)
-                    _cached_set: set[str] = set()
-                    for _cv in _cache_data.values():
-                        if isinstance(_cv, list):
-                            for _cr in _cv:
-                                if isinstance(_cr, dict) and "url" in _cr:
-                                    _cached_set.add(_cr["url"])
-                    _raw_urls = _re.findall(r"https?://\S+", _scored_text or "")
-                    _verified_urls = [u.rstrip(".,)") for u in _raw_urls if u.rstrip(".,)") in _cached_set]
+                from studio.task_runs import verified_urls_in_cache
+                if _os.path.exists(".web_cache.json"):
+                    with open(".web_cache.json") as _cf:
+                        _verified_urls = verified_urls_in_cache(
+                            _json.load(_cf), _scored_text or ""
+                        )
             except Exception:  # noqa: BLE001
                 pass
             _score, _scorer_feedback = score_result(
@@ -1725,26 +2000,103 @@ class Runner:
             if _reducer_gaps:
                 _seen_w = set(_weaknesses)
                 _weaknesses = [g for g in _reducer_gaps if g not in _seen_w] + _weaknesses
-            # §11.4 SCORE = solved / total over the weakness set (deterministic;
-            # overrides the noisy LLM self-eval, which emitted impossible values
-            # like 0.1 and rated good output low). total = prior accumulated UNION
-            # still-open; solved = total - still-open. No weakness anywhere => nothing
-            # to fix => 1.0. score_result still runs above, but only for the
-            # scorer_feedback that mining consumes — its score is discarded here.
-            _score = _weakness_score(
-                getattr(session, "weaknesses", []) or [], _weaknesses,
-                embedder=self._embedder,
+            # Deterministic section guard (DESIGN §11.6): the moving-window miner now sees the
+            # whole artifact, but the SCORER still windows (20K) and its UNMET line is fed to
+            # the miner as a starting point — so a tail section past the scorer's window can
+            # still echo through as a false "missing X". Drop any missing/absent-section
+            # weakness for a section the concept-aware FULL-TEXT check confirms is present, so
+            # a complete report is not penalised for a blind spot. Only when a rubric template
+            # is configured (else there is no authoritative section list).
+            _tmpl = (getattr(session, "rubric_config", None) or {}).get("template")
+            if _tmpl and _weaknesses:
+                from studio.rubric import sections_present
+                _present = {s.lower() for s in sections_present(_scored_text, _tmpl)}
+                if _present:
+                    _weaknesses = [
+                        _w for _w in _weaknesses
+                        if not (
+                            ("missing" in _w.lower() or "absent" in _w.lower())
+                            and any(_s in _w.lower() for _s in _present)
+                        )
+                    ]
+            # Semantic dedup: the moving-window miner can surface the SAME issue under two
+            # section prefixes (e.g. the popularity-ranking gap as both [## Source Selection]
+            # and [## Key Findings]). Exact-string dedup misses these re-phrasings, so they
+            # count as two unsolved items and depress solved/total — part of why the recorded
+            # score jitters epoch-to-epoch on an improving document. Collapse near-duplicates
+            # (cosine >= the same 0.85 threshold _weakness_score uses), keeping the first.
+            if self._embedder is not None and len(_weaknesses) > 1:
+                from studio.task_runs import _cosine
+                try:
+                    _wvecs = self._embedder.embed(_weaknesses)
+                    _kept: list[str] = []
+                    _kept_vecs: list = []
+                    for _wk, _wv in zip(_weaknesses, _wvecs):
+                        if any(_cosine(_wv, _kv) >= 0.85 for _kv in _kept_vecs):
+                            continue
+                        _kept.append(_wk)
+                        _kept_vecs.append(_wv)
+                    _weaknesses = _kept
+                except Exception:  # noqa: BLE001 — dedup is best-effort; embedder may be down
+                    pass
+            # Weaknesses are now an IMPROVEMENT SIGNAL only — they seed the next run's
+            # constraints — NOT the score. The recorded score is the deterministic rubric,
+            # computed AFTER the keep/discard gate below so it scores the artifact actually
+            # kept. (solved/total retired: a count-based score punished thoroughness — more
+            # mined weaknesses lowered it even as the document improved; DESIGN §11.6.)
+            # (Remaining weaknesses are surfaced below the report via HillClimbEvent.weaknesses
+            # — the frontend renders them — never written into result_output / the document.)
+            # Phase-1 keep/discard gate (DESIGN §11.5): when this epoch seeded from a
+            # prior best, KEEP its artifact only if a label-free judge strictly prefers
+            # it over the seed. On reject, restore the prior so the carry-forward seed
+            # never regresses (worst case = prior good report retained). Cold start
+            # (no seed) always accepts. Reuses agentkit.evolve.self_preference via
+            # studio.epoch_gate; a judge failure fails OPEN (no worse than the old
+            # ungated length ratchet).
+            if _artifact_copied and _seed_text.strip():
+                from studio.epoch_gate import accept_epoch, make_rubric_preference
+                if self._prefer_fn is not None:
+                    _pf = self._prefer_fn
+                    _prefer = lambda _n, _p: _pf(_n, _p, _original_requirement)
+                else:
+                    # DEFAULT judge = deterministic research-report rubric (DESIGN §11.6).
+                    # An LLM "which is better?" judge ties strong-vs-stub even on sonnet
+                    # (§11.5 D4); the rubric separates them reproducibly. _verified_urls
+                    # is the accuracy oracle (URLs confirmed real via the web cache).
+                    # Weights + deliverable template come from the GUI rubric_config.
+                    _rc = getattr(session, "rubric_config", None) or {}
+                    _prefer = make_rubric_preference(
+                        _verified_urls or None,
+                        weights=_rc.get("weights"),
+                        required_sections=_rc.get("template"),
+                    )
+                try:
+                    if not accept_epoch(_scored_text, _seed_text, _prefer):
+                        _art_file.write_text(_seed_text)   # revert carry-forward seed
+                        result_output = _seed_text
+                        _scored_text = _seed_text
+                        _dbg("epoch gate: reverted to prior (new not preferred)")
+                    else:
+                        _dbg("epoch gate: kept new epoch (preferred over prior)")
+                except Exception:  # noqa: BLE001 — gate must never crash the run
+                    pass
+            # Recorded score = deterministic RUBRIC over the FINAL (post-gate) artifact —
+            # the metric that actually tracks quality (DESIGN §11.6). Computed from the clean
+            # _scored_text BEFORE the weakness annotation is appended, so the score is not
+            # polluted by it. Weights + template come from the GUI rubric_config.
+            from studio.rubric import rubric_score
+            _rcfg = getattr(session, "rubric_config", None) or {}
+            _score = rubric_score(
+                _scored_text or result_output or "",
+                verified_urls=_verified_urls or None,
+                weights=_rcfg.get("weights"),
+                required_sections=_rcfg.get("template"),
             )
-            # §11.4 surface (never hide): a repeat-failure (>= REPEAT_LIMIT prior runs)
-            # that is STILL recorded this run was attempted again — including the last
-            # phase — and remains open. Append it visibly below the result shown in the
-            # chat window so the user knows what could not be resolved, instead of
-            # silently dropping it.
-            if _repeat_failed:
-                from studio.task_runs import REPEAT_LIMIT
-                result_output = (result_output or "").rstrip() + _unresolved_block(
-                    _weaknesses, _repeat_failed, REPEAT_LIMIT
-                )
+            # Remaining weaknesses are surfaced BELOW the report in the result view via the
+            # HillClimbEvent.weaknesses emitted below (the frontend renders them) — they must
+            # NOT be concatenated into result_output, which IS the deliverable document
+            # (saved, downloaded, recorded as result_text). Keeping them out keeps the report
+            # clean and keeps the next-run seed uncontaminated.
             _version = _store.next_version(_thash)
             _store.record(
                 TaskRun(
@@ -1758,6 +2110,16 @@ class Runner:
                     result_text=result_output,
                 )
             )
+            # Template reuse: save a decent report's heading SKELETON so the next
+            # semantically-similar research can seed its first document from it (best-effort;
+            # dedups identical skeletons; needs an embedder to be searchable).
+            if _score >= 0.6 and self._embedder is not None:
+                try:
+                    from studio.templates import TemplateStore, extract_skeleton
+                    TemplateStore(embedder=self._embedder).save_template(
+                        _original_requirement, extract_skeleton(result_output))
+                except Exception:  # noqa: BLE001 — template save is non-critical
+                    pass
             _prev_score = 0.0
             if _version > 1:
                 _prev = _store.all_runs(_thash)

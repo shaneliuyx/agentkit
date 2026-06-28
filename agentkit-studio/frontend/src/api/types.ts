@@ -388,3 +388,16 @@ export interface SessionRequest {
 export interface SessionResponse {
   session_id: string;
 }
+
+/**
+ * GUI rubric config (DESIGN §11.6): per-criterion weights + the deliverable
+ * TEMPLATE. Seeded from `GET /rubric/defaults`, POSTed to `/session/{id}/rubric`.
+ * The keep/discard gate scores each epoch with these weights; the template both
+ * steers generation and drives the `structure` criterion. Criterion keys are
+ * NOT enumerated here — the panel renders whatever the defaults endpoint returns,
+ * so adding a criterion backend-side needs no frontend change.
+ */
+export interface RubricConfig {
+  weights: Record<string, number>;
+  template: string[];
+}

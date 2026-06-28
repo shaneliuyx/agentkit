@@ -195,10 +195,10 @@ def test_seeded_run_emits_loop_seed(fake_client_factory) -> None:
     assert [s["id"] for s in plan_evt.steps] == ["s1", "s2"]
 
 
-def test_section_reducer_merges_with_artifact_and_weaknesses() -> None:
-    """_make_section_reducer (DESIGN §4.5) builds a run_plan reducer hook that
-    feeds the current artifact + section weaknesses + worker drafts to the LLM
-    and returns its merged output + token count."""
+def test_section_reducer_emits_patches_no_full_regen() -> None:
+    """Lever 3: the reducer asks for PATCHES (not a full-document regen) and applies
+    them MECHANICALLY via reduce_patches, so a completion cap cannot truncate the
+    artifact. The seed is preserved verbatim and the patch content is woven in."""
     from agentkit.types import ChatResult
     from studio.runner import _make_section_reducer
 
@@ -207,19 +207,303 @@ def test_section_reducer_merges_with_artifact_and_weaknesses() -> None:
     class _C:
         def chat(self, messages, tools=None) -> ChatResult:
             captured["prompt"] = messages[-1]["content"]
-            return ChatResult(text="  MERGED ARTIFACT  ", total_tokens=12)
+            return ChatResult(
+                text='PATCHES:\n```json\n'
+                     '[{"op":"insert_after","anchor":"## Intro",'
+                     '"content":"\\n\\nNew grounded sentence (https://x.example)."}]\n```',
+                total_tokens=12,
+            )
 
     reduce = _make_section_reducer(
         _C(), "## Intro\nseed text", ["## Intro: missing citation"]
     )
-    text, tok = reduce(["worker found source X", "worker found source Y"])
+    text, tok = reduce(["worker found source X"])
 
-    assert text == "MERGED ARTIFACT"        # stripped
     assert tok == 12
+    # seed preserved (the patch weaves content BETWEEN heading and body — Lever 2)
+    assert "## Intro" in text and "seed text" in text
+    assert "New grounded sentence" in text                # patch applied mechanically
     p = captured["prompt"]
-    assert "## Intro" in p and "missing citation" in p   # artifact + weakness checklist
-    assert "worker found source X" in p                  # worker drafts included
-    assert "PRESERVE every existing section" in p        # additive contract present
+    assert "Do NOT re-emit" in p                           # patch contract, not full regen
+    assert "PATCHES" in p
+    assert "## Intro" in p and "missing citation" in p     # artifact + weakness checklist
+    assert "worker found source X" in p                    # worker drafts included
+
+
+def test_section_reducer_deterministic_floor_from_findings() -> None:
+    """Lever 3 floor: even when the model emits NO usable PATCHES, the reducer still
+    folds the workers' own RESEARCH_FINDING blocks in as additive patches — a phase
+    always makes grounded progress, never a no-op."""
+    from agentkit.types import ChatResult
+    from studio.runner import _make_section_reducer
+
+    class _Empty:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(text="no patches here", total_tokens=3)
+
+    # '## Findings' (not a source-selection heading) so the F5 ranking pass doesn't replace it —
+    # this test isolates the deterministic floor, not F5.
+    reduce = _make_section_reducer(_Empty(), "## Findings\n_(pending)_", [])
+    draft = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Loop\nURL: https://addy.example/loop\n"
+        "PATCH_TARGET: ## Findings\nCLAIM: Verifier is the bottleneck.\n"
+    )
+    text, _ = reduce([draft])
+    assert "## Findings" in text and "_(pending)_" in text  # seed kept (woven between)
+    assert "addy.example/loop" in text                      # finding woven in (no LLM patch)
+    assert "Verifier is the bottleneck" in text
+
+
+def test_apply_ranking_replaces_source_section_offline() -> None:
+    """F5: _apply_ranking replaces the source-selection section with the honest split table.
+    Blog-only sources → no fetchable metric → NO network/cache file I/O, all 'reported'."""
+    from agentkit.artifacts.types import Finding
+    from studio.runner import _apply_ranking
+    doc = "# R\n\n## Source Selection\nold https://blog.example/a\n\n## Other\nkeep me\n"
+    findings = [Finding(url="https://blog.example/a", title="Blog A")]
+    out = _apply_ranking(doc, findings)
+    assert "Popularity evidence." in out                # methodology note
+    assert "Reported / unranked" in out                 # split presentation
+    assert "no public engagement metric" in out         # blog honestly marked, no fabrication
+    assert "## Other\nkeep me" in out                   # other sections untouched
+    assert _apply_ranking(doc, []) == doc               # no findings → unchanged
+    assert _apply_ranking("# R\n\n## Intro\nx\n", findings) == "# R\n\n## Intro\nx\n"  # no target
+
+
+def test_section_reducer_demotes_missing_anchor_no_conflict_marker() -> None:
+    """The throughput fix lands findings whose PATCH_TARGET heading isn't in the doc;
+    reduce_patches would emit '<!-- conflict -->' markers (live: 13 in one phase). The
+    reducer demotes a missing-anchor insert to a clean append — no markers leak in."""
+    from agentkit.types import ChatResult
+    from studio import tools
+    from studio.runner import _make_section_reducer
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://real.example|"] = ("agents loop until done", 20)
+
+    class _Empty:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(text="no patches", total_tokens=1)
+
+    seed = "# Doc\n\n## Intro\nbody"
+    draft = (
+        "RESEARCH_FINDING:\nARTICLE_TITLE: R\nURL: https://real.example\n"
+        "PATCH_TARGET: ## Nonexistent Section\nWHY: it matters.\n"
+        "QUOTE: agents loop until done\n"
+    )
+    try:
+        text, _ = _make_section_reducer(_Empty(), seed, [])([draft])
+        assert "conflict" not in text.lower()        # no conflict marker leaked
+        assert "real.example" in text                # finding appended cleanly
+        assert "## Intro\nbody" in text              # seed intact
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_quote_in_cache_substring_and_whitespace() -> None:
+    """Lever 1 guard: a verbatim substring of a cached fetched page is grounded
+    (whitespace differences from markdown re-wrap still match); an absent quote and
+    a too-short quote are not grounded."""
+    from studio import tools
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://a|"] = ("Agents loop until a goal is met,\nthen stop.", 40)
+    try:
+        assert tools._quote_in_cache("Agents loop until a goal is met, then stop.")
+        assert tools._quote_in_cache("loop until a goal is met")
+        assert not tools._quote_in_cache("this sentence is nowhere on the page")
+        assert not tools._quote_in_cache("tiny")          # < _MIN_QUOTE_CHARS → no signal
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_quote_in_cache_fuzzy_edge_words() -> None:
+    """Fuzzy match: a quote with a dropped/added word at the edges still verifies (a
+    >=70% contiguous verbatim run proves the page was read), but a pure paraphrase with
+    no long verbatim run does not. This is why Lever-2 verbatim quotes can survive merge
+    despite the model's imperfect reconstruction."""
+    from studio import tools
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://p|"] = (
+        "Rather than personally inspecting what the agents produce, we make them better.", 80
+    )
+    try:
+        # extra leading word + dropped trailing word — core run still verbatim
+        assert tools._quote_in_cache(
+            "So rather than personally inspecting what the agents produce"
+        )
+        # pure paraphrase, no long verbatim run → not verified
+        assert not tools._quote_in_cache(
+            "instead of reviewing agent output ourselves we improve the agents"
+        )
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_drops_unfetched_url() -> None:
+    """Lever 1 (URL is the grounding oracle): with the fetch cache populated, a finding
+    whose URL was never fetched is dropped as fabricated; a finding whose URL IS in the
+    cache is kept, its CLAIM woven, and its verbatim QUOTE included when the quote really
+    appears on the fetched page."""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://real.example|"] = (
+        "The real article says agents self-improve over runs.", 60
+    )
+    real = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Real\nURL: https://real.example\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: Agents improve.\n"
+        "QUOTE: agents self-improve over runs\n"
+    )
+    fake = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Fake\nURL: https://fake.example\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: Made up.\n"
+        "QUOTE: this text is nowhere in any fetched page\n"
+    )
+    try:
+        patches = _research_findings_to_patches(real + fake)
+        assert len(patches) == 1                              # fake URL (unfetched) dropped
+        assert "real.example" in patches[0].content
+        assert "Agents improve" in patches[0].content         # CLAIM woven (Lever 2)
+        assert "agents self-improve over runs" in patches[0].content  # verbatim quote woven
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_keeps_fetched_url_omits_unverifiable_quote() -> None:
+    """Lever 1: a fetched URL with an imperfectly-reconstructed QUOTE is KEPT (URL is
+    the oracle, not the quote — the live Martin Fowler regression where a 1-word
+    mismatch dropped a real source), but the verbatim quote clause is omitted because
+    that exact text is not on the page."""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://fowler.example|"] = (
+        "The human in the loop must verify the output and understand the change.", 70
+    )
+    finding = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Fowler\nURL: https://fowler.example\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: Humans verify agent output.\n"
+        "QUOTE: the human in the loop needs to verify what the AI is doing\n"  # paraphrased
+    )
+    try:
+        patches = _research_findings_to_patches(finding)
+        assert len(patches) == 1                              # kept on URL grounding
+        assert "fowler.example" in patches[0].content
+        assert "Humans verify agent output" in patches[0].content
+        assert "The source states" not in patches[0].content  # unverifiable quote omitted
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_prefetch_url_rejects_non_http_and_hits_cache() -> None:
+    """Fetch-density helper: a non-http URL is never fetched; a URL already cached
+    returns True with NO network call (so prefetch is test-safe when pre-cached)."""
+    from studio import tools
+    tools._fetch_cache.clear()
+    try:
+        assert tools.prefetch_url("(none)") is False
+        assert tools.prefetch_url("") is False
+        tools._fetch_cache["https://cached.example|"] = ("page text", 9)
+        assert tools.prefetch_url("https://cached.example") is True   # cache hit, no net
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_prefetch_cited_extracts_dedups_and_caps() -> None:
+    """The reducer prefetch step extracts cited URLs from drafts, dedups them, and is
+    bounded by the limit. No-op when the cache is empty (nothing to ground → offline)."""
+    from studio import tools
+    from studio.runner import _prefetch_cited
+    tools._fetch_cache.clear()
+    drafts = ["RESEARCH_FINDING:\nURL: https://x.example\nURL: https://y.example\n"]
+    assert _prefetch_cited(drafts) == 0                    # empty cache → no-op (offline)
+    # pre-cache the URLs so prefetch is a cache-hit (no network), then count
+    for u in ("https://x.example", "https://y.example", "https://z.example"):
+        tools._fetch_cache[f"{u}|"] = ("p", 1)
+    drafts = [
+        "RESEARCH_FINDING:\nURL: https://x.example\nURL: https://y.example\n",
+        "RESEARCH_FINDING:\nURL: https://z.example\nURL: https://x.example\n",  # dup x
+    ]
+    try:
+        assert _prefetch_cited(drafts, limit=2) == 2       # 3 unique, capped at 2
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_parses_bare_finding_without_heading() -> None:
+    """Parse mismatch fix: the executor emits a BARE 'RESEARCH_FINDING:' (no '##'),
+    which the old '##'-required regex never matched — so the deterministic patch-floor
+    silently produced zero patches (the load-bearing live no-op). Both bare and headed
+    forms must parse."""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://x.example/p|"] = ("a sentence that is on the page here", 30)
+    bare = (
+        "Let me emit the findings.\n\nRESEARCH_FINDING:\nARTICLE_TITLE: P\n"
+        "URL: https://x.example/p\nPATCH_TARGET: ## Sources\nCLAIM: A point.\n"
+        "QUOTE: a sentence that is on the page here\n"
+    )
+    try:
+        patches = _research_findings_to_patches(bare)
+        assert len(patches) == 1                       # bare heading now parses
+        assert "x.example/p" in patches[0].content
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_keeps_on_verified_quote_despite_url_miss() -> None:
+    """Lever 1 dual oracle: a finding whose URL is NOT in the cache is still KEPT when
+    its verbatim QUOTE appears on a fetched page — a verified quote proves the page was
+    read. (The live regression: both probe findings had verified quotes but were dropped
+    on brittle URL exact-match; either grounding signal must suffice.)"""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://realpage.example/x|"] = (
+        "Ralph is a technique. In its purest form, Ralph is a Bash loop.", 60
+    )
+    finding = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: Ralph\nURL: https://elsewhere.example/y\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: Ralph is a bash loop technique.\n"
+        "QUOTE: Ralph is a technique. In its purest form, Ralph is a Bash loop.\n"
+    )
+    try:
+        patches = _research_findings_to_patches(finding)
+        assert len(patches) == 1                              # kept on verified quote alone
+        # the verbatim source excerpt is pasted as the evidence (copy-paste, Lever 2)
+        assert '"Ralph is a technique. In its purest form, Ralph is a Bash loop."' in patches[0].content
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_findings_to_patches_skips_quote_check_when_cache_empty() -> None:
+    """Lever 1 is conservative: with no fetch cache (offline/test), the quote check
+    is skipped — it can only remove a PROVEN fabrication, never block the additive
+    path entirely."""
+    from studio import tools
+    from studio.runner import _research_findings_to_patches
+    tools._fetch_cache.clear()
+    finding = (
+        "## RESEARCH_FINDING\nARTICLE_TITLE: T\nURL: https://x.example\n"
+        "PATCH_TARGET: ## Sources\nCLAIM: A claim.\nQUOTE: some quote text here\n"
+    )
+    patches = _research_findings_to_patches(finding)
+    assert len(patches) == 1
+    assert "x.example" in patches[0].content
+
+
+def test_executor_prompt_requires_copied_quote_and_why() -> None:
+    """Lever 1/2: the executor schema demands a COPY-PASTED verbatim QUOTE (the
+    evidence) + WHY (relevance) per source, and explicitly forbids paraphrase — the
+    rephrased CLAIM was dropped because a model paraphrase can fabricate."""
+    from studio.runner import _build_executor_prompt
+    p = _build_executor_prompt("find popular articles", "# Doc\n## Sources\nx",
+                               "- [## Sources] missing url")
+    assert "QUOTE:" in p and "verbatim" in p.lower()
+    assert "COPY" in p and "WHY:" in p
+    assert "CLAIM:" not in p                              # rephrase field removed
+    assert "PASTE its words" in p                         # copy-paste, not restate
 
 
 def test_strip_preamble_removes_reducer_commentary() -> None:
@@ -244,6 +528,18 @@ def test_strip_preamble_noop_on_clean_or_headingless() -> None:
     from studio.runner import _strip_preamble
     assert _strip_preamble("# Title\n\nbody") == "# Title\n\nbody"   # already clean
     assert _strip_preamble("prose, no heading") == "prose, no heading"  # never destroy
+
+
+def test_strip_preamble_removes_inherited_conflict_markers() -> None:
+    """Inherited '<!-- conflict(...): anchor not found -->' markers (frozen into a seed by an
+    earlier version, before anchor-demotion) must be sanitized at every artifact boundary; the
+    content beneath each marker is kept, only the noise comment is removed."""
+    from studio.runner import _strip_preamble
+    poisoned = ("# Doc\n\nA finding sentence (https://x.example).\n"
+                "<!-- conflict(finding): anchor not found -->\n\nNext finding.\n")
+    clean = _strip_preamble(poisoned)
+    assert "conflict" not in clean
+    assert "A finding sentence" in clean and "Next finding." in clean
 
 
 class _FakeEmb:
@@ -327,6 +623,59 @@ def test_executor_prompt_frames_research_not_planning() -> None:
     assert "planning hub" not in p                       # the bug framing is gone
 
 
+def test_ends_cleanly_authoritative_truncation_signal() -> None:
+    """P0: the deterministic truncation signal — a complete sentence or a URL-ending
+    reference line is clean; a mid-word cut or empty text is not. This is what the miner
+    trusts instead of inferring truncation from a window-excerpt boundary (the W3 fix)."""
+    from studio.task_runs import _ends_cleanly
+    assert _ends_cleanly("A complete sentence.")
+    assert _ends_cleanly("Body.\n\n- Author. 'Title.' https://x.example/p")  # URL-ending ref
+    assert _ends_cleanly("ends with a paren)")
+    assert not _ends_cleanly("designing loops that prom")   # mid-word (the W3 case)
+    assert not _ends_cleanly("   ")                         # empty
+
+
+def test_verified_urls_in_cache_counts_search_and_fetch() -> None:
+    """P0/W5 fix: a cited URL is verified if it is in a SEARCH-result list OR a
+    'fetch:{url}:{selector}' key (the fetched page). The fetch entries were previously
+    ignored, so a fetched-but-not-searched citation was wrongly flagged unverified."""
+    from studio.task_runs import verified_urls_in_cache
+    cache = {
+        "v2|searxng:q": [{"title": "t", "url": "https://searched.example"}],
+        "fetch:https://fetched.example:None": {"content": "..."},
+        "fetch:https://other.example:None": {"content": "..."},
+    }
+    text = ("see https://searched.example and https://fetched.example. "
+            "but https://uncached.example is not real")
+    out = verified_urls_in_cache(cache, text)
+    assert "https://searched.example" in out      # via search list
+    assert "https://fetched.example" in out       # via fetch entry (the W5 fix)
+    assert "https://uncached.example" not in out   # cited but never cached → unverified
+    assert "https://other.example" not in out      # cached but not cited in text
+
+
+def test_miner_prompt_has_completeness_fact_and_full_url_list() -> None:
+    """P0: the miner prompt carries the deterministic completeness fact (so it cannot
+    hallucinate truncation from a window edge) and ALL verified URLs, not just the first 20
+    (the cap that hid real citations and produced the W5 false positive)."""
+    from agentkit.types import ChatResult
+    from studio.task_runs import mine_weaknesses_from_outputs
+    cap: dict = {}
+
+    class _C:
+        def chat(self, messages, tools=None) -> ChatResult:
+            cap["p"] = messages[-1]["content"]
+            return ChatResult(text="[]", total_tokens=1)
+
+    urls = [f"https://real.example/{i}" for i in range(30)]   # > the old cap of 20
+    mine_weaknesses_from_outputs(
+        {"s1": "x"}, "A complete report. The end.", "task", _C(), verified_urls=urls,
+    )
+    p = cap["p"]
+    assert "ends CLEANLY" in p and "do not flag truncation" in p   # completeness fact present
+    assert "https://real.example/25" in p                          # 26th URL shown → cap > 20
+
+
 def test_miner_marks_cached_urls_verified() -> None:
     """Cache-as-oracle (§11.10): a URL in the fetch cache is real, so the miner is
     told NOT to flag it as unverified/fabricated."""
@@ -373,6 +722,120 @@ def test_no_hill_climb_keeps_auto_topology(fake_client_factory) -> None:
     tops = {s["topology"] for s in topo.steps}
     # "compare redis and postgres" → MESH; not forced to STAR.
     assert "mesh" in tops, tops
+
+
+def test_task_hash_invariant_to_attached_goal(
+    fake_client_factory, tmp_path, monkeypatch
+) -> None:
+    """Attaching a goal/constraints must NOT change a task's hill-climb identity.
+
+    The goal block is prepended into `requirement` for steering, but task_hash is
+    computed from the BASE requirement — so a goal-augmented run records under the
+    SAME task_hash as a bare run, preserving artifact carry-forward. Regression guard
+    for the bug where attaching a goal forked the lineage → cold-start v1, score 0.00.
+    """
+    import sqlite3
+    from types import SimpleNamespace
+
+    from studio.task_runs import task_hash
+
+    # Isolate the run DB + workspace under tmp (both derive from this env root).
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    base = "1. compare redis and postgres 2. write a recommendation"
+
+    def _run_and_get_recorded_hash(attach_goal: bool) -> str:
+        session = _make_session()
+        if attach_goal:
+            session.goal = SimpleNamespace(
+                end_state="produce a sourced recommendation",
+                constraints=["cite sources", "be concise"],
+            )
+        runner = Runner(
+            session, lambda _e: None,
+            client_factory=fake_client_factory, embedder=None,
+        )
+        runner.run(base)
+        con = sqlite3.connect(tmp_path / "task_runs.db")
+        try:
+            row = con.execute(
+                "select task_hash from task_runs order by rowid desc limit 1"
+            ).fetchone()
+        finally:
+            con.close()
+        assert row is not None, "run did not record a task_runs row"
+        return row[0]
+
+    h_bare = _run_and_get_recorded_hash(attach_goal=False)
+    h_goal = _run_and_get_recorded_hash(attach_goal=True)
+    assert h_bare == h_goal == task_hash(base), (h_bare, h_goal, task_hash(base))
+
+
+def test_rubric_template_steers_generation(fake_client_factory) -> None:
+    """A configured rubric TEMPLATE is injected into the requirement the planner sees,
+    so the report is generated toward those sections (DESIGN §11.6) — not only scored
+    against them after the fact. With no rubric_config the requirement is untouched, so
+    report headings are NOT forced onto non-research tasks (the no-compromise constraint).
+    """
+
+    def _plan_task(template: list[str] | None) -> str:
+        events: list[StudioEvent] = []
+        session = _make_session()
+        if template is not None:
+            session.rubric_config = {"weights": None, "template": template}
+        runner = Runner(
+            session, events.append, client_factory=fake_client_factory, embedder=None
+        )
+        runner.run("compare redis and postgres")
+        return [e for e in events if e.EVENT_TYPE == "plan"][0].task
+
+    with_tpl = _plan_task(["Executive Summary", "Methodology", "Conclusion"])
+    without = _plan_task(None)
+    assert "Executive Summary" in with_tpl and "Methodology" in with_tpl, with_tpl
+    assert "Executive Summary" not in without, without  # untouched when unconfigured
+
+
+def test_accept_epoch_keep_discard_gate() -> None:
+    """Phase-1 gate (DESIGN §11.5): keep an epoch ONLY if strictly preferred over the
+    prior. Closes the open-loop accept (the old length-only ratchet would write any
+    non-shorter rewrite). Never reads the noisy absolute score — asks a label-free
+    judge new-vs-prior, so a changing/gameable scorer can't drive acceptance.
+    """
+    from studio.epoch_gate import accept_epoch
+
+    better = lambda _n, _p: 1   # noqa: E731
+    worse = lambda _n, _p: -1   # noqa: E731
+    tie = lambda _n, _p: 0      # noqa: E731
+
+    assert accept_epoch("new report", "", worse) is True       # cold start → accept
+    assert accept_epoch("", "prior report", better) is False   # empty epoch → keep prior
+    assert accept_epoch("new", "prior", better) is True        # preferred → keep new
+    assert accept_epoch("new", "prior", worse) is False        # worse → revert to prior
+    assert accept_epoch("new", "prior", tie) is False          # tie → keep prior (strict)
+
+
+def test_accept_epoch_with_real_reports() -> None:
+    """Real-report input (DESIGN §11.5): the gate must KEEP the 58KB good report over
+    the 4.5KB thin one, and revert a thin epoch back to a good prior.
+
+    Uses a DETERMINISTIC quality proxy (verified-source density) so CI stays offline;
+    the live LLM judge on these same fixtures is exercised manually (it exposed both
+    the parser bug and the no-rubric hedging — see DESIGN §11.5 findings).
+    """
+    import pathlib
+
+    from studio.epoch_gate import accept_epoch
+
+    fx = pathlib.Path(__file__).parent / "fixtures"
+    good = (fx / "report_good.md").read_text()
+    thin = (fx / "report_thin.md").read_text()
+
+    def _sig(s: str) -> int:  # verified-source density as a stand-in for the LLM judge
+        return s.lower().count("verified") + s.lower().count("source:") + s.count("http")
+
+    prefer = lambda _n, _p: _sig(_n) - _sig(_p)   # noqa: E731
+    assert _sig(good) > _sig(thin)
+    assert accept_epoch(good, thin, prefer) is True    # good epoch vs thin prior → keep new
+    assert accept_epoch(thin, good, prefer) is False   # thin epoch vs good prior → revert
 
 
 def test_tool_loop_emits_tool_events(fake_client) -> None:

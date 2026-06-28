@@ -8,6 +8,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useRunStore } from "../../store/runStore";
+import type { RubricConfig } from "../../api/types";
 import "./config.css";
 
 interface LoopConfigPanelProps {
@@ -15,7 +16,7 @@ interface LoopConfigPanelProps {
   currentTask?: string;
 }
 
-type Tab = "goal" | "scheduler" | "chain" | "hill_climb";
+type Tab = "goal" | "scheduler" | "chain" | "hill_climb" | "rubric";
 
 interface GoalForm {
   end_state: string;
@@ -90,6 +91,7 @@ async function _postGoal(
 export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanelProps) {
   const setConfiguredGoal = useRunStore((s) => s.setConfiguredGoal);
   const setConfiguredHillClimb = useRunStore((s) => s.setConfiguredHillClimb);
+  const setConfiguredRubric = useRunStore((s) => s.setConfiguredRubric);
   const setSchedulerTriggers = useRunStore((s) => s.setSchedulerTriggers);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [tab, setTab] = useState<Tab>("goal");
@@ -119,6 +121,12 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const [hcStatus, setHcStatus] = useState<string | null>(null);
   const [schedStatus, setSchedStatus] = useState<string | null>(null);
 
+  // ── Rubric state (criterion weights + deliverable template) ──────────────
+  const [rubricWeights, setRubricWeights] = useState<Record<string, number>>({});
+  const [rubricTemplate, setRubricTemplate] = useState<string[]>([]);
+  const [rubricLoaded, setRubricLoaded] = useState(false);
+  const [rubricStatus, setRubricStatus] = useState<string | null>(null);
+
   const open = () => {
     // Pre-fill end_state from the RunBar task if it's a sensible non-error string
     if (currentTask && !goal.end_state && !currentTask.startsWith("✗")) {
@@ -141,6 +149,19 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
       .then((d) => setTriggers(d.triggers ?? []))
       .catch(() => setTriggers([]));
   }, [tab]);
+
+  // Seed the rubric panel from the same defaults the backend scorer uses, once.
+  useEffect(() => {
+    if (tab !== "rubric" || rubricLoaded) return;
+    fetch("/api/rubric/defaults")
+      .then((r) => r.json())
+      .then((d) => {
+        setRubricWeights(d.weights ?? {});
+        setRubricTemplate(d.template ?? []);
+        setRubricLoaded(true);
+      })
+      .catch(() => setRubricStatus("✗ Could not load rubric defaults"));
+  }, [tab, rubricLoaded]);
 
   // Auto-apply goal when a session connects if the user had saved one locally
   useEffect(() => {
@@ -271,7 +292,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
 
           {/* Tab bar */}
           <div className="loop-config-tabs" role="tablist">
-            {(["goal", "scheduler", "chain", "hill_climb"] as Tab[]).map((t) => (
+            {(["goal", "scheduler", "chain", "hill_climb", "rubric"] as Tab[]).map((t) => (
               <button
                 key={t}
                 role="tab"
@@ -646,6 +667,121 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   }}
                 >
                   Apply hill climb config
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Rubric tab ── */}
+          {tab === "rubric" && (
+            <div className="loop-config-body">
+              <p className="loop-config-hint">
+                The <strong>rubric</strong> is the epoch keep/discard gate's scoring
+                standard (DESIGN §11.6) — deterministic and model-free. Tune the
+                per-criterion weights and edit the deliverable <strong>template</strong>;
+                the template both steers report generation and drives the{" "}
+                <code>structure</code> score.
+              </p>
+
+              <p className="lc-section-label">Criterion weights</p>
+              {Object.keys(rubricWeights).length === 0 ? (
+                <p className="loop-config-hint muted">Loading defaults…</p>
+              ) : (
+                Object.entries(rubricWeights).map(([k, v]) => (
+                  <div className="lc-field" key={k}>
+                    <label htmlFor={`lc-rw-${k}`}>
+                      {k.replace(/_/g, " ")}: <strong>{v.toFixed(2)}</strong>
+                    </label>
+                    <input
+                      id={`lc-rw-${k}`}
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={v}
+                      onChange={(e) =>
+                        setRubricWeights({ ...rubricWeights, [k]: Number(e.target.value) })
+                      }
+                    />
+                  </div>
+                ))
+              )}
+              <span className="lc-hint">
+                Weights are L1-normalized on apply — only their relative size matters.
+              </span>
+
+              <hr className="lc-divider" />
+              <p className="lc-section-label">Deliverable template (required sections)</p>
+              {rubricTemplate.map((section, i) => (
+                <div className="lc-row" key={i}>
+                  <div className="lc-field" style={{ flex: 1 }}>
+                    <input
+                      className="mono"
+                      value={section}
+                      placeholder="Section heading"
+                      onChange={(e) =>
+                        setRubricTemplate(
+                          rubricTemplate.map((s, j) => (j === i ? e.target.value : s)),
+                        )
+                      }
+                    />
+                  </div>
+                  <button
+                    className="btn"
+                    aria-label={`Remove section ${section}`}
+                    onClick={() =>
+                      setRubricTemplate(rubricTemplate.filter((_, j) => j !== i))
+                    }
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              <button
+                className="btn"
+                onClick={() => setRubricTemplate([...rubricTemplate, ""])}
+              >
+                + Add section
+              </button>
+
+              {rubricStatus && (
+                <p className="lc-status mono" data-ok={rubricStatus.startsWith("✓")}>
+                  {rubricStatus}
+                </p>
+              )}
+              {!sessionId && (
+                <p className="loop-config-hint">
+                  Saved locally now — connect a session, then re-apply so the rubric
+                  reaches the live run.
+                </p>
+              )}
+              <div className="lc-actions">
+                <button
+                  className="btn btn-primary"
+                  onClick={async () => {
+                    const cfg: RubricConfig = {
+                      weights: rubricWeights,
+                      template: rubricTemplate.map((s) => s.trim()).filter(Boolean),
+                    };
+                    setConfiguredRubric(cfg);
+                    setRubricStatus("✓ Rubric saved — will apply on next run");
+                    if (sessionId) {
+                      try {
+                        const res = await fetch(`/api/session/${sessionId}/rubric`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify(cfg),
+                        });
+                        setRubricStatus(
+                          res.ok ? "✓ Rubric applied to session" : "✗ Failed to apply",
+                        );
+                      } catch {
+                        setRubricStatus("✗ Network error");
+                      }
+                    }
+                  }}
+                >
+                  Apply rubric
                 </button>
               </div>
             </div>

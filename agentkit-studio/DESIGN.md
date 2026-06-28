@@ -1419,3 +1419,229 @@ with urllib.request.urlopen(f"{B}/run/{sid}?requirement={q}", timeout=1800) as r
     for line in r:            # <- drain EVERY line or the run won't record
         pass
 ```
+
+---
+
+## §11.5 Loop-Engineering Closure — Decision Log (2026-06-28)
+
+Context: an evaluation of Studio against the loop-engineering literature found the
+self-improvement path was an **open loop** — it accepted every epoch's artifact as long
+as it was not *shorter* (a length-only ratchet), with no quality keep/discard. The
+genuine optimizer (`agentkit.evolve.optimize_text` / `loop.hill_climb`) was **not wired
+in**; Studio reimplemented a thinner version. Decisions below, each grounded in a test.
+
+### D1 — task_hash identity is the BASE requirement (goal-invariant)
+`runner._run_inner` prepended the goal/constraints block into the requirement BEFORE
+hashing, so attaching a goal forked the hill-climb lineage → cold-start v1, no artifact
+carry-forward, weakness-score `0/N = 0.00`. **Decision:** hash `_base_requirement`
+captured before the goal block (and before the per-iteration prefix). Verified: the good
+lineage `find the most popular…report` already hashes to `4ca9b03811b7`; a goal-attached
+run now rejoins it. Guard: `tests/test_runner.py::test_task_hash_invariant_to_attached_goal`.
+
+### D2 — Epoch keep/discard gate (close the open loop)
+**Decision:** new module `studio/epoch_gate.py` (`accept_epoch`, `make_preference`). At
+the epoch boundary the new artifact is KEPT only if a **label-free judge strictly prefers
+it over the seed** (prior best); otherwise the prior is restored. Worst case = prior good
+report retained → quality cannot regress. The gate never reads the absolute score (which
+is noisy and has changed across versions); it reuses `agentkit.evolve.self_preference`
+(RHO pairwise preference). Placed in its own module to avoid growing `runner.py` (see D5).
+Guards: `test_accept_epoch_keep_discard_gate`, `test_accept_epoch_with_real_reports`.
+
+### D3 — Hardened `self_preference` parsing (agentkit modified)
+**Real-report test finding:** with the strict `{"winner":…}` JSON parser, the judge tied
+a 58 KB good report with a 4.5 KB stub in BOTH directions — because haiku/sonnet answer in
+markdown prose ("**Artifact A is significantly better**") and `json.loads` failed →
+silent TIE. **Decision:** `agentkit/evolve/core.py::_extract_winner` resolves a verdict via
+trailing `VERDICT:` line → embedded JSON → prose → TIE, and `_PREFERENCE_SYSTEM` now asks
+for a trailing `VERDICT:` line. The judge's *judgment* was correct all along; only
+extraction was lossy.
+
+### D4 — OPEN: LLM pairwise preference is an unreliable gate; use a STRUCTURED rubric
+**Findings (live, real 58 KB good vs 4.5 KB thin report fixtures):**
+- haiku, strict-JSON parser → TIE (D3 parser bug: judge said "A better" in prose).
+- haiku, hardened parser + rubric → TIE (model *hedges*: "neither acceptable").
+- **sonnet, hardened parser + rubric → TIE.**
+
+Conclusion: asking an LLM "which full report is better?" is **not a reliable keep/discard
+signal even on a strong model with a rubric** — it hedges to tie. This matches the
+literature ("LLM-as-judge can be gamed or collude; put a DETERMINISTIC check in wherever
+one exists"). A deterministic proxy (verified-source density) *does* separate the two
+cleanly (`test_accept_epoch_with_real_reports`).
+
+**Decision/direction:** the scoring standard and the gate's `prefer` fn should be a
+**structured rubric**, deterministic where possible:
+  * deterministic: # of VERIFIED source URLs (cross-checked vs web cache), citation
+    density, methodology section present, structure/section completeness, length band;
+  * LLM only PER-CRITERION (not "which is better overall"), and ask for the verdict
+    token FIRST so a max_tokens cap can't truncate it.
+This same rubric defines the research-report **template** the loop targets. `self_preference`
+stays available but is NOT the default gate judge for large artifacts. (Supersedes the
+earlier "self_preference is the gate" plan — disproven by the three TIE results above.)
+The `studio/epoch_gate.accept_epoch` machinery is unchanged; only the injected `prefer`
+implementation changes (`make_preference` → a rubric scorer diff).
+
+---
+
+## §11.6 Research-report rubric — scoring standard + deliverable template (2026-06-28)
+
+Resolves §11.5 D4. The keep/discard gate's default judge is now a **deterministic
+research-report rubric** (`studio/rubric.py`), not an LLM preference. Synthesized from web
+research on report-quality standards:
+- DEER (arXiv:2512.17776) & DeepResearch-Bench (arXiv:2506.11763): deep-research report
+  quality = completeness / correctness / helpfulness, scored per concrete criterion.
+- CRAAP test (Currency, Relevance, Authority, Accuracy, Purpose) — source credibility.
+- Academic report rubrics (sourcing, evidence depth, methodology, structure).
+
+### Criteria (default weights, GUI-tunable)
+| Criterion | Weight | Signal (deterministic) |
+| --- | --- | --- |
+| sourcing | 0.25 | # distinct cited source URLs (target 8) |
+| verification | 0.25 | # URLs confirmed real via web cache (`verified_urls_in_cache`) |
+| evidence_depth | 0.20 | direct quotes / blockquotes density |
+| structure | 0.15 | fraction of **template** sections present (else summary+conclusion+headings) |
+| methodology | 0.15 | methodology/scope present + non-thin body (word floor) |
+
+`rubric_score(text, verified_urls, weights, required_sections) -> [0,1]`, weighted sum;
+`resolve_weights` L1-normalizes a partial GUI override and drops unknown keys.
+
+### Verified result (the point)
+On the real fixtures the live LLM judge tied (haiku & sonnet), the rubric scores
+**good = 0.925 vs thin = 0.4531** — a clean, reproducible separation. Guarded by
+`tests/test_rubric.py` (5 tests) + `test_accept_epoch_with_real_reports`.
+
+### Rubric is GUI-input + attached to a deliverable template
+- `Session.rubric_config = {"weights": {criterion: float}, "template": [section, ...]}`.
+- API: `POST /session/{id}/rubric` (set), `GET /rubric/defaults` (seed the panel).
+- The **template** (`DEFAULT_TEMPLATE`: Executive Summary, Key Findings, Evidence and
+  Analysis, Source References, Methodology, Conclusion) is dual-use: it defines the
+  deliverable's expected sections AND drives the `structure` criterion (coverage).
+- The runner gate reads `session.rubric_config` → `make_rubric_preference(verified_urls,
+  weights=…, required_sections=…)`. Falls back to defaults when unset.
+
+### Frontend rubric panel — BUILT (2026-06-28)
+A "rubric" tab in the Loop Config dialog (`LoopConfigPanel.tsx`):
+- Seeds from `GET /rubric/defaults`, renders a slider per criterion and an
+  editable template section list, POSTs `{weights, template}` to
+  `POST /session/{id}/rubric`. Stores locally via `runStore.configuredRubric`
+  (preserved across `beginRun`, mirrors goal/hill-climb).
+- **No hardcoded criterion keys** — the panel iterates whatever the defaults
+  endpoint returns (`Object.entries(rubricWeights)`), so a new backend criterion
+  needs zero frontend change. Weights normalized server-side (`resolve_weights`).
+- Typechecks clean (only pre-existing `TS2882` CSS side-effect import warnings).
+
+### Template → GENERATION wiring — BUILT (2026-06-28)
+The deliverable template now STEERS generation, not just scoring. In
+`runner._run_inner`, when `session.rubric_config["template"]` is set, the section
+list is appended to `requirement` ("Structure the deliverable with these sections…")
+**after** `_base_requirement` is captured — so it never changes `task_hash`. Injected
+**only when explicitly configured**: defaulting to `DEFAULT_TEMPLATE` would force
+report headings (Executive Summary, Methodology…) onto non-research tasks and
+compromise their generation quality (the no-compromise constraint). Guarded by
+`test_rubric_template_steers_generation` (asserts sections reach the `plan` event's
+task when set, absent when unset). 51 backend tests pass.
+
+### Structure matching — concept-aware (FIXED 2026-06-28)
+`structure` now counts a required section as covered if the exact phrase appears OR a
+heading shares a content word with it (`_content_tokens`). WHY: the DB report skeleton
+(`studio/templates.py`, a real good report) scored only **0.5** against the default rubric
+template under exact-substring matching — its headings used real-world synonyms ("Verified
+Sources" for "Source References", "Core Finding" for "Key Findings"), so a genuinely good
+report was penalised for vocabulary, not for a missing section. After the fix the same
+skeleton scores **structure = 1.0**; good fixture stays 1.0 and thin stays 0.478 (its
+structure rises to ~0.83 via loose token overlap, but structure is only 0.15 weight and
+sourcing+verification+evidence = 0.70 correctly tank the thin total — separation intact).
+
+### Two distinct "template" mechanisms (do not confuse them)
+There are TWO templates with overlapping purpose; the structure fix above reconciles them:
+| | **Rubric template** (`rubric.DEFAULT_TEMPLATE` / `rubric_config.template`) | **DB skeleton** (`studio/templates.py`, table `report_templates`) |
+| --- | --- | --- |
+| Shape | flat list of ~6 canonical section NAMES | full heading TREE (40+ nested `#`/`##`/`###`) extracted from a real report |
+| Source | authored / GUI-edited (the agreed deliverable shape) | learned — `extract_skeleton(result)` saved when `_score ≥ 0.6` (runner:2073) |
+| Keyed by | nothing (one set per session) | requirement embedding (cosine match, `find_template`, threshold 0.6) |
+| Used for | `structure` scoring + generation steering (§11.6 #2) | seed the FIRST document's structure (runner:478), per-requirement |
+
+Both now steer report STRUCTURE, so they are competing signals: the skeleton says "Verified
+Sources", the rubric injection says "Source References". Concept-aware `structure` matching is
+what lets a report generated from the (good) DB skeleton still score 1.0 against the rubric
+template — they no longer have to share exact heading vocabulary, only the concepts. Empirical
+check: the one stored skeleton went 0.5 → 1.0 against `DEFAULT_TEMPLATE` after the fix.
+
+### Windowed-judge false "missing section" — moving-window miner + section filter (2026-06-28)
+SYMPTOM: V36 of the loop-engineering report (`result (12).md`, 64,389 chars) recorded
+weaknesses "Required section 'Methodology'/'Conclusion' is missing" although both exist
+(`## Methodology` @ char 54,764, `## Conclusion` @ 55,929). ROOT CAUSE: the LLM scorer
+(`score_result`, 20K window) and miner (`mine_weaknesses_from_outputs`, old 8K-head + 4K-tail)
+never saw the document's MIDDLE/tail, so they reported present sections as missing — the same
+window-blindness class as the old "verified URLs flagged as fabricated". The #2 template
+injection amplified it by naming the exact sections to hunt for.
+
+FIX (two parts):
+1. **Moving-window miner** — the miner now sweeps the FULL document in overlapping ~12K
+   windows (step 10K, ≤8 windows), mining each and union-deduping. For the 64K report that's
+   7 windows; `## Methodology`/`## Conclusion` land in window 5 (chars 50K–62K), previously
+   invisible. Small docs (≤12K) still take ONE call (no added cost). Sizing constants
+   `_MINE_WINDOW/_STEP/_MAX_WINDOWS/_MAX_WEAKNESSES` in `task_runs.py`.
+2. **Deterministic section filter** (`runner._run_inner`) — the scorer STILL windows at 20K
+   and its UNMET is fed to the miner as a seed, so the false claim echoes through even with the
+   moving window. After mining, any missing/absent-section weakness for a section that
+   `rubric.sections_present` (concept-aware, full text) confirms present is dropped.
+
+VERIFIED on the real report with a live haiku judge: the 4 false "missing section" weaknesses
+were dropped; 4 genuine ones remained (popularity ranking incomplete, thin synthesis, citation
+redundancy, indefensible "most popular"). `rubric_score` (full-text) = 1.0. Guards:
+`tests/test_miner_window.py` (3) + `test_sections_present_is_concept_aware_over_full_text`.
+
+RESIDUAL (follow-up): `score_result` itself still windows at 20K — its discarded SCORE is
+harmless, but its UNMET feedback pollutes the miner (the filter cleans the section part only).
+Candidate fix: give the scorer the same full-text section/truncation oracle, or moving-window it.
+
+### Semantic weakness dedup + why solved/total "regresses" (2026-06-28)
+OBSERVED: the loop-engineering task (`4ca9b03811b7`) recorded scores that oscillate while the
+artifact grows monotonically — v25 0.80 (38K chars) → v36 0.67 (64K chars). Same task, BIGGER
+and more complete document, LOWER score. This is NOT a quality regression: `_weakness_score =
+solved/total` over a ~5-item LLM-mined set measures issue churn between epochs, not absolute
+quality. With ~5 items, one extra unsolved weakness swings the score 0.13–0.20, so the metric
+jitters on miner noise. The deterministic `rubric_score` of v36 = 1.0.
+
+Two amplifiers, both fixed:
+1. **Duplicate weaknesses** — the miner surfaced the SAME popularity-ranking gap under two
+   section prefixes (`[## Source Selection…]` and `[## Key Findings]`); exact-string dedup kept
+   both → two unsolved items depress solved/total. Added **semantic dedup** in
+   `runner._run_inner` (cosine ≥ 0.85, the same threshold `_weakness_score` uses; keeps the
+   first). VERIFIED with BGE-M3: the two popularity weaknesses cos = 0.948 → collapse; the
+   distinct citation-redundancy weakness cos = 0.765 → kept separate.
+2. The moving-window miner finds MORE real tail weaknesses than the old head+tail, which can
+   push solved/total DOWN even as the document improves — the paradox of a count-based score:
+   better verification lowers it. This is the core argument for making `rubric_score` (not
+   solved/total) the recorded/convergence metric — see the decoupling gap below.
+
+### Rubric is now the recorded score (solved/total retired, 2026-06-28)
+RESOLVED the decoupling: `rubric_score` (deterministic, full-text) is now the score RECORDED
+(`task_runs.score`), the hill-climb delta/convergence signal, the template-save gate
+(`≥ 0.6`), AND the epoch keep/discard judge — one metric end to end, no more gate-vs-score
+disagreement. `_weakness_score` (solved/total) is retired from the main path: it punished
+thoroughness (more mined weaknesses → lower score even as the doc improved) and rewarded an
+empty doc (no weaknesses → 1.0). Computed in `runner._run_inner` AFTER the keep/discard gate
+so it scores the artifact actually kept, from the clean `_scored_text` (before any annotation).
+
+Weaknesses are still mined (moving-window) — they are the IMPROVEMENT SIGNAL that seeds the
+next run's constraints — but no longer determine the score. They are surfaced BELOW the report
+in the result view via `HillClimbEvent.weaknesses` (frontend `ResultWindow` renders them as a
+separate block); they are NEVER concatenated into `result_output`, so the deliverable document
+(saved / downloaded / recorded as `result_text` / next-run seed) stays clean.
+
+VERIFIED on `result (12).md` with live haiku + BGE-M3: recorded score = rubric **1.0** (was the
+noisy 0.67 solved/total); remaining weaknesses = 2 distinct real issues (popularity ranking,
+citation redundancy) after the duplicate pair collapsed via semantic dedup. 274 backend tests
+pass; frontend tsc clean.
+
+### D5 — Follow-up: `runner.py` is too large
+`runner.py` (~2.1k lines) should be decomposed (record/scoring block, seed/auto-improve
+block, reduce/writeback block → modules). Tracked, not yet done; D2 logic was deliberately
+placed in `studio/epoch_gate.py` rather than added inline to avoid making it worse.
+
+### Reuse vs. rebuild
+Reused as-is: `loop.goal.check_goal` (deterministic verifier), `loop.chain.LoopChain`
+(goal-gated driver), `evolve.self_preference` (D2 gate). Modified in agentkit: `self_preference`
+parsing (D3). Not yet wired (planned Phase 3): `optimize_text` to own the epoch loop +
+autonomous heartbeat, replacing Studio's hand-rolled single-epoch advance.

@@ -320,8 +320,44 @@ def evolve_prompt(
 _PREFERENCE_SYSTEM = (
     "You are comparing two AI agent artifacts for the SAME task. You have NO "
     "ground-truth label. Judge ONLY which is more correct, complete, and useful. "
-    'Respond ONLY with JSON: {"winner": "A" | "B" | "tie"}'
+    "Reason briefly if you must, then END your reply with a line containing EXACTLY "
+    "one of:  VERDICT: A  |  VERDICT: B  |  VERDICT: tie"
 )
+
+
+def _extract_winner(text: str) -> str:
+    """Extract A / B / TIE from a judge reply, robust to markdown/prose preambles.
+
+    Models reliably reason in prose despite a "JSON only" instruction, so a strict
+    ``json.loads`` silently collapsed every verdict to TIE — observed live when a 58KB
+    research report tied a 4KB stub because the judge answered "**Artifact A is
+    significantly better**" instead of ``{"winner":"A"}``. Resolution order: explicit
+    trailing ``VERDICT:`` line -> embedded JSON ``winner`` -> prose ("artifact A is
+    better/superior/...") -> TIE.
+    """
+    import re as _re
+
+    t = text or ""
+    m = _re.findall(r"VERDICT:\s*(A|B|tie)", t, _re.IGNORECASE)
+    if m:
+        v = m[-1].upper()
+        return "TIE" if v == "TIE" else v
+    try:
+        blob = t[t.index("{"): t.rindex("}") + 1] if "{" in t and "}" in t else t
+        w = str(json.loads(blob).get("winner", "")).upper()
+        if w in ("A", "B", "TIE"):
+            return w
+    except Exception:  # noqa: BLE001 - fall through to prose
+        pass
+    pa = _re.search(r"artifact\s+a\b[^.]{0,40}?\b(better|superior|stronger|wins|preferred)", t, _re.IGNORECASE)
+    pb = _re.search(r"artifact\s+b\b[^.]{0,40}?\b(better|superior|stronger|wins|preferred)", t, _re.IGNORECASE)
+    if pa and not pb:
+        return "A"
+    if pb and not pa:
+        return "B"
+    if pa and pb:
+        return "A" if pa.start() < pb.start() else "B"
+    return "TIE"
 
 
 def self_preference(
@@ -351,11 +387,7 @@ def self_preference(
         ]
         try:
             text = (getattr(client.chat(messages), "text", "") or "").strip()
-            if text.startswith("```"):
-                text = "\n".join(
-                    ln for ln in text.splitlines() if not ln.strip().startswith("```")
-                ).strip()
-            winner = str(json.loads(text).get("winner", "tie")).upper()
+            winner = _extract_winner(text)
         except Exception:  # noqa: BLE001 - inconclusive judgment is a tie
             winner = "TIE"
         if winner == "A":

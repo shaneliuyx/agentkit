@@ -608,6 +608,38 @@ def set_hill_climb(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"status": "ok", "hill_climb_config": session.hill_climb_config}
 
 
+@app.get("/rubric/defaults")
+def rubric_defaults() -> dict[str, Any]:
+    """Default rubric weights + deliverable template, so the GUI can seed the rubric
+    panel with the same values the scorer uses (DESIGN §11.6)."""
+    from studio.rubric import DEFAULT_TEMPLATE, DEFAULT_WEIGHTS
+
+    return {"weights": DEFAULT_WEIGHTS, "template": DEFAULT_TEMPLATE}
+
+
+@app.post("/session/{session_id}/rubric")
+def set_rubric(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Set the GUI rubric + deliverable template for a session (DESIGN §11.6).
+
+    Body: {"weights": {criterion: float}, "template": [section, ...]}. Both optional;
+    omitted falls back to studio.rubric defaults. The keep/discard gate scores each epoch
+    with this rubric, and the template defines the deliverable's expected sections.
+    """
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    from studio.rubric import resolve_weights
+
+    weights = body.get("weights")
+    template = body.get("template")
+    session.rubric_config = {
+        # Normalize now so a bad GUI payload can't break the gate mid-run.
+        "weights": resolve_weights(weights if isinstance(weights, dict) else None),
+        "template": [str(s) for s in template] if isinstance(template, list) else None,
+    }
+    return {"status": "ok", "rubric_config": session.rubric_config}
+
+
 @app.get("/task-runs/{task_hash_str}")
 def get_task_runs(task_hash_str: str) -> dict[str, Any]:
     """Return all recorded runs for a task hash (cross-session version history)."""
