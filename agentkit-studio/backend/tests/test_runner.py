@@ -1075,3 +1075,39 @@ def test_parse_findings_accepts_json_format() -> None:
 
     # a non-finding code fence must not become a finding
     assert _parse_findings("see ```python\nprint('hi')\n```") == []
+
+
+def test_plan_from_epics_dedups_duplicate_phases() -> None:
+    """The planner LLM sometimes emits the SAME phase twice under different ids (the
+    Pi/Craft run showed 'Craft…' and 'create a report' duplicated). _plan_from_epics
+    must collapse content-duplicates and rewire depends_on so the DAG has no dup phases."""
+    from studio.runner import _plan_from_epics
+
+    class _Client:
+        def chat(self, messages, tools=None):  # noqa: ANN001
+            class _R:
+                text = (
+                    'EPIC_PLAN:\n```json\n{"epics": ['
+                    '{"id":"epic-1","title":"Pi","description":"study pi","depends_on":[]},'
+                    '{"id":"epic-2","title":"Craft","description":"craft agent","depends_on":["epic-1"]},'
+                    '{"id":"epic-3","title":"Report","description":"create a report","depends_on":["epic-2"]},'
+                    '{"id":"epic-4","title":"Craft","description":"craft agent","depends_on":["epic-1"]},'
+                    '{"id":"epic-5","title":"Report","description":"create a report","depends_on":["epic-4"]}'
+                    ']}\n```'
+                )
+            return _R()
+
+    plan = _plan_from_epics("study pi, craft agent, create a report", _Client())
+    descs = [s.description for s in plan.steps]
+    assert descs.count("craft agent") == 1        # duplicate phase collapsed
+    assert descs.count("create a report") == 1
+    assert len(plan.steps) == 3                    # Pi, Craft, Report — no duplicates
+
+    # the kept Report phase's dep resolves to the kept Craft phase (not a dropped dup)
+    report = next(s for s in plan.steps if s.description == "create a report")
+    craft = next(s for s in plan.steps if s.description == "craft agent")
+    assert craft.id in report.depends_on
+    # no dependency points at a dropped duplicate id (epic-4 / epic-5)
+    kept_ids = {s.id for s in plan.steps}
+    for s in plan.steps:
+        assert all(d in kept_ids for d in s.depends_on)

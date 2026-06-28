@@ -114,7 +114,9 @@ def _build_planner_cot_prompt(
         "Step 1 — Understand the goal and the form of its deliverable.\n\n"
         "Step 2 — Identify 2–5 major work phases (epics).\n"
         "  Do not default to Research→Analysis→Writing unless those phases\n"
-        "  genuinely fit. Derive phase names from the goal itself.\n\n"
+        "  genuinely fit. Derive phase names from the goal itself.\n"
+        "  Each phase MUST be DISTINCT — never emit the same phase twice. A goal that\n"
+        "  lists several sub-tasks is ONE set of phases, not repeated per sub-task.\n\n"
         "Step 3 — For each epic enumerate 6–15 parallel branches.\n"
         "  Branches within an epic run in parallel — no inter-branch dependencies.\n"
         "  Each branch must be completable by one agent with available tools.\n\n"
@@ -158,20 +160,46 @@ def _plan_from_epics(
     if not epics:
         return plan(requirement)
 
-    epic_ids = {str(e.get("id")) for e in epics if e.get("id")}
+    # Content-dedup: the LLM sometimes emits the SAME phase twice under DIFFERENT ids
+    # (e.g. "Craft agent to develop agent" as epic-2 AND epic-4) — the id-set alone won't
+    # catch it, so each became a duplicate phase in the DAG. Keep the first epic per
+    # normalized title+description; remap a dropped id → the kept one so depends_on still
+    # resolves to a real sibling.
+    deduped: list = []
+    remap: dict[str, str] = {}
+    seen_key: dict[str, str] = {}
+    for e in epics:
+        if not e.get("id"):
+            continue
+        eid = str(e["id"])
+        key = " ".join(str(e.get("description") or e.get("title") or "").lower().split())
+        if key and key in seen_key:
+            remap[eid] = seen_key[key]      # duplicate → fold into the kept epic
+            continue
+        if key:
+            seen_key[key] = eid
+        deduped.append(e)
+
+    epic_ids = {str(e["id"]) for e in deduped}
+
+    def _resolve(dep: str) -> str:
+        return remap.get(dep, dep)
+
     steps = tuple(
         PlanStep(
             id=str(e["id"]),
             description=str(e.get("description") or e.get("title") or e["id"]),
-            # keep only deps that resolve to a sibling epic (no self/dangling deps)
+            # remap deps through dropped duplicates, then keep only resolved siblings
+            # (no self/dangling deps); dict.fromkeys de-dups deps after the remap.
             depends_on=tuple(
-                str(d) for d in e.get("depends_on", ())
-                if str(d) in epic_ids and str(d) != str(e["id"])
+                dict.fromkeys(
+                    _resolve(str(d)) for d in e.get("depends_on", ())
+                    if _resolve(str(d)) in epic_ids and _resolve(str(d)) != str(e["id"])
+                )
             ),
             topology=STAR,
         )
-        for e in epics
-        if e.get("id")
+        for e in deduped
     )
     if not steps:
         return plan(requirement)
