@@ -78,12 +78,17 @@
   font: inherit;
   font-family: var(--font-mono);
   font-size: var(--text-sm);
-  padding: 0 var(--space-3);
+  padding: var(--space-1) var(--space-3);
   background: var(--color-surface-2);
   color: var(--color-text-dim);
   border: none;
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out-expo);
+}
+
+.run-mode-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
 }
 
 .run-mode-btn[data-active="true"] {
@@ -99,10 +104,9 @@
 
 
 /* ── Loop Config modal ─────────────────────────────────────────────────── */
+/* layout-only: padding/font-size inherited from .btn-sm; white-space from .btn */
 .loop-config-btn {
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  white-space: nowrap;
 }
 
 .loop-config-dialog {
@@ -135,7 +139,10 @@
   border-bottom: 1px solid var(--color-border);
 }
 
+/* applied to the dialog's <h2>; margin reset cancels the UA heading margin so
+   the header bar stays visually identical. */
 .loop-config-title {
+  margin: 0;
   font-size: var(--text-sm);
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -143,18 +150,12 @@
   color: var(--color-text-dim);
 }
 
+/* layout-only: bg/border/padding/cursor inherited from .btn .btn-icon .btn-ghost */
 .loop-config-close {
-  background: none;
-  border: none;
-  cursor: pointer;
   color: var(--color-text-dim);
   font-size: 1rem;
-  line-height: 1;
-  padding: var(--space-1);
-  border-radius: var(--radius-sm);
-  transition: color var(--duration-fast);
 }
-.loop-config-close:hover { color: var(--color-text); }
+.loop-config-close:hover:not(:disabled) { color: var(--color-text); }
 
 /* Tabs */
 .loop-config-tabs {

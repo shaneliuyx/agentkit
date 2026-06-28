@@ -18,6 +18,8 @@ interface LoopConfigPanelProps {
 
 type Tab = "goal" | "scheduler" | "chain" | "hill_climb" | "rubric";
 
+const TAB_IDS: Tab[] = ["goal", "scheduler", "chain", "hill_climb", "rubric"];
+
 interface GoalForm {
   end_state: string;
   evidence_cmd: string;
@@ -94,7 +96,22 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const setConfiguredRubric = useRunStore((s) => s.setConfiguredRubric);
   const setSchedulerTriggers = useRunStore((s) => s.setSchedulerTriggers);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [tab, setTab] = useState<Tab>("goal");
+
+  // Roving-tabindex arrow-key navigation for the tablist (WAI-ARIA tabs pattern).
+  const handleTabKey = (e: React.KeyboardEvent<HTMLButtonElement>, idx: number) => {
+    const last = TAB_IDS.length - 1;
+    let next = idx;
+    if (e.key === "ArrowRight") next = idx === last ? 0 : idx + 1;
+    else if (e.key === "ArrowLeft") next = idx === 0 ? last : idx - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    else return;
+    e.preventDefault();
+    setTab(TAB_IDS[next]);
+    tabRefs.current[next]?.focus();
+  };
 
   // ── Goal state ──────────────────────────────────────────────────────────
   const [goal, setGoal] = useState<GoalForm>(GOAL_DEFAULTS);
@@ -270,7 +287,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   return (
     <>
       <button
-        className="btn loop-config-btn"
+        className="btn btn-sm loop-config-btn"
         onClick={open}
         title="Loop configuration — Goal, Scheduler, Chain"
         aria-label="Open loop configuration"
@@ -282,24 +299,29 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
         ref={dialogRef}
         className="loop-config-dialog"
         onClick={handleDialogClick}
-        aria-label="Loop configuration"
+        aria-labelledby="loop-config-title"
       >
         <div className="loop-config-inner">
           <header className="loop-config-header">
-            <span className="loop-config-title mono">Loop Config</span>
-            <button className="loop-config-close" onClick={close} aria-label="Close">✕</button>
+            <h2 id="loop-config-title" className="loop-config-title mono">Loop Config</h2>
+            <button className="btn btn-icon btn-ghost loop-config-close" onClick={close} aria-label="Close"><span aria-hidden="true">✕</span></button>
           </header>
 
           {/* Tab bar */}
-          <div className="loop-config-tabs" role="tablist">
-            {(["goal", "scheduler", "chain", "hill_climb", "rubric"] as Tab[]).map((t) => (
+          <div className="loop-config-tabs" role="tablist" aria-label="Loop configuration sections">
+            {TAB_IDS.map((t, i) => (
               <button
                 key={t}
+                ref={(el) => { tabRefs.current[i] = el; }}
+                id={`lc-tab-${t}`}
                 role="tab"
                 aria-selected={tab === t}
+                aria-controls={`lc-tabpanel-${t}`}
+                tabIndex={tab === t ? 0 : -1}
                 className="loop-tab-btn"
                 data-active={tab === t}
                 onClick={() => setTab(t)}
+                onKeyDown={(e) => handleTabKey(e, i)}
               >
                 {t}
               </button>
@@ -308,7 +330,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
 
           {/* ── Goal tab ── */}
           {tab === "goal" && (
-            <div className="loop-config-body">
+            <div className="loop-config-body" role="tabpanel" id="lc-tabpanel-goal" aria-labelledby="lc-tab-goal">
               <p className="loop-config-hint">
                 A <strong>LoopGoal</strong> is a verifiable stop condition: the runner calls
                 <code> check_goal()</code> after each phase — a pure subprocess, no LLM.
@@ -425,6 +447,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                 {goalStatus && (
                   <span
                     className="lc-status mono"
+                    role="status"
                     data-ok={goalStatus.startsWith("✓")}
                   >
                     {goalStatus}
@@ -439,7 +462,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
 
           {/* ── Scheduler tab ── */}
           {tab === "scheduler" && (
-            <div className="loop-config-body">
+            <div className="loop-config-body" role="tabpanel" id="lc-tabpanel-scheduler" aria-labelledby="lc-tab-scheduler">
               <p className="loop-config-hint">
                 Register cron or webhook triggers that fire a <strong>LoopChain</strong> automatically.
               </p>
@@ -469,7 +492,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   Register trigger
                 </button>
                 {schedStatus && (
-                  <span className="lc-status mono" data-ok={schedStatus.startsWith("✓")}>
+                  <span className="lc-status mono" role="status" data-ok={schedStatus.startsWith("✓")}>
                     {schedStatus}
                   </span>
                 )}
@@ -499,7 +522,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
 
           {/* ── Chain tab ── */}
           {tab === "chain" && (
-            <div className="loop-config-body">
+            <div className="loop-config-body" role="tabpanel" id="lc-tabpanel-chain" aria-labelledby="lc-tab-chain">
               <p className="loop-config-hint">
                 A <strong>LoopChain</strong> is a DAG of loops. Each spec declares its{" "}
                 <code>depends_on</code> predecessors; outputs flow downstream automatically.
@@ -526,7 +549,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
 
           {/* ── Hill Climb tab ── */}
           {tab === "hill_climb" && (
-            <div className="loop-config-body">
+            <div className="loop-config-body" role="tabpanel" id="lc-tabpanel-hill_climb" aria-labelledby="lc-tab-hill_climb">
               <p className="loop-config-hint">
                 Configure DGM hill-climbing: score metric, acceptance threshold, and epoch cap.
               </p>
@@ -604,6 +627,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   <label>Min tasks per agent: <strong>{minTasksPerAgent}</strong></label>
                   <input
                     type="range" min={1} max={10}
+                    aria-label="Min tasks per agent"
                     value={minTasksPerAgent}
                     onChange={(e) => setMinTasksPerAgent(Number(e.target.value))}
                   />
@@ -612,6 +636,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   <label>Max tasks per agent: <strong>{maxTasksPerAgent}</strong></label>
                   <input
                     type="range" min={1} max={10}
+                    aria-label="Max tasks per agent"
                     value={maxTasksPerAgent}
                     onChange={(e) => setMaxTasksPerAgent(Number(e.target.value))}
                   />
@@ -620,6 +645,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   <label>Max agents (cap): <strong>{maxAgents}</strong></label>
                   <input
                     type="range" min={1} max={10}
+                    aria-label="Max agents (cap)"
                     value={maxAgents}
                     onChange={(e) => setMaxAgents(Number(e.target.value))}
                   />
@@ -674,10 +700,10 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
 
           {/* ── Rubric tab ── */}
           {tab === "rubric" && (
-            <div className="loop-config-body">
+            <div className="loop-config-body" role="tabpanel" id="lc-tabpanel-rubric" aria-labelledby="lc-tab-rubric">
               <p className="loop-config-hint">
                 The <strong>rubric</strong> is the epoch keep/discard gate's scoring
-                standard (DESIGN §11.6) — deterministic and model-free. Tune the
+                standard (DESIGN §14.2) — deterministic and model-free. Tune the
                 per-criterion weights and edit the deliverable <strong>template</strong>;
                 the template both steers report generation and drives the{" "}
                 <code>structure</code> score.
@@ -717,6 +743,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   <div className="lc-field" style={{ flex: 1 }}>
                     <input
                       className="mono"
+                      aria-label={`Deliverable section ${i + 1}`}
                       value={section}
                       placeholder="Section heading"
                       onChange={(e) =>
@@ -745,7 +772,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
               </button>
 
               {rubricStatus && (
-                <p className="lc-status mono" data-ok={rubricStatus.startsWith("✓")}>
+                <p className="lc-status mono" role="status" data-ok={rubricStatus.startsWith("✓")}>
                   {rubricStatus}
                 </p>
               )}

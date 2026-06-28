@@ -84,11 +84,10 @@
   font-size: var(--text-xs);
 }
 
+/* layout-only: padding/font-size inherited from .btn-sm */
 .loops-seed-btn {
   align-self: flex-start;
   margin-top: var(--space-1);
-  font-size: var(--text-xs);
-  padding: var(--space-1) var(--space-3);
 }
 
 /* M9: the 5 path skills, listed unobtrusively below the loop matches. */
@@ -216,8 +215,8 @@
 .chain-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 6px;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 .lc-status[data-ok="false"] { color: var(--color-error, #f87171); }
 .lc-status[data-ok="true"]  { color: var(--color-done, #4ade80); }

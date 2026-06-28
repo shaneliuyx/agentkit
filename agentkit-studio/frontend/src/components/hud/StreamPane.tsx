@@ -21,7 +21,7 @@ export function StreamPane() {
   return (
     <section className="hud-stream panel">
       <header className="hud-head">
-        <span className="eyebrow">Stream</span>
+        <h2 className="eyebrow">Stream</h2>
         <span className="pill" data-state={status}>
           <span className="dot" />
           {status}

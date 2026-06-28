@@ -25,7 +25,7 @@ export function VerifyPanel() {
           ))}
           {verify.uncited.length > 0 ? (
             <div className="card panel-row" data-warn="true">
-              <span className="eyebrow">Uncited</span>
+              <h2 className="eyebrow">Uncited</h2>
               {verify.uncited.map((c, i) => (
                 <p key={i} className="panel-row-text">
                   {c}

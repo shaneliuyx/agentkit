@@ -390,7 +390,7 @@ export interface SessionResponse {
 }
 
 /**
- * GUI rubric config (DESIGN §11.6): per-criterion weights + the deliverable
+ * GUI rubric config (DESIGN §14.2): per-criterion weights + the deliverable
  * TEMPLATE. Seeded from `GET /rubric/defaults`, POSTed to `/session/{id}/rubric`.
  * The keep/discard gate scores each epoch with these weights; the template both
  * steers generation and drives the `structure` criterion. Criterion keys are

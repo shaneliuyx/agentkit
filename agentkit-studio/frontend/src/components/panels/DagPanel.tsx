@@ -22,7 +22,7 @@ export function DagPanel() {
       {dag ? (
         <>
           <div className="panel-row-head">
-            <span className="eyebrow">graph {dag.graph_id}</span>
+            <h2 className="eyebrow">graph {dag.graph_id}</h2>
             <span className="mono dim">{dag.edges.length} edges</span>
           </div>
           <div className="dag-nodes">

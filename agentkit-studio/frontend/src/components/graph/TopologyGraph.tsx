@@ -101,6 +101,8 @@ export function TopologyGraph() {
   const phases = useRunStore((s) => s.phases);
   const tools = useRunStore((s) => s.tools);
   const status = useRunStore((s) => s.status);
+  const hillClimb = useRunStore((s) => s.hillClimb);
+  const configuredHillClimb = useRunStore((s) => s.configuredHillClimb);
   // The DAG draws PHASES only. After every phase settles to `done`, the run is
   // STILL active (verify → score → weakness mining → next epoch) — work the graph
   // has no node for. Without this, the diagram reads "complete" while the run
@@ -112,6 +114,16 @@ export function TopologyGraph() {
       ? allPhasesDone
         ? "finalizing — verify · score · improve"
         : "running"
+      : null;
+
+  // Epoch heartbeat (DESIGN §14.4): one Run iterates up to max_epochs passes. The
+  // HillClimbEvent for a pass is emitted only when it finishes, so the IN-PROGRESS
+  // epoch is one beyond the last recorded event (clamped to the cap). Shown only when
+  // the multi-epoch loop is actually active (auto_improve + max_epochs > 1).
+  const maxEpochs = configuredHillClimb?.max_epochs ?? 0;
+  const epochBadge =
+    configuredHillClimb?.auto_improve && maxEpochs > 1 && status === "running"
+      ? `Epoch ${Math.min(hillClimb.length + 1, maxEpochs)} / ${maxEpochs}`
       : null;
 
   const { nodes, edges } = useMemo(() => {
@@ -136,7 +148,7 @@ export function TopologyGraph() {
   if (phases.length === 0) {
     return (
       <div className="topo-empty">
-        <p className="eyebrow">Topology</p>
+        <h2 className="eyebrow">Topology</h2>
         <p className="dim">
           Configure a backend, enter a requirement, and press Run to watch the
           plan deploy as a live agent topology.
@@ -147,6 +159,11 @@ export function TopologyGraph() {
 
   return (
     <div className="topo-canvas">
+      {epochBadge ? (
+        <div className="topo-epoch-badge" role="status" aria-live="polite">
+          {epochBadge}
+        </div>
+      ) : null}
       {runBadge ? (
         <div className="topo-run-badge" data-finalizing={allPhasesDone}>
           <span className="topo-run-dot" />

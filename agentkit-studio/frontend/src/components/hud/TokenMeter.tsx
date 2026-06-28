@@ -39,7 +39,7 @@ export function TokenMeter() {
   return (
     <section className="hud-meter" data-estimated={tokens.estimated}>
       <header className="hud-head">
-        <span className="eyebrow">Token Meter</span>
+        <h2 className="eyebrow">Token Meter</h2>
         {tokens.estimated ? (
           <span className="hud-estimated-flag" title="Backend reports no usage telemetry; counts are estimated.">
             ~ estimated
@@ -68,7 +68,7 @@ export function TokenMeter() {
       {budget ? (
         <div className="hud-budget" data-exceeded={budget.exceeded}>
           <div className="hud-budget-row">
-            <span className="eyebrow">Budget</span>
+            <h3 className="eyebrow">Budget</h3>
             <span className="mono">
               {formatCost(budget.spent)}
               {budget.ceiling != null ? ` / ${formatCost(budget.ceiling)}` : " / ∞"}

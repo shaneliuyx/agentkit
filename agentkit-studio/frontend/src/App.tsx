@@ -58,9 +58,9 @@ export default function App() {
       <header className="studio-top">
         <div className="studio-brand">
           <span className="eyebrow">AgentKit</span>
-          <span className="brand-mark">
+          <h1 className="brand-mark" aria-label="AgentKit Studio">
             <span className="accent">Studio</span>
-          </span>
+          </h1>
           {session ? (
             <span className="pill" data-state="done" title={session.llm.model}>
               <span className="dot" />

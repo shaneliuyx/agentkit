@@ -107,7 +107,7 @@ export function LoopsPanel({ sessionId }: LoopsPanelProps) {
         </button>
       </div>
 
-      {error ? <p className="panel-notice">{error}</p> : null}
+      {error ? <p className="panel-notice" role="alert">{error}</p> : null}
 
       {loopSeed ? (
         <p className="loops-seeded mono">
@@ -125,7 +125,7 @@ export function LoopsPanel({ sessionId }: LoopsPanelProps) {
               <span className="mono tag">{m.trigger}</span>
               <span className="mono dim">match {m.score.toFixed(2)}</span>
             </div>
-            <p className="loops-title">{m.title}</p>
+            <h2 className="loops-title">{m.title}</h2>
             <p className="panel-row-text">{m.summary}</p>
             {m.keywords.length > 0 ? (
               <p className="mono faint loops-keywords">{m.keywords.join(" · ")}</p>
@@ -134,7 +134,8 @@ export function LoopsPanel({ sessionId }: LoopsPanelProps) {
               catalog ↗
             </a>
             <button
-              className="btn loops-seed-btn"
+              type="button"
+              className="btn btn-sm loops-seed-btn"
               onClick={() => handleSeed(m.id)}
               disabled={seeding !== null || !sessionId}
             >

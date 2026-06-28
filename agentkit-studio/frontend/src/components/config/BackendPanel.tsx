@@ -114,18 +114,21 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
       {llmProfile === RAW ? (
         <div className="backend-raw">
           <input
+            aria-label="Base URL"
             placeholder="base_url"
             value={raw.baseUrl}
             onChange={(e) => setRaw({ ...raw, baseUrl: e.target.value })}
             disabled={disabled}
           />
           <input
+            aria-label="Model"
             placeholder="model"
             value={raw.model}
             onChange={(e) => setRaw({ ...raw, model: e.target.value })}
             disabled={disabled}
           />
           <input
+            aria-label="API key"
             placeholder="api_key"
             type="password"
             value={raw.apiKey}
@@ -155,7 +158,11 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
         {busy ? "Connecting…" : "Connect session"}
       </button>
 
-      {error ? <span className="backend-error">{error}</span> : null}
+      {error ? (
+        <span className="backend-error" role="alert">
+          {error}
+        </span>
+      ) : null}
     </section>
   );
 }

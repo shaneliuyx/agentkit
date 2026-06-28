@@ -76,8 +76,9 @@ export function ChainComposerPanel() {
   return (
     <PanelShell empty={false} emptyHint="">
       <div className="chain-composer">
-        <label className="panel-label mono">Task description</label>
+        <label className="panel-label mono" htmlFor="chain-task-input">Task description</label>
         <input
+          id="chain-task-input"
           className="chain-task-input mono"
           placeholder="Describe the multi-step task…"
           value={task}
@@ -94,24 +95,27 @@ export function ChainComposerPanel() {
             {suggesting ? "Generating…" : "✦ Suggest chain"}
           </button>
           {suggestStatus && (
-            <span className="lc-status mono" data-ok={suggestStatus.startsWith("✓")}>
+            <span className="lc-status mono" role="status" data-ok={suggestStatus.startsWith("✓")}>
               {suggestStatus}
             </span>
           )}
         </div>
 
-        <label className="panel-label mono" style={{ marginTop: "12px" }}>Chain Spec (JSON)</label>
+        <label className="panel-label mono" htmlFor="chain-spec-editor" style={{ marginTop: "12px" }}>Chain Spec (JSON)</label>
         <textarea
+          id="chain-spec-editor"
           className="chain-editor mono"
           value={spec}
           onChange={(e) => setSpec(e.target.value)}
           rows={12}
           spellCheck={false}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? "chain-spec-error" : undefined}
         />
         {error && (
-          <div className="panel-error mono" role="alert">{error}</div>
+          <div id="chain-spec-error" className="panel-error mono" role="alert">{error}</div>
         )}
-        <button className="run-btn" onClick={handleRun} disabled={running}>
+        <button type="button" className="btn btn-primary" onClick={handleRun} disabled={running}>
           {running ? "Running…" : "Run Chain"}
         </button>
       </div>

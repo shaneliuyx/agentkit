@@ -148,7 +148,7 @@ export interface RunState {
   setConfiguredGoal: (g: RunState["configuredGoal"]) => void;
   configuredHillClimb: { score_metric: string; min_improvement: number; max_epochs: number; auto_improve?: boolean } | null;
   setConfiguredHillClimb: (c: RunState["configuredHillClimb"]) => void;
-  /** GUI rubric weights + deliverable template (DESIGN §11.6); null → backend defaults. */
+  /** GUI rubric weights + deliverable template (DESIGN §14.2); null → backend defaults. */
   configuredRubric: RubricConfig | null;
   setConfiguredRubric: (r: RubricConfig | null) => void;
   setSchedulerTriggers: (p: SchedulerPayload) => void;

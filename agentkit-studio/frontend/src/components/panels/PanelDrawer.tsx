@@ -3,7 +3,7 @@
  * (Loops catalog, web/Tools activity). Each tab shows a live count badge so the
  * operator sees activity without switching tabs.
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRunStore } from "../../store/runStore";
 import { MemoryPanel } from "./MemoryPanel";
 import { SelfImprovePanel } from "./SelfImprovePanel";
@@ -60,6 +60,21 @@ interface PanelDrawerProps {
 
 export function PanelDrawer({ sessionId }: PanelDrawerProps) {
   const [active, setActive] = useState<TabId>("loops");
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // Roving-tabindex arrow-key navigation for the tablist (WAI-ARIA tabs pattern).
+  const handleTabKey = (e: React.KeyboardEvent<HTMLButtonElement>, idx: number) => {
+    const last = TABS.length - 1;
+    let next = idx;
+    if (e.key === "ArrowRight") next = idx === last ? 0 : idx + 1;
+    else if (e.key === "ArrowLeft") next = idx === 0 ? last : idx - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    else return;
+    e.preventDefault();
+    setActive(TABS[next].id);
+    tabRefs.current[next]?.focus();
+  };
 
   // Per-tab counts for the badges.
   const counts = useRunStore((s) => ({
@@ -81,15 +96,20 @@ export function PanelDrawer({ sessionId }: PanelDrawerProps) {
 
   return (
     <div className="panel">
-      <div className="drawer-tabs" role="tablist">
-        {TABS.map((tab) => (
+      <div className="drawer-tabs" role="tablist" aria-label="Run inspector panels">
+        {TABS.map((tab, i) => (
           <button
             key={tab.id}
+            ref={(el) => { tabRefs.current[i] = el; }}
+            id={`drawer-tab-${tab.id}`}
             role="tab"
             aria-selected={active === tab.id}
+            aria-controls="drawer-tabpanel"
+            tabIndex={active === tab.id ? 0 : -1}
             className="drawer-tab"
             data-active={active === tab.id}
             onClick={() => setActive(tab.id)}
+            onKeyDown={(e) => handleTabKey(e, i)}
           >
             {tab.label}
             {counts[tab.id] > 0 ? (
@@ -98,7 +118,12 @@ export function PanelDrawer({ sessionId }: PanelDrawerProps) {
           </button>
         ))}
       </div>
-      <div className="drawer-body">
+      <div
+        className="drawer-body"
+        role="tabpanel"
+        id="drawer-tabpanel"
+        aria-labelledby={`drawer-tab-${active}`}
+      >
         {active === "loops" && <LoopsPanel sessionId={sessionId} />}
         {active === "tools" && <ToolsPanel />}
         {active === "router" && <RouterPanel />}

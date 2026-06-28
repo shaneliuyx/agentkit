@@ -38,27 +38,25 @@
   font-size: 1rem;
 }
 
+/* applied to the panel's <h2>; reset cancels UA heading margin + bold so the
+   header is visually identical to the original span. */
 .chat-panel-title {
+  margin: 0;
   font-size: 0.78rem;
+  font-weight: 400;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--color-text-dim);
 }
 
+/* layout-only: bg/border/hover inherited from .btn .btn-icon .btn-ghost */
 .chat-panel-close {
-  border: none;
-  background: transparent;
-  color: var(--color-text-dim);
   font-size: 1.3rem;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 0.3rem;
-  border-radius: var(--radius-sm);
+  color: var(--color-text-dim);
 }
 
-.chat-panel-close:hover {
+.chat-panel-close:hover:not(:disabled) {
   color: var(--color-text);
-  background: var(--color-surface-3);
 }
 
 /* ── Thread ── */
@@ -158,26 +156,15 @@
   padding-top: 0.1rem;
 }
 
+/* layout-only: sizing/border/bg/hover inherited from .btn .btn-icon .btn-ghost */
 .chat-btn-copy {
   flex-shrink: 0;
-  width: 1.5rem;
-  height: 1.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   font-size: 0.85rem;
-  background: var(--color-surface-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
   color: var(--color-text-dim);
-  cursor: pointer;
-  padding: 0;
-  line-height: 1;
 }
 
-.chat-btn-copy:hover {
+.chat-btn-copy:hover:not(:disabled) {
   color: var(--color-accent);
-  border-color: var(--color-accent);
 }
 
 /* ── Message content (markdown) ── */
@@ -337,17 +324,10 @@
   padding: 0.5rem 0.75rem;
 }
 
+/* layout-only: padding/border/bg/hover/disabled inherited from .btn .btn-sm */
 .chat-btn-continue {
-  font-size: 0.78rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  padding: 0.3rem 0.7rem;
-  background: transparent;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
   color: var(--color-text-dim);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: color 120ms, border-color 120ms;
 }
 
 .chat-btn-continue:hover:not(:disabled) {
@@ -355,31 +335,8 @@
   border-color: var(--color-accent);
 }
 
-.chat-btn-continue:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
+/* layout-only: sizing/bg/border/hover/disabled inherited from .btn .btn-icon .btn-primary */
 .chat-btn-send {
-  width: 2rem;
-  height: 2rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-accent);
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: 1rem;
-  cursor: pointer;
   flex-shrink: 0;
-}
-
-.chat-btn-send:hover:not(:disabled) {
-  opacity: 0.85;
-}
-
-.chat-btn-send:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
+  font-size: 1rem;
 }

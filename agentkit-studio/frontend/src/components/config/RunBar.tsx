@@ -103,6 +103,7 @@ export function RunBar({ sessionId, mode, onModeChange, onRequirementChange }: R
           type="button"
           className="run-mode-btn"
           data-active={mode === "auto"}
+          aria-pressed={mode === "auto"}
           onClick={() => onModeChange("auto")}
           disabled={isRunning}
         >
@@ -112,6 +113,7 @@ export function RunBar({ sessionId, mode, onModeChange, onRequirementChange }: R
           type="button"
           className="run-mode-btn"
           data-active={mode === "llm"}
+          aria-pressed={mode === "llm"}
           onClick={() => onModeChange("llm")}
           disabled={isRunning}
         >

@@ -114,15 +114,15 @@ export function ResultWindow() {
       <header className="chat-panel-head">
         <div className="chat-panel-head-left">
           <span className="chat-panel-icon">⬡</span>
-          <span className="chat-panel-title mono">Agent Chat</span>
+          <h2 className="chat-panel-title mono">Agent Chat</h2>
         </div>
         <button
           type="button"
-          className="chat-panel-close"
+          className="btn btn-icon btn-ghost chat-panel-close"
           onClick={() => setDismissed(true)}
           aria-label="Close"
         >
-          ×
+          <span aria-hidden="true">×</span>
         </button>
       </header>
 
@@ -142,15 +142,16 @@ export function ResultWindow() {
                 </span>
                 <button
                   type="button"
-                  className="chat-btn-copy"
+                  className="btn btn-icon btn-ghost chat-btn-copy"
                   onClick={() => navigator.clipboard?.writeText(result.result_path)}
+                  aria-label="Copy path"
                   title="Copy path"
                 >
-                  ⎘
+                  <span aria-hidden="true">⎘</span>
                 </button>
                 <button
                   type="button"
-                  className="chat-btn-copy"
+                  className="btn btn-icon btn-ghost chat-btn-copy"
                   onClick={() => {
                     const name = result.result_path.split("/").pop() ?? "result.md";
                     const blob = new Blob([result.result], { type: "text/markdown" });
@@ -161,9 +162,10 @@ export function ResultWindow() {
                     a.click();
                     URL.revokeObjectURL(url);
                   }}
+                  aria-label="Download file"
                   title="Download file"
                 >
-                  ↓
+                  <span aria-hidden="true">↓</span>
                 </button>
               </div>
             )}
@@ -237,6 +239,7 @@ export function ResultWindow() {
           ref={inputRef}
           className="chat-input"
           rows={3}
+          aria-label="Follow-up message"
           placeholder={
             sessionId
               ? "Ask a follow-up… (Enter to send)"
@@ -247,10 +250,10 @@ export function ResultWindow() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
         />
-        <div className="chat-input-actions">
+        <div className="chat-input-actions btn-row">
           <button
             type="button"
-            className="chat-btn-continue"
+            className="btn btn-sm chat-btn-continue"
             disabled={!input.trim() || !sessionId || sending}
             onClick={continueAsRun}
             title="Send as new agent run with full context"
@@ -259,12 +262,13 @@ export function ResultWindow() {
           </button>
           <button
             type="button"
-            className="chat-btn-send"
+            className="btn btn-icon btn-primary chat-btn-send"
             disabled={!input.trim() || !sessionId || sending}
             onClick={sendChat}
+            aria-label="Send message"
             title="Ask follow-up (no re-run)"
           >
-            ↑
+            <span aria-hidden="true">↑</span>
           </button>
         </div>
       </div>

@@ -33,6 +33,23 @@
   color: var(--color-accent);
   border-color: color-mix(in oklch, var(--color-accent), transparent 55%);
 }
+/* Epoch heartbeat counter (DESIGN §14.4) — top-left so it never overlaps the
+   top-right run badge. Mirrors the run-badge pill, accent-toned to read as a
+   distinct progress dimension (which pass), not run status. */
+.topo-epoch-badge {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 5;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  color: var(--color-accent);
+  background: color-mix(in oklch, var(--color-accent) 10%, var(--color-surface-2));
+  border: 1px solid color-mix(in oklch, var(--color-accent), transparent 55%);
+}
 .topo-run-dot {
   width: 7px;
   height: 7px;
