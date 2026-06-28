@@ -344,22 +344,36 @@ def web_toolkit_available() -> bool:
 #: `tool_calls` field. Parse that so tools fire on those backends too — otherwise
 #: the call blob silently leaks into the answer and the tool never runs.
 _INLINE_TOOL_RE = re.compile(r"<(execute|tools?|tool_call)>(.*?)</\1>", re.DOTALL)
+#: oMLX local models (qwen2.5-coder etc.) emit the call as a fenced code block
+#: (```json {...} ```) rather than <tag>-wrapped — without this they fetch nothing.
+_FENCED_RE = re.compile(r"```[a-zA-Z_]*\s*\n?(.*?)```", re.DOTALL)
 
 
 def _parse_inline_tool_calls(
     text: str, names: set[str]
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Extract ``(name, args)`` calls a model emitted as inline tagged JSON.
-
-    Matches paired ``<execute|tools|tool_call>{...}</...>`` blocks, json-parses the
-    inner object, and keeps only calls naming a registered tool. Returns ``[]`` on
-    any parse miss — an unparseable blob must not break the loop.
+    """Extract ``(name, args)`` calls a model emitted as inline JSON (no native
+    ``tool_calls`` field). Recognizes three shapes a non-function-calling backend uses:
+    ``<execute|tools|tool_call>{...}</...>`` tags, ```` ```json {...} ```` fenced
+    blocks (oMLX/qwen), and a bare top-level ``{...}`` object. Each candidate is
+    json-parsed and kept ONLY if it names a registered tool — so stray JSON/prose
+    can't fire a tool. Returns ``[]`` on any parse miss; deduped so the same call in
+    two forms fires once.
     """
+    candidates: list[str] = [inner for _tag, inner in _INLINE_TOOL_RE.findall(text)]
+    candidates += _FENCED_RE.findall(text)
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+
     out: list[tuple[str, dict[str, Any]]] = []
-    for _tag, inner in _INLINE_TOOL_RE.findall(text):
+    seen: set[tuple[str, str]] = set()
+    for inner in candidates:
         try:
             obj = json.loads(inner.strip())
         except Exception:  # noqa: BLE001 - a non-JSON blob is simply not a tool call
+            continue
+        if not isinstance(obj, dict):
             continue
         name = obj.get("name")
         args = obj.get("arguments", obj.get("parameters", {}))
@@ -369,7 +383,10 @@ def _parse_inline_tool_calls(
             except Exception:  # noqa: BLE001
                 args = {}
         if name in names and isinstance(args, dict):
-            out.append((name, args))
+            key = (name, json.dumps(args, sort_keys=True))
+            if key not in seen:
+                seen.add(key)
+                out.append((name, args))
     return out
 
 

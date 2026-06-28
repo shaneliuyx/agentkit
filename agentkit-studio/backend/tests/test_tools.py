@@ -98,6 +98,36 @@ def test_parse_inline_tool_calls_variants() -> None:
     assert len(got) == 2  # non-JSON blob + unknown tool dropped
 
 
+def test_parse_inline_tool_calls_fenced_and_bare_json() -> None:
+    """oMLX local models (e.g. qwen2.5-coder) emit tool calls as fenced/bare JSON,
+    NOT <tag>-wrapped — the Pi/Craft run fetched 0 because the parser only matched
+    tags. Fenced and bare JSON tool calls naming a registered tool must fire too."""
+    from studio.tools import _parse_inline_tool_calls
+
+    names = {"web_search", "web_fetch"}
+
+    # qwen's actual format: ```json { "name", "arguments": {nested} } ```
+    fenced = (
+        '```json\n{\n  "name": "web_search",\n'
+        '  "arguments": {\n    "query": "Pi agent", "results": 5\n  }\n}\n```'
+    )
+    assert ("web_search", {"query": "Pi agent", "results": 5}) in _parse_inline_tool_calls(
+        fenced, names
+    )
+
+    # bare top-level JSON object (no fence, no tag)
+    bare = '{"name": "web_fetch", "arguments": {"url": "https://x.com"}}'
+    assert ("web_fetch", {"url": "https://x.com"}) in _parse_inline_tool_calls(bare, names)
+
+    # "parameters" alias inside a plain fence
+    params = '```\n{"name": "web_search", "parameters": {"query": "q2"}}\n```'
+    assert ("web_search", {"query": "q2"}) in _parse_inline_tool_calls(params, names)
+
+    # guards: unregistered tool name dropped; plain prose never false-positives
+    assert _parse_inline_tool_calls('```json\n{"name":"evil","arguments":{}}\n```', names) == []
+    assert _parse_inline_tool_calls("I think we should search the web for Pi.", names) == []
+
+
 def test_inline_tool_call_fires_on_non_function_calling_backend() -> None:
     """A backend emitting the call as inline <execute> text still fires the tool;
     the call blob must NOT leak into the final answer (the live oMLX bug)."""
