@@ -594,8 +594,15 @@ def _strip_preamble(text: str) -> str:
 
     Strips everything before the first line beginning with '#'. No heading found =>
     return unchanged (never destroy a genuinely heading-less document).
+
+    Also removes inherited '<!-- conflict(...): anchor not found -->' markers that
+    reduce_patches emitted on a missing anchor in an EARLIER version (before the
+    anchor-demotion fix) and that the additive merge then froze into the seed forever.
+    Anchor-demotion prevents NEW markers; this strips the old ones (the content beneath
+    a marker is kept — only the noise comment line is removed).
     """
     import re
+    text = re.sub(r"[ \t]*<!--\s*conflict.*?-->[ \t]*\n?", "", text)
     m = re.search(r"^#", text, flags=re.MULTILINE)
     return text[m.start():] if m else text
 

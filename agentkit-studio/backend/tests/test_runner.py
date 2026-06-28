@@ -530,6 +530,18 @@ def test_strip_preamble_noop_on_clean_or_headingless() -> None:
     assert _strip_preamble("prose, no heading") == "prose, no heading"  # never destroy
 
 
+def test_strip_preamble_removes_inherited_conflict_markers() -> None:
+    """Inherited '<!-- conflict(...): anchor not found -->' markers (frozen into a seed by an
+    earlier version, before anchor-demotion) must be sanitized at every artifact boundary; the
+    content beneath each marker is kept, only the noise comment is removed."""
+    from studio.runner import _strip_preamble
+    poisoned = ("# Doc\n\nA finding sentence (https://x.example).\n"
+                "<!-- conflict(finding): anchor not found -->\n\nNext finding.\n")
+    clean = _strip_preamble(poisoned)
+    assert "conflict" not in clean
+    assert "A finding sentence" in clean and "Next finding." in clean
+
+
 class _FakeEmb:
     """Embeds by keyword cluster: 'rank/comparison' issues are similar to each
     other (re-worded same issue), 'url' is its own cluster."""
