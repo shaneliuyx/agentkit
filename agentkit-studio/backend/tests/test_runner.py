@@ -794,6 +794,27 @@ def test_rubric_template_steers_generation(fake_client_factory) -> None:
     assert "Executive Summary" not in without, without  # untouched when unconfigured
 
 
+def test_goal_excluded_from_planner_no_duplicate_phases(fake_client_factory) -> None:
+    """A Goal overlapping the requirement must NOT reach the PLANNER: prepending it doubled
+    the task and the splitter produced duplicate phases (the Pi/Craft run). The goal still
+    rides in `requirement` for steering/verification, but PlanEvent.task is the clean base —
+    so no `Goal:` text becomes a phase and no phase is duplicated."""
+    from types import SimpleNamespace
+
+    events: list[StudioEvent] = []
+    session = _make_session()
+    session.goal = SimpleNamespace(end_state="compare redis and postgres", constraints=[])
+    runner = Runner(
+        session, events.append, client_factory=fake_client_factory, embedder=None
+    )
+    runner.run("compare redis and postgres")
+
+    plan_ev = [e for e in events if e.EVENT_TYPE == "plan"][0]
+    assert "Goal:" not in plan_ev.task                       # goal kept OUT of planner input
+    descs = [s["description"] for s in plan_ev.steps]
+    assert len(descs) == len(set(descs)), descs              # no duplicate phases
+
+
 def test_accept_epoch_keep_discard_gate() -> None:
     """Phase-1 gate (DESIGN §11.5): keep an epoch ONLY if strictly preferred over the
     prior. Closes the open-loop accept (the old length-only ratchet would write any

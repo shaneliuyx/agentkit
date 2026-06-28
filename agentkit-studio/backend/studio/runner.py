@@ -1325,8 +1325,13 @@ class Runner:
         # identity. Used at the auto_improve seed lookup and the run-record block below.
         _base_requirement = requirement
 
-        # Inject goal end_state and constraints into requirement so the agent
-        # sees them during planning — not just during post-phase verification.
+        # Inject goal end_state and constraints into requirement so the agent sees them
+        # (worker goal + post-phase verification). NOT into the PLANNER input: when the
+        # goal overlaps the task, prepending it doubled the text and the planner split the
+        # repeat into DUPLICATE phases (the Pi/Craft run — a goal == the requirement made
+        # "Craft…" / "create a report" appear twice). So the goal lives only in
+        # `requirement`/`_original_requirement`; the planner reads `_plan_requirement`,
+        # which starts from the clean base.
         _goal = getattr(session, "goal", None)
         if _goal is not None:
             _parts: list[str] = []
@@ -1338,24 +1343,25 @@ class Runner:
             if _parts:
                 requirement = "\n".join(_parts) + "\n\n" + requirement
 
-        # Wire the deliverable TEMPLATE into GENERATION (DESIGN §14.2): when the GUI
-        # has set a rubric template, instruct the agent to produce those sections, so
-        # the template STEERS the report (the workers target the structure the gate
-        # later scores) instead of only being graded after the fact. Injected into
-        # `requirement` AFTER `_base_requirement` is captured, so it never changes
-        # task_hash. Only when explicitly configured — defaulting to DEFAULT_TEMPLATE
-        # would force report headings (Executive Summary, Methodology…) onto non-research
-        # tasks and compromise their generation quality.
+        # Wire the deliverable TEMPLATE into GENERATION (DESIGN §14.2): when the GUI has set
+        # a rubric template, instruct the agent to produce those sections so the template
+        # STEERS the report instead of only being graded after the fact. Appended AFTER
+        # `_base_requirement` is captured (never changes task_hash), and to BOTH the full
+        # `requirement` AND the goal-free `_plan_requirement` — distinct section names
+        # (unlike the goal) never duplicate the task, so the template IS safe in the planner
+        # input. Only when explicitly configured — defaulting to DEFAULT_TEMPLATE would
+        # force report headings onto non-research tasks and compromise generation.
+        _plan_requirement = _base_requirement
         _rc = getattr(session, "rubric_config", None) or {}
         _template = _rc.get("template")
         if _template:
             _sections = "\n".join(f"- {s}" for s in _template)
-            requirement = (
-                requirement
-                + "\n\nStructure the deliverable with these sections (use them as "
-                + "top-level headings, in order):\n"
-                + _sections
+            _tpl_suffix = (
+                "\n\nStructure the deliverable with these sections (use them as "
+                "top-level headings, in order):\n" + _sections
             )
+            requirement = requirement + _tpl_suffix
+            _plan_requirement = _plan_requirement + _tpl_suffix
 
         # Stash the original requirement so task_hash is stable across iterations
         # (the seeder may rewrite requirement with "ITERATION N —..." prefix).
@@ -1508,20 +1514,23 @@ class Runner:
         #   3. Offline/auto    → deterministic plan() (no LLM available; tests).
         seed_steps = session.seed_steps
         use_llm = session.mode == "llm"
+        # Plan from the BASE requirement, NOT the goal/template-injected `requirement`.
+        # The goal end_state is prepended to `requirement` for steering, but when it
+        # OVERLAPS the task the planner split the DOUBLED text into duplicate phases — a
+        # goal == the requirement produced "Craft…" / "create a report" twice (the Pi/Craft
+        # run). The goal still steers via the keep/discard gate + verification; it must not
+        # become phase-splitting text. _base_requirement is also free of the
+        # weakness/template bloat the epic planner already wanted to avoid.
         if seed_steps:
-            plan_obj = plan(requirement, decomposer=make_seeded_decomposer(seed_steps))
+            plan_obj = plan(_plan_requirement, decomposer=make_seeded_decomposer(seed_steps))
             self._emit(LoopSeedEvent(loop_id=session.seed_loop_id, steps=seed_steps))
         elif use_llm:
             # Planner runs on base_client (no tool loop — planning needs no web).
-            # Plan from the CLEAN task (not the weakness/research-finding-bloated
-            # `requirement`) and pass prior-run lessons as a constraints block, so
-            # epic planning treats them as a quality bar — never decomposing each
-            # weakness into its own phase.
             plan_obj = _plan_from_epics(
-                _original_requirement, base_client, weaknesses_block=_weaknesses_block
+                _plan_requirement, base_client, weaknesses_block=_weaknesses_block
             )
         else:
-            plan_obj = plan(_original_requirement)
+            plan_obj = plan(_plan_requirement)
         # Collapse duplicate phases regardless of which planner produced them (seeded,
         # epic-LLM, or deterministic): a goal listing several sub-tasks otherwise yields
         # the same phase twice in the DAG (the Pi/Craft run), doubling agents + tokens.
