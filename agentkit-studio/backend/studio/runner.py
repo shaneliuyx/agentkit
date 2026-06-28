@@ -670,7 +670,7 @@ def _dbg(msg: str) -> None:
         pass
 
 
-def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
+def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], embedder=None):
     """Build the section-aware STAR reducer closure (DESIGN §4.5; Lever 3).
 
     Returns ``run_plan``'s reducer hook ``(worker_drafts) -> (merged_text, tokens)``.
@@ -730,15 +730,20 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
         # guard dropped 80-100% of real findings. Fetch the cited-but-uncached URLs now
         # so genuine sources survive grounding (a 404/fabricated URL still drops).
         _prefetch_cited(drafts)
-        floor_patches: list = []
+        findings: list = []
         raw_findings = 0
         for d in drafts:
             raw_findings += len(_re.findall(r'#{0,6}\s*RESEARCH_FINDING', d))
-            floor_patches += _research_findings_to_patches(d)
+            findings += _parse_findings(d)
+        # F1: collapse near-duplicate findings (STRUM merge) BEFORE they become patches, so
+        # the additive merge stops dumping ~26 repetitive citations as an unordered block.
+        from agentkit.artifacts.dedup import dedupe_findings
+        findings, n_dedup = dedupe_findings(findings, embedder)
+        floor_patches = _findings_to_patches(findings)
         patches = llm_patches + floor_patches
         if not patches:
             _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
-                 f"llm={len(llm_patches)} floor=0 → NO PATCHES (no findings survived)")
+                 f"llm={len(llm_patches)} floor=0 dedup={n_dedup} → NO PATCHES (no findings survived)")
             return art_block, tokens  # nothing to add → unchanged (no truncation)
         # Resolve anchors before merging: a finding's PATCH_TARGET that is not a real
         # heading in the doc would otherwise become a '<!-- conflict -->' marker that
@@ -750,48 +755,27 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str]):
         from agentkit.artifacts.patcher import reduce_patches
         rr = reduce_patches(art_block, [patches])
         _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
-             f"llm={len(llm_patches)} floor={len(floor_patches)} "
+             f"llm={len(llm_patches)} floor={len(floor_patches)} dedup={n_dedup} "
              f"applied_delta={len(rr.text) - len(art_block)} conflicts={len(rr.conflicts)}")
         return rr.text.strip(), tokens
 
     return reduce
 
 
-def _research_findings_to_patches(text: str) -> list:
-    """Convert RESEARCH_FINDING blocks → additive, WOVEN DocPatches (§11.3; Levers 1-2).
+def _parse_findings(text: str) -> list:
+    """Parse RESEARCH_FINDING blocks → grounded ``agentkit.artifacts.types.Finding`` objects.
 
-    Each finding with a real URL becomes an ``insert_after`` its PATCH_TARGET (or an
-    ``append`` if no target) carrying a SUBSTANTIATING SENTENCE — the article's
-    central CLAIM, a short verbatim QUOTE, and the source URL — woven into prose
-    rather than a bare citation line (Lever 2: citations → grounded prose, the
-    scorer's "evidence" criterion). Additive only: it can add content but never
-    remove or shorten the existing doc, so the merge cannot regress.
-
-    Grounding guards (Lever 1):
-      - URL not http(s) → dropped (no real source → not content; §11 grounding).
-      - URL never fetched this run (not in the fetch cache, when the cache holds
-        pages) → dropped as a fabricated source. The URL is the grounding oracle, NOT
-        the quote: a fetched page is real, whereas models reconstruct quotes
-        imperfectly — so an exact-quote-substring DROP discards real, fetched sources
-        (observed live: a genuine Martin Fowler finding dropped on a 1-word mismatch).
-        The check is SKIPPED when the cache is empty (offline/test).
-      - QUOTE only decides whether to weave the VERBATIM quote into the prose:
-        included when it is a real substring of a fetched page, omitted (finding still
-        kept on its claim + URL) when it is not verbatim-verifiable.
-
-    CLAIM is the substance; older findings used CONTENT/KEY_INSIGHT, kept as fallbacks
-    so prior-shape outputs still weave a sentence.
-    """
-    from agentkit.artifacts.patcher import DocPatch
+    Bare ``RESEARCH_FINDING:`` and ``## RESEARCH_FINDING`` both parse. Dual grounding oracle
+    (Lever 1): keep a finding iff its URL is http(s) AND — when the fetch cache holds pages —
+    its URL was fetched OR its verbatim quote appears on a fetched page; else drop (a true
+    fabrication: invented URL AND invented quote). ``quote_verified`` gates whether the
+    verbatim quote is later woven. CLAIM/CONTENT/KEY_INSIGHT fold into ``why`` (the schema
+    dropped the rephrased CLAIM — the verbatim QUOTE is the evidence)."""
+    from agentkit.artifacts.types import Finding
     from studio.tools import _fetch_cache, _quote_in_cache, _url_in_cache
 
     cache_active = bool(_fetch_cache)
-    patches: list = []
-    # The executor schema emits a BARE ``RESEARCH_FINDING:`` (no leading ``##``), so the
-    # ``##``-required pattern matched nothing on real worker output and the deterministic
-    # patch-floor silently produced zero patches (the load-bearing parse mismatch behind
-    # the live no-op). Make the heading optional so both bare and ``## RESEARCH_FINDING``
-    # forms parse; a spurious prose mention without a URL is dropped harmlessly below.
+    out: list = []
     for m in _re.finditer(
         r'#{0,6}\s*RESEARCH_FINDING(.*?)(?=#{0,6}\s*RESEARCH_FINDING|\Z)', text, _re.DOTALL
     ):
@@ -806,35 +790,52 @@ def _research_findings_to_patches(text: str) -> list:
             continue  # not a sourced finding → not content
         quote = _f('QUOTE').strip().strip('"')
         quote_verified = bool(quote) and _quote_in_cache(quote)
-        # Dual grounding oracle (Lever 1): a finding is grounded if EITHER its URL was
-        # fetched OR its verbatim quote appears on a fetched page. Drop only when BOTH
-        # fail — a true fabrication (invented URL AND invented quote). Either signal
-        # alone proves the page was read; requiring both (or exact URL match) discarded
-        # real findings on trivial string drift (the live 0-patch regressions).
-        if cache_active and not (_url_in_cache(url) or quote_verified):
+        grounded = (not cache_active) or _url_in_cache(url) or quote_verified
+        if cache_active and not grounded:
             continue
-        title, target = _f('ARTICLE_TITLE'), _f('PATCH_TARGET')
-        pop = _f('POPULARITY')
-        # WHY frames the quote's relevance; CLAIM/CONTENT are legacy fallbacks. The
-        # schema dropped the rephrased CLAIM — the verbatim QUOTE, COPY-PASTED, is the
-        # evidence now (a model paraphrase can fabricate; the source's own words can't).
-        framing = _f('WHY') or _f('CLAIM') or _f('CONTENT') or _f('KEY_INSIGHT')
+        out.append(Finding(
+            url=url,
+            title=_f('ARTICLE_TITLE'),
+            quote=quote,
+            why=_f('WHY') or _f('CLAIM') or _f('CONTENT') or _f('KEY_INSIGHT'),
+            popularity=_f('POPULARITY'),
+            patch_target=_f('PATCH_TARGET'),
+            quote_verified=quote_verified,
+            grounded=grounded,
+        ))
+    return out
 
-        cite = f"[{title or url}]({url})"
-        has_pop = bool(pop and pop.lower() != 'n/a')
-        pop_clause = f", {pop}" if has_pop else ""
-        lead = f"{framing.rstrip('.')}: " if framing else ""
-        if quote_verified:  # COPY-PASTE: the verbatim source excerpt IS the evidence (Lever 2)
-            content = f'\n\n{lead}"{quote}" ({cite}{pop_clause}).\n'
-        elif framing:       # no verifiable quote → grounded by URL; framing + citation
-            content = f"\n\n{framing.rstrip('.')} ({cite}{pop_clause}).\n"
-        else:               # nothing to weave → bare citation line
-            content = f"\n- {cite}{(' (' + pop + ')') if has_pop else ''}\n"
-        if target:
-            patches.append(DocPatch(op="insert_after", anchor=target, content=content, source="finding"))
+
+def _findings_to_patches(findings: list) -> list:
+    """Grounded ``Finding`` objects → additive, WOVEN DocPatches (Lever 2: verbatim copy-paste
+    evidence). The verbatim QUOTE is the evidence when verified; ``why`` frames it. Each becomes
+    an ``insert_after`` its PATCH_TARGET (or ``append`` if none). Additive only."""
+    from agentkit.artifacts.patcher import DocPatch
+
+    patches: list = []
+    for f in findings:
+        cite = f"[{f.title or f.url}]({f.url})"
+        has_pop = bool(f.popularity and f.popularity.lower() != 'n/a')
+        pop_clause = f", {f.popularity}" if has_pop else ""
+        lead = f"{f.why.rstrip('.')}: " if f.why else ""
+        if f.quote_verified:  # COPY-PASTE: the verbatim source excerpt IS the evidence
+            content = f'\n\n{lead}"{f.quote}" ({cite}{pop_clause}).\n'
+        elif f.why:           # no verifiable quote → grounded by URL; framing + citation
+            content = f"\n\n{f.why.rstrip('.')} ({cite}{pop_clause}).\n"
+        else:                 # nothing to weave → bare citation line
+            content = f"\n- {cite}{(' (' + f.popularity + ')') if has_pop else ''}\n"
+        if f.patch_target:
+            patches.append(DocPatch(op="insert_after", anchor=f.patch_target, content=content, source="finding"))
         else:
             patches.append(DocPatch(op="append", anchor=None, content=content, source="finding"))
     return patches
+
+
+def _research_findings_to_patches(text: str) -> list:
+    """Back-compat one-shot: parse + ground + weave (the post-loop patch path). The reducer
+    uses _parse_findings + dedupe_findings + _findings_to_patches separately so it can collapse
+    near-duplicate findings before they become patches (F1)."""
+    return _findings_to_patches(_parse_findings(text))
 
 
 def _parse_patches_from_output(text: str) -> list:
@@ -1500,7 +1501,8 @@ class Runner:
                 except OSError:
                     pass
                 _reducer = _make_section_reducer(
-                    client, _cur_art, getattr(session, "weaknesses", []) or []
+                    client, _cur_art, getattr(session, "weaknesses", []) or [],
+                    embedder=self._embedder,   # F1: dedup near-duplicate findings
                 )
 
             try:
@@ -1573,18 +1575,30 @@ class Runner:
             # across phases AND epochs, never regresses (a thin/failed reduce keeps
             # the prior good doc).
             _clean_out = _strip_preamble(sr.output)  # never persist reducer commentary
-            if (_artifact_copied and _eff_ws2 is not None
-                    and len(_clean_out.strip()) > 0
-                    and len(_clean_out) >= _seed_len):
+            # F2: per-section ratchet. The old whole-doc grow-only rule (len >= _seed_len)
+            # rejected ANY shrink, blocking dedup/replace/repair. accept_rewrite allows a
+            # rewrite (even shorter) as long as no section that had CONTENT is deleted or
+            # gutted — preserving anti-regression at section granularity.
+            _art_path = (_eff_ws2 / session.session_id / "artifact.md") if _eff_ws2 is not None else None
+            _old_art = ""
+            if _art_path is not None:
                 try:
-                    (_eff_ws2 / session.session_id / "artifact.md").write_text(_clean_out)
-                    _dbg(f"writeback ACCEPT step={step.id} seed_len {_seed_len}→{len(_clean_out)}")
-                    _seed_len = len(_clean_out)   # ratchet up for the next phase
+                    _old_art = _art_path.read_text()
                 except OSError:
                     pass
-            elif _artifact_copied and _eff_ws2 is not None:
+            from agentkit.artifacts.sections import accept_rewrite
+            if (_artifact_copied and _art_path is not None
+                    and len(_clean_out.strip()) > 0
+                    and accept_rewrite(_old_art, _clean_out)):
+                try:
+                    _art_path.write_text(_clean_out)
+                    _dbg(f"writeback ACCEPT step={step.id} {len(_old_art)}→{len(_clean_out)}")
+                    _seed_len = len(_clean_out)   # track current length for the next phase
+                except OSError:
+                    pass
+            elif _artifact_copied and _art_path is not None:
                 _dbg(f"writeback REJECT step={step.id} clean_len={len(_clean_out)} "
-                     f"seed_len={_seed_len} (grow-only: not longer than seed)")
+                     f"(accept_rewrite: a sourced section was deleted/gutted)")
 
             # Reconcile tokens run_plan counted that on_usage did not capture.
             # A StudioChatClient fires on_usage per call (with the in/out split);
