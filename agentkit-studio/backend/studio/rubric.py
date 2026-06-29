@@ -185,6 +185,46 @@ def rubric_score(
     return round(sum(w[k] * parts[k] for k in w), 4)
 
 
+#: Weakness-penalty calibration (DESIGN §14.7). The rubric measures STRUCTURE/QUANTITY
+#: and is blind to correctness — it returned 1.0 on a report with a malformed mermaid,
+#: fabricated URLs, and no inline citations. A perfect score alongside open weaknesses is
+#: incoherent, so the recorded score is penalised by the unaddressed weaknesses.
+_PER_WEAKNESS = 0.04     # graduated cost per remaining weakness
+_PER_HARD = 0.06         # extra cost for an OBJECTIVE defect (deterministic lint)
+_MAX_PENALTY = 0.6       # floor: even a weak report keeps some structural credit
+_CEIL_WITH_WEAKNESS = 0.92   # hard ceiling — ANY open weakness ⇒ not a perfect score
+
+
+def _is_hard_defect(weakness: str) -> bool:
+    """A deterministic, objective defect (not an LLM opinion) — weighed double."""
+    wl = weakness.lower()
+    return (
+        "malformed mermaid" in wl
+        or "unbalanced code fence" in wl
+        or "do not match verified" in wl   # fabricated / uncached citations
+        or "does not match verified" in wl
+    )
+
+
+def adjusted_score(base: float, weaknesses: Iterable[str] | None) -> float:
+    """Couple the deterministic rubric to remaining weaknesses (DESIGN §14.7).
+
+    Invariant (user requirement): if ANY weakness remains, the score is strictly below
+    1.0 — a report with open defects is never "perfect". On top of that hard ceiling a
+    graduated, capped penalty makes the score track the count and severity of what is
+    still wrong, so an improving doc with fewer weaknesses scores higher even when the
+    structural rubric has already saturated. Deterministic lints (malformed mermaid,
+    unbalanced fence, fabricated citations) are objective, so they cost extra. With no
+    weaknesses the rubric is returned unchanged.
+    """
+    ws = [w for w in (weaknesses or []) if w and w.strip()]
+    if not ws:
+        return round(base, 4)
+    hard = sum(1 for w in ws if _is_hard_defect(w))
+    penalty = min(_MAX_PENALTY, _PER_WEAKNESS * len(ws) + _PER_HARD * hard)
+    return round(min(base * (1.0 - penalty), _CEIL_WITH_WEAKNESS), 4)
+
+
 #: Default criterion weights exposed for the GUI rubric panel (so the UI can render the
 #: same defaults the scorer uses). Treat as read-only.
 DEFAULT_WEIGHTS = dict(_WEIGHTS)

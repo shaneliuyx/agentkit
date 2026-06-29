@@ -1291,7 +1291,15 @@ class Runner:
                 for i in range(max_epochs):
                     self._epoch = i + 1
                     res = self._run_inner(requirement)
-                    if res.status in ("plateau", "converged"):
+                    # Stop only on a genuine PLATEAU (this epoch's score didn't beat the
+                    # prior by min_improvement) or cancel — NOT on "converged". "converged"
+                    # is `_version >= max_epochs`, and `_version` is the CUMULATIVE all-time
+                    # version (next_version = MAX(version)+1 over every prior run of this
+                    # task). On a task with history it fires on the FIRST epoch, so the loop
+                    # ran once and max_epochs=2 did a single pass while two MANUAL runs did
+                    # two — the "1+1 ≠ 2 epochs" surprise. The per-run epoch count is already
+                    # bounded by range(max_epochs); converged must not also gate it. (§14.8)
+                    if res.status == "plateau":
                         break
                     if self._session.cancel_requested:
                         break
@@ -2017,6 +2025,27 @@ class Runner:
             # so mark_done moves it from remaining/in-flight to completed).
             _ledger.mark_done(step.id)
 
+            # §14.7: append this phase's INPUT (the full prompt the agent was given) and
+            # OUTPUT to a per-session JSONL so a failed run is diagnosable offline — the
+            # fastest way to SEE goal/intent stacking, an upstream fold, a recalled
+            # refusal, or a worker that dumped raw findings instead of patching. Lives
+            # next to artifact.md in the workspace. Best-effort; never breaks the run.
+            if _eff_ws2 is not None:
+                try:
+                    import json as _json
+                    _io_path = _eff_ws2 / session.session_id / "agent_io.jsonl"
+                    with _io_path.open("a", encoding="utf-8") as _iof:
+                        _iof.write(_json.dumps({
+                            "step": step.id,
+                            "topology": topo,
+                            "input": desc,
+                            "output": sr.output,
+                            "n_agents": sr.n_agents,
+                            "tokens": sr.tokens,
+                        }) + "\n")
+                except Exception:  # noqa: BLE001 — diagnostics must never break the run
+                    pass
+
             # post-phase panels
             mem.record(step.id, sr.output)
             dag.mark_done(step.id, tokens=sr.tokens)
@@ -2371,14 +2400,20 @@ class Runner:
             # the metric that actually tracks quality (DESIGN §14.2). Computed from the clean
             # _scored_text BEFORE the weakness annotation is appended, so the score is not
             # polluted by it. Weights + template come from the GUI rubric_config.
-            from studio.rubric import rubric_score
+            from studio.rubric import rubric_score, adjusted_score
             _rcfg = getattr(session, "rubric_config", None) or {}
-            _score = rubric_score(
+            _rubric_base = rubric_score(
                 _scored_text or result_output or "",
                 verified_urls=_verified_urls or None,
                 weights=_rcfg.get("weights"),
                 required_sections=_rcfg.get("template"),
             )
+            # §14.7: the structural rubric measures QUANTITY (sections, URLs, words) and
+            # saturates at 1.0 while real defects remain — it scored 1.0 on a report with a
+            # malformed mermaid, fabricated URLs, and zero inline citations. Couple the
+            # recorded score to the FINAL weaknesses so an open defect can never read as a
+            # perfect score, and a doc with fewer/less-severe weaknesses scores higher.
+            _score = adjusted_score(_rubric_base, _weaknesses)
             # Remaining weaknesses are surfaced BELOW the report in the result view via the
             # HillClimbEvent.weaknesses emitted below (the frontend renders them) — they must
             # NOT be concatenated into result_output, which IS the deliverable document

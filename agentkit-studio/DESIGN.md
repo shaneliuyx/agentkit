@@ -1904,3 +1904,75 @@ purged (365 → 321). **Lesson:** a memory that cannot distinguish a *finding* f
 *refusal* will, over runs, teach every agent to refuse — curating what ENTERS
 memory matters as much as curating the report; the recall signal is only as clean
 as the write filter.
+
+### 14.7 Score decoupled from weaknesses + agent-I/O logging (2026-06-29)
+
+**Symptom.** A re-run scored **1.0 with 8 open weaknesses** (a malformed mermaid,
+fabricated URLs, zero inline citations). A perfect score alongside unaddressed
+defects is incoherent, and none of the prior weaknesses were fixed.
+
+**Root cause A — the re-run was a COLD START, not a continuation.** The prior
+lineage's requirement was `"Goal: … Constraints: …"`; the re-run's was
+`"[USER]: … [ASSISTANT]: # Research Report…"` (a conversational "Continue run"
+requirement). Different text → different `task_hash` → a fresh v1 lineage that
+never seeded from the prior good doc, so the anti-regression / mermaid-repair
+machinery (which fires only on a *seeded* run) never applied. The fixes work; the
+lineage rotation kept them from triggering. (Same trap as §14.1 D1 — task identity
+must be the stable BASE requirement, not the conversational/goal-augmented text.)
+
+**Root cause B — the rubric is decoupled from the weaknesses.** `rubric_score` is a
+deterministic QUANTITY checklist (`sourcing=n_urls/8`, `verification=count("verif|
+fetched")/8`, `evidence=quotes/8`, `structure=template-coverage`, `methodology=
+has_method + words/1500`). A 66 KB report maxes every part → 1.0. It is blind to
+correctness: it can't parse a mermaid diagram, it counts the *word* "verified"
+rather than cache matches (so fabricated URLs pass), and it counts URLs anywhere
+(so an end-bibliography satisfies "sourcing" with zero inline citations). The
+LLM-mined weaknesses + the §14.6 lints find those defects but never fed the score.
+
+**Fix.** `rubric.adjusted_score(base, weaknesses)` couples them: the user invariant
+is that ANY open weakness ⇒ score < 1.0 (hard ceiling 0.92), plus a graduated,
+capped penalty (`0.04`/weakness, `+0.06` for an objective lint defect, floor 0.6×)
+so the score tracks the count and severity of what is still wrong. The runner
+records `adjusted_score(rubric_base, _weaknesses)`. Example: the 1.0 / 8-weakness
+case (1 hard) now records **0.62**. The gate's pairwise `make_rubric_preference`
+stays structural (it has weaknesses only for the new side).
+
+**Diagnostics.** Each phase now appends its INPUT (the full prompt the agent saw)
+and OUTPUT to `agent_io.jsonl` in the session workspace — the fastest way to see
+goal/intent stacking, an upstream fold, recalled poison, or a worker that refused
+vs produced. Best-effort; never breaks the run.
+
+**Open follow-up — the rubric is shallow.** A quantity checklist will always be
+gameable. The durable upgrade is an LLM-judge with an explicit rubric (G-Eval /
+DeepEval) for coherence + a RAGAS-style faithfulness/citation-grounding check
+against the fetched sources, replacing the keyword-counting `verification` and
+`evidence_depth` parts. `adjusted_score` is the bridge until then. **Lesson:** a
+score that can't see what the critic sees will always disagree with it; the metric
+must be a function of the same evidence the weaknesses are mined from.
+
+### 14.8 `max_epochs` was a cumulative-version ceiling, not a per-run budget (2026-06-29)
+
+**Symptom.** Running one epoch, then another, did NOT equal running with
+`max_epochs=2`: the two manual runs produced two real epochs; the single
+`max_epochs=2` run produced only ONE.
+
+**Root cause.** The epoch loop stops on `EpochResult.status == "converged"`, and
+that status is set when `_version >= max_epochs` (runner ~2449). But `_version =
+next_version(task_hash) = MAX(version)+1` over **every prior run of the task**
+(task_runs.py:190) — the *cumulative, all-time* version, not the epoch index within
+this run. On a task with history (say version 5), the first epoch of a
+`max_epochs=2` run records version 6, `6 >= 2` → `"converged"` → `run()` breaks
+after one pass. Two manual runs each invoke `run()` once and each force a new
+version, so they always do two real epochs. Seeding and weakness-injection are
+identical in both paths (`latest_with_content` + `accumulated_weaknesses`, same
+`task_hash`) — the divergence is purely the stop condition conflating "all-time
+version" with "epochs this run".
+
+**Fix.** `run()` now breaks only on a genuine `"plateau"` (this epoch's score did
+not beat the prior by `min_improvement`) or cancel; the per-run epoch count is
+already bounded by `range(max_epochs)`, so `converged` must not also gate it. Now
+`max_epochs=N` runs N epochs per invocation (unless a real plateau), matching the
+"two manual runs = two epochs" intuition. The `converged` status label is retained
+for the timeline but no longer controls the loop. **Lesson:** a counter that means
+"how many times ever" can't double as "how many times now" — loop control must read
+a per-invocation index, not a persistent monotonic one.

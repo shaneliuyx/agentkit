@@ -1121,6 +1121,48 @@ def test_merge_creates_missing_sections_addresses_all_weaknesses() -> None:
     assert _merge_missing_sections(merged, tmpl) == merged
 
 
+def test_max_epochs_counts_per_run_not_cumulative_version(
+    fake_client_factory, tmp_path, monkeypatch
+) -> None:
+    """max_epochs is the epoch budget for THIS run, not an all-time version ceiling.
+
+    Bug (§14.8): the stop status is `_version >= max_epochs` where `_version` is the
+    CUMULATIVE version (MAX(version)+1 over every prior run). On a task with history
+    the first epoch already exceeds the cap → 'converged' → the loop ran once, so
+    max_epochs=2 did ONE pass while two manual runs did two. With the fix the loop
+    stops only on a real plateau, so both epochs run despite prior history.
+    """
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    from studio.task_runs import TaskRun, TaskRunStore, task_hash
+
+    req = "1. compare redis and postgres 2. write a recommendation"
+    store = TaskRunStore(db_path=tmp_path / "task_runs.db")
+    for v in range(1, 6):  # prior history: cumulative version already at 5 (>= max_epochs)
+        store.record(TaskRun(
+            task_hash=task_hash(req), session_id=f"s{v}", version=v, score=0.5,
+            weaknesses=[], artifact_path="", requirement=req, result_text="x",
+        ))
+
+    events: list[StudioEvent] = []
+    session = _make_session()
+    # min_improvement 0 so constant fake scores never count as a plateau — isolates the
+    # converged-vs-per-run-count behavior we are testing.
+    session.hill_climb_config = {
+        "auto_improve": True, "max_epochs": 2, "min_improvement": 0.0,
+    }
+    runner = Runner(
+        session, events.append, client_factory=fake_client_factory,
+        embedder=None, workspace_root=tmp_path,
+    )
+    runner.run(req)
+
+    phase_ids = [e.step_id for e in events if e.EVENT_TYPE == "phase_start"]
+    e1 = {s for s in phase_ids if s.startswith("e1:")}
+    e2 = {s for s in phase_ids if s.startswith("e2:")}
+    assert e1, phase_ids   # epoch 1 ran
+    assert e2, phase_ids   # epoch 2 ALSO ran (before the fix it stopped after e1)
+
+
 def test_bad_mermaid_seed_reaches_reducer_with_repair_instruction(
     tmp_path, monkeypatch
 ) -> None:
