@@ -267,16 +267,26 @@ class TaskRunStore:
         return self._row_to_run(row) if row else None
 
     def latest_with_content(self, task_hash_str: str, ws_root: Path | None = None) -> TaskRun | None:
-        """Return most recent run whose artifact.md exists and is non-empty.
+        """Return most recent run with usable seed content.
 
         Prefers *latest* over *best-score*: LLM self-eval scores are noisy and
         the latest run has accumulated the most incremental work.
+
+        Content is the on-disk ``artifact.md`` when it survives (richest — it can
+        exceed ``result_text``), else the DB-persisted ``result_text`` for that run.
+        The DB fallback is essential: Studio workspaces are ephemeral, so the prior
+        session's artifact file is usually GONE by the next run (cross-session /
+        post-restart). Returning None there silently cold-starts hill-climb and
+        BYPASSES the keep/discard gate — a regressed epoch then overwrites the
+        served deliverable with no anti-regression protection (DESIGN §14.6).
         """
         from studio.workspace import workspace_root as _ws_root  # noqa: PLC0415
         root = ws_root or _ws_root()
         for run in reversed(self.all_runs(task_hash_str)):
             art = root / run.session_id / "artifact.md"
             if art.exists() and art.stat().st_size > 0:
+                return run
+            if (run.result_text or "").strip():
                 return run
         return None
 

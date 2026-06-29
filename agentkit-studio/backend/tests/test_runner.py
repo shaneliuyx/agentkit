@@ -1043,6 +1043,149 @@ def test_config_persists_per_task(tmp_path, monkeypatch) -> None:
     assert runner2._resolve_hc_config(req).get("max_epochs") == 2
 
 
+def test_latest_with_content_falls_back_to_result_text(tmp_path, monkeypatch) -> None:
+    """The hill-climb seed survives a missing artifact.md by falling back to the
+    DB-persisted result_text. Studio workspaces are ephemeral AND a raw-synthesis
+    run never writes artifact.md at all — keying the seed on the file alone left
+    most priors seedless, which SKIPPED the keep/discard gate and let a regressed
+    epoch overwrite the served deliverable (the hill-climb regression, DESIGN §14.6).
+    """
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    from studio.task_runs import TaskRun, TaskRunStore, task_hash
+
+    ws_root = tmp_path / "ws"
+    store = TaskRunStore(db_path=tmp_path / "task_runs.db")
+    req = "study how to use Pi and Craft to develop an agent"
+    th = task_hash(req)
+    # A prior run that finalized result.md (→ result_text) but NEVER wrote an
+    # artifact.md to disk — exactly the failing real-world run (score 0.41, no file).
+    store.record(TaskRun(
+        task_hash=th, session_id="s_prior", version=1, score=0.41, weaknesses=[],
+        artifact_path="", requirement=req, result_text="# Good Report\nbody",
+    ))
+    assert not (ws_root / "s_prior" / "artifact.md").exists()  # precondition
+
+    prior = store.latest_with_content(th, ws_root=ws_root)
+    assert prior is not None  # was None before the fix → cold start → gate skipped
+    assert prior.session_id == "s_prior"
+    assert prior.result_text == "# Good Report\nbody"
+
+
+def test_merge_creates_missing_sections_addresses_all_weaknesses() -> None:
+    """Inject weaknesses (two required sections absent from the seed) and verify the
+    merge ADDRESSES ALL of them (DESIGN §14.6). A seeded hill-climb run keeps the
+    seed's structure — the reducer patches existing headings but never injects a
+    missing one, so a required section absent from the seed recurs as a weakness
+    forever. _merge_missing_sections lays down a heading for each, closing the loop.
+
+    Pins three behaviors: (1) every missing template section gets created; (2) after
+    the merge ZERO template sections are missing — all 'missing-section' weaknesses
+    addressed; (3) a renamed-but-present section is matched, not duplicated.
+    """
+    from studio.runner import _merge_missing_sections
+    from studio.rubric import sections_present
+
+    # Seed == the real failing case: has Exec Summary + a renamed Conclusion, but is
+    # MISSING "Key Findings" and "Limitations and Open Questions" (the recurring
+    # weaknesses from the screenshot).
+    seed = (
+        "# Report\n\n## Executive Summary\nx\n\n"
+        "## Conclusion and Best Practices\ny\n"
+    )
+    tmpl = [
+        "Executive Summary",
+        "Key Findings",
+        "Limitations and Open Questions",
+        "Conclusion and Recommendations",
+    ]
+    before_missing = [
+        s for s in tmpl
+        if s.lower() not in {p.lower() for p in sections_present(seed, tmpl)}
+    ]
+    assert before_missing == ["Key Findings", "Limitations and Open Questions"]
+
+    merged = _merge_missing_sections(seed, tmpl)
+
+    # (1) each injected weakness now has a heading to fill
+    assert "## Key Findings" in merged
+    assert "## Limitations and Open Questions" in merged
+    # (2) ALL missing-section weaknesses addressed — nothing left missing
+    after_missing = [
+        s for s in tmpl
+        if s.lower() not in {p.lower() for p in sections_present(merged, tmpl)}
+    ]
+    assert after_missing == []
+    # (3) renamed-but-present section matched, not duplicated
+    assert merged.count("## Conclusion") == 1
+    # idempotent: a second pass adds nothing
+    assert _merge_missing_sections(merged, tmpl) == merged
+
+
+def test_bad_mermaid_seed_reaches_reducer_with_repair_instruction(
+    tmp_path, monkeypatch
+) -> None:
+    """Inject a malformed mermaid into the seed and verify the run (a) DETECTS it and
+    (b) tells the reducer to REPAIR it in place (DESIGN §14.6). Before this, the
+    reducer prompt was strictly additive ('never a rewriter', 'VERBATIM') so a broken
+    diagram was immortal. We capture the prompts the model receives and assert the
+    repair exception + the exact bad line are present.
+
+    Note: actual repair needs a real model — the fake client returns a fixed string
+    and cannot rewrite. This pins detection + instruction-delivery (the parts that
+    were missing); end-to-end correction is a live-backend check.
+    """
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
+    from studio.artifact_lint import lint_artifact
+    from studio.runner import Runner
+    from studio.task_runs import TaskRun, TaskRunStore, task_hash
+
+    bad_seed = (
+        "# Report\n\n## Design Architecture\n\n```mermaid\ngraph TD\n"
+        "    ToolSelector -->|Search| WebTool\n"
+        "    ToolSelector|Read| ReadTool\n```\n\n## Conclusion\nbody\n"
+    )
+    assert lint_artifact(bad_seed)  # sanity: the seed IS malformed
+
+    req = "1. research widgets 2. write the report"
+    # The runner's store lives at _db_path() == workspace_root().parent/task_runs.db
+    # (one level ABOVE STUDIO_WORKSPACE_ROOT=.../ws). Record the seed there so the run
+    # reads the SAME db — else it cold-starts and the seed never loads.
+    store = TaskRunStore(db_path=tmp_path / "task_runs.db")
+    store.record(TaskRun(
+        task_hash=task_hash(req), session_id="s_prior", version=1, score=0.4,
+        weaknesses=[], artifact_path="", requirement=req, result_text=bad_seed,
+    ))
+
+    class _Capturing:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.n_calls = 0
+            self.total_tokens = 0
+
+        def chat(self, messages, tools=None):
+            from agentkit.types import ChatResult
+            self.n_calls += 1
+            self.total_tokens += 5
+            self.prompts.append(str(messages))
+            return ChatResult(text="The answer is 42.", total_tokens=5)
+
+    cap = _Capturing()
+    session = _make_session()
+    session.hill_climb_config = {"auto_improve": True, "max_epochs": 1}
+    runner = Runner(
+        session, lambda _e: None, client_factory=lambda _o: cap,
+        embedder=None, workspace_root=tmp_path / "ws",
+    )
+    runner.run(req)
+
+    blob = "\n".join(cap.prompts)
+    # (a) the reducer was given the malformed seed and (b) told to repair it
+    assert "repair" in blob.lower(), "reducer never told to repair"
+    assert "Malformed mermaid edge" in blob, "the lint weakness never reached the model"
+    assert "ToolSelector|Read|" in blob, "the exact bad line was not named for repair"
+
+
 def test_step_ids_namespaced_across_epochs(
     fake_client_factory, tmp_path, monkeypatch
 ) -> None:

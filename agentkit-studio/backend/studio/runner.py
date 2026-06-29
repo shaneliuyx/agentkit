@@ -626,6 +626,29 @@ def _strip_preamble(text: str) -> str:
     return text[m.start():] if m else text
 
 
+def _merge_missing_sections(text: str, sections: list[str]) -> str:
+    """Append each template section ABSENT from *text* as an empty heading +
+    placeholder, giving a seeded hill-climb run a PATCH_TARGET for it (DESIGN §14.6).
+
+    A seeded run keeps the seed's structure: the reducer PATCHES existing headings
+    and never injects a missing one, so a required section absent from the seed is
+    mined as a weakness every epoch but never created. Laying down an empty heading
+    closes that loop — the additive pipeline then fills it. Concept-aware
+    (``sections_present``) so a renamed-but-present section ("Conclusion and Best
+    Practices" ≈ "Conclusion and Recommendations") is NOT duplicated. Returns *text*
+    unchanged when nothing is missing.
+    """
+    if not sections:
+        return text
+    from studio.rubric import sections_present
+    present = {s.lower() for s in sections_present(text, sections)}
+    missing = [s for s in sections if s.lower() not in present]
+    if not missing:
+        return text
+    add = "\n\n".join(f"## {s}\n\n_(to be completed)_" for s in missing)
+    return text.rstrip() + "\n\n" + add + "\n"
+
+
 def _weakness_score(
     prior_weaknesses: list[str],
     open_weaknesses: list[str],
@@ -1388,7 +1411,6 @@ class Runner:
         # when not hill-climbing.
         _repeat_failed: set[str] = set()
         if _hc_cfg.get("auto_improve"):
-            import shutil
             from studio.task_runs import TaskRunStore, task_hash as _task_hash
             _thash = _task_hash(_base_requirement)
             # Pass the embedder so each run's requirement is embedded for R10
@@ -1404,24 +1426,40 @@ class Runner:
             if _prior:
                 _prior_art = _eff_ws2 / _prior.session_id / "artifact.md"
                 _artifact_copied = False
+                # Seed source: the prior session's on-disk artifact.md when it
+                # survives (richest — the section-keyed handoff), ELSE the DB-
+                # persisted result_text. The fallback is load-bearing: artifact.md
+                # is a TRANSIENT working file written only when a run goes through
+                # the reducer/patch path — a raw-synthesis run (e.g. an oMLX model
+                # that dumped findings instead of patching sections) finalizes
+                # result.md but NEVER writes artifact.md. The durable deliverable
+                # is result.md == result_text in the DB, recorded for every run.
+                # Keying the seed on artifact.md alone meant most priors had no
+                # seed → _artifact_copied stayed False → the keep/discard gate
+                # below was SKIPPED → a regressed epoch overwrote the served
+                # deliverable with no protection (the hill-climb regression that
+                # served a 0.12 stub over a 0.41 prior; DESIGN §14.6).
+                _raw_seed: str | None = None
                 if _prior_art.exists():
+                    try:
+                        _raw_seed = _prior_art.read_text()
+                    except OSError:
+                        _raw_seed = None
+                if _raw_seed is None and (_prior.result_text or "").strip():
+                    _raw_seed = _prior.result_text
+                if _raw_seed is not None:
                     _curr_ws = Workspace(session.session_id, root=_eff_ws2)
-                    shutil.copy(_prior_art, _curr_ws.root / "artifact.md")
-                    _artifact_copied = True
-                    # Record the seed size: a run must never write back a SHORTER
-                    # artifact than it started from. Guarantees "worst case = no
-                    # improvement" — a failed/thin run keeps the prior good doc
-                    # instead of overwriting it (the regression that stranded the
-                    # good 28KB report behind thin "search unavailable" output).
                     # §11.4: SANITIZE inherited corruption first — an artifact a
                     # prior reducer poisoned with a commentary preamble would
                     # otherwise be locked in by the grow-only ratchet forever (a
                     # clean-up that shortens it reads as a regression). Strip on seed
-                    # so _seed_len is the CLEAN baseline the run grows from.
+                    # so _seed_len is the CLEAN baseline the run grows from. Seed the
+                    # current workspace's artifact.md so the run edits rather than
+                    # regenerates, and _seed_text feeds the Phase-1 keep/discard gate.
                     try:
-                        _seed_path = _curr_ws.root / "artifact.md"
-                        _seed_clean = _strip_preamble(_seed_path.read_text())
-                        _seed_path.write_text(_seed_clean)
+                        _seed_clean = _strip_preamble(_raw_seed)
+                        (_curr_ws.root / "artifact.md").write_text(_seed_clean)
+                        _artifact_copied = True
                         _seed_len = len(_seed_clean)
                         _seed_text = _seed_clean  # Phase-1 gate: prior best to beat
                     except OSError:
@@ -1461,7 +1499,17 @@ class Runner:
                 # SECOND. "FIND AND OUTPUT" framing causes narration (model says "I'll
                 # search" but never calls the tool). "Use web_search tool right now"
                 # triggers actual tool_call responses the loop can execute.
-                if _fix_items:
+                # Gate the patch-or-silent EDIT contract on a real seed, not just on
+                # a prior RUN existing. PATCH_TARGET ("a section heading in the
+                # artifact") + "find nothing → output NOTHING, the reducer keeps the
+                # existing doc" only make sense when there IS a seeded doc. Injected
+                # without one (prior run recorded but its artifact.md never written),
+                # a weak model is told to patch a phantom: most workers go silent →
+                # the reducer has no base → a 28-line scrap dump that scores BELOW a
+                # clean from-scratch run (v2 0.12 < v1 0.41). With no seed, fall back
+                # to normal generation; weaknesses still steer the planner softly via
+                # _weaknesses_block / session.weaknesses set above (DESIGN §14.6).
+                if _fix_items and _artifact_copied:
                     _finding_schema = (
                         "## RESEARCH_FINDING\n"
                         "ARTICLE_TITLE: <exact title>\n"
@@ -1636,6 +1684,29 @@ class Runner:
                 _skel_file.write_text(_skel)
                 _artifact_copied = True       # additive pipeline now has a base
                 _seed_len = len(_skel)        # may grow from here, never shrink below
+
+        # §14.6: a SEEDED run keeps the seed's section structure — the reducer
+        # PATCHES existing headings, it never injects a missing one. So a rubric-
+        # template section absent from the seed (e.g. "Limitations and Open
+        # Questions") is mined as a weakness EVERY epoch yet never created: there is
+        # no PATCH_TARGET heading to fill, so hill-climb "can't create new sections."
+        # Fix: append each MISSING template section as an empty heading + placeholder
+        # so the additive patch pipeline has a target to fill. Concept-aware match
+        # (sections_present) avoids re-adding a renamed-but-present section. Covers
+        # both paths — on cold start the skeleton already has every section, so the
+        # missing set is empty and this is a no-op. Only when a template is configured.
+        _tmpl_sections = (getattr(session, "rubric_config", None) or {}).get("template")
+        if _artifact_copied and _tmpl_sections and _eff_ws2 is not None:
+            _art_f = _eff_ws2 / session.session_id / "artifact.md"
+            try:
+                _cur = _art_f.read_text()
+                _merged = _merge_missing_sections(_cur, _tmpl_sections)
+                if _merged != _cur:
+                    _art_f.write_text(_merged)
+                    _seed_len = len(_merged)
+                    _dbg("seeded missing template section(s)")
+            except Exception:  # noqa: BLE001 — structure-merge is best-effort
+                pass
         cancelled = False
         final_output = ""
         #: Gate outcomes collected across phases — the Loop Doctor's safe_actions
@@ -1692,6 +1763,26 @@ class Runner:
                             _seed_text = (_eff_ws2 / session.session_id / "artifact.md").read_text()
                         except OSError:
                             pass
+                    # §14.6: the additive-merger rules below forbid rewriting — which also
+                    # blocks REPAIR, so a malformed mermaid edge / truncated code block in
+                    # the seed is immortal. Carve a NARROW exception: when the seed has
+                    # FLAGGED malformations, permit fixing exactly those in place (syntax
+                    # only, content kept). accept_rewrite already allows the rewrite; this
+                    # lifts the PROMPT-level ban for the specific defects, nothing else.
+                    _repair_clause = ""
+                    try:
+                        from studio.artifact_lint import lint_artifact
+                        _seed_lints = lint_artifact(_seed_text)
+                        if _seed_lints:
+                            _repair_items = "\n".join(f"      - {w}" for w in _seed_lints)
+                            _repair_clause = (
+                                f"  - EXCEPTION (repair-in-place): fix ONLY these malformed "
+                                f"blocks — correct the syntax, keep the content and length "
+                                f"roughly the same; everything else stays verbatim:\n"
+                                f"{_repair_items}\n"
+                            )
+                    except Exception:  # noqa: BLE001 — repair clause is best-effort
+                        pass
                     _art_ctx = (
                         f"CURRENT ARTIFACT (from prior run — base to improve):\n"
                         f"--- BEGIN ARTIFACT ---\n{_seed_text}\n--- END ARTIFACT ---\n\n"
@@ -1708,9 +1799,11 @@ class Runner:
                         f"  - You may ONLY ADD content that comes from a worker's RESEARCH_FINDING\n"
                         f"    (with its URL). No finding for a section → leave that section exactly\n"
                         f"    as-is.\n"
-                        f"  - If workers found NOTHING (no RESEARCH_FINDING blocks above), output\n"
-                        f"    the CURRENT ARTIFACT completely unchanged. Never write a 'blocker' or\n"
-                        f"    'search unavailable' report — that is failure-narration, not content.\n\n"
+                        f"{_repair_clause}"
+                        f"  - If workers found NOTHING (no RESEARCH_FINDING blocks above) AND there\n"
+                        f"    is no repair exception above, output the CURRENT ARTIFACT completely\n"
+                        f"    unchanged. Never write a 'blocker' or 'search unavailable' report —\n"
+                        f"    that is failure-narration, not content.\n\n"
                         f"How to apply each RESEARCH_FINDING:\n"
                         f"  1. Find PATCH_TARGET in the artifact.\n"
                         f"  2. URL missing inline → add it next to the citation.\n"
@@ -2181,6 +2274,19 @@ class Runner:
             if _reducer_gaps:
                 _seen_w = set(_weaknesses)
                 _weaknesses = [g for g in _reducer_gaps if g not in _seen_w] + _weaknesses
+            # §14.6: deterministic content-validity lints (malformed mermaid edge,
+            # truncated code fence) the gap-based miner never names. Prepend so they
+            # seed the next run's constraints and the reducer repairs them in place
+            # (accept_rewrite already permits the rewrite). Concrete + grounded, like
+            # _reducer_gaps. Surfaced to the user via HillClimbEvent.weaknesses too.
+            try:
+                from studio.artifact_lint import lint_artifact
+                _lints = lint_artifact(_scored_text or "")
+                if _lints:
+                    _seen_w = set(_weaknesses)
+                    _weaknesses = [w for w in _lints if w not in _seen_w] + _weaknesses
+            except Exception:  # noqa: BLE001 — lint is best-effort, never block recording
+                pass
             # Deterministic section guard (DESIGN §14.2): the moving-window miner now sees the
             # whole artifact, but the SCORER still windows (20K) and its UNMET line is fed to
             # the miner as a starting point — so a tail section past the scorer's window can

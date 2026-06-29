@@ -1816,3 +1816,74 @@ slightly-different goal yields). A planner-prompt "each phase must be DISTINCT"
 line is also defense in depth. **Lesson:** reproduce the exact input the failing
 run *constructs* — the cause was an input transform (goal prepend), upstream of
 every layer first patched.
+
+### 14.6 Hill-climb regression — the keep/discard gate was keyed on a file that usually doesn't exist (2026-06-28)
+
+**Symptom.** Enabling hill-climb made output *worse*: a cross-session re-run of
+the Pi/Craft task served a 0.122 / 28-line stub over the prior 0.4148 / 122-line
+report. The keep/discard gate (§14.1) exists precisely to forbid this — yet the
+regression was recorded and downloaded.
+
+**Root cause — "never copied because never written," not "deleted."** The gate
+only fires `if _artifact_copied and _seed_text.strip()`. Both came **solely from
+the prior session's on-disk `artifact.md`**. But `artifact.md` is a *transient
+working file* written only on the reducer/patch path; the *durable* per-session
+deliverable is `result.md` (== the DB `result_text`, recorded for every run). A
+raw-synthesis run (e.g. an oMLX model that dumped findings instead of patching
+sections) finalizes `result.md` but **never writes `artifact.md`**. Evidence: of
+1524 workspaces only 62 had `artifact.md`; the 0.80 runs had one, the regressed
+0.12–0.41 runs did not; no `unlink`/`rmtree`/`rename` of it exists in studio, and
+the prior session dir was intact (held `result.md`). So the seed lookup found no
+file → `_artifact_copied=False` → **gate skipped** → the regressed epoch was
+served unprotected and became the carried-forward "latest."
+
+**Fix.** Seed (and therefore the gate) now falls back to the DB `result_text`
+when `artifact.md` is absent: `TaskRunStore.latest_with_content` returns a run
+whose `result_text` is non-empty even with no file, and the runner writes that
+text as the current workspace's `artifact.md` seed (`_artifact_copied=True`,
+`_seed_text` set). The gate fires whenever *any* prior exists; only a true cold
+start (version 1) accepts unconditionally. Net: "worst case = prior good report
+retained" holds across sessions/restarts/raw-synthesis runs, and cross-session
+auto-improve actually accumulates (its documented intent). **Lesson:** a closed
+loop guarded by a volatile precondition is an open loop most of the time — gate
+on the durable record (the DB row), not the ephemeral artifact.
+
+**Related defect — a no-seed run degraded BELOW a clean cold start.** Same task,
+version 2: a prior *run* existed but its *doc* was never seeded (no `artifact.md`,
+and at the time, no DB fallback). The weakness/"patch-or-silent" worker contract
+was injected under `if _prior:` (a prior run exists), not `if _artifact_copied:`
+(a doc was seeded). So v2 was told *"find missing data, emit RESEARCH_FINDING
+patches targeting sections in the artifact, find nothing → output NOTHING"* — with
+no artifact to patch. A weak model went silent → the reducer kept nothing → a
+28-line scrap (0.12) **below** the clean cold-start v1 (0.41). **Fix:** gate the
+edit contract on `_artifact_copied`, not `_prior` — no seed ⇒ generate cleanly,
+weaknesses still steer the planner softly. (With the DB-fallback above,
+`_artifact_copied` is now true whenever any prior has `result_text`, so this is the
+belt to that suspenders.)
+
+**Related defect — hill-climb could not CREATE a missing section.** The full
+template skeleton (every required heading) is laid down only `if not
+_artifact_copied` — i.e. only on a cold start. A *seeded* run inherits the seed's
+structure; the reducer PATCHES existing headings (`PATCH_TARGET: <heading in the
+artifact>`) and never injects a new one. So a rubric-template section absent from
+the seed (e.g. "Limitations and Open Questions") was mined as a weakness *every
+epoch* yet never created — there was no heading to patch. **Fix:**
+`_merge_missing_sections` appends each absent template section as an empty heading
++ placeholder before the phase loop, so the additive pipeline has a target to fill.
+Concept-aware (`sections_present`) so a renamed-but-present section is not
+duplicated; no-op on cold start (the skeleton already has every section).
+
+**Related defect — the loop GROWS but never REPAIRS (append-only in practice).**
+A malformed mermaid edge / truncated code block introduced once survived every
+epoch. Two layers: (1) the reducer prompt is explicitly additive — *"never a
+rewriter… PRESERVE every section VERBATIM… output length STRICTLY >= input"*; (2)
+the weakness miner only names what is **missing**, never what is **malformed**, so
+the defect was never even surfaced. (`accept_rewrite` at the code level already
+permitted a content-preserving rewrite — the ban was in the prompt + the absent
+signal, not the ratchet.) **Fix:** a deterministic validator `studio.artifact_lint`
+(malformed mermaid edge, unbalanced code fence) emits the defect as a weakness —
+surfaced in the GUI and seeded into the next run's constraints — and the reducer
+prompt gains a NARROW repair exception ("fix ONLY these flagged blocks in place,
+everything else verbatim") fed by linting the seed. **Lesson:** a loop only ever
+fixes what its weakness signal can name; an additive optimizer needs an explicit,
+bounded licence to repair, or defects become immortal.
