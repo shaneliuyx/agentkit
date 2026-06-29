@@ -1887,3 +1887,20 @@ prompt gains a NARROW repair exception ("fix ONLY these flagged blocks in place,
 everything else verbatim") fed by linting the seed. **Lesson:** a loop only ever
 fixes what its weakness signal can name; an additive optimizer needs an explicit,
 bounded licence to repair, or defects become immortal.
+
+**Related defect — episodic memory poisoned the prompt with the agent's own
+refusals.** The MEMORY panel kept recalling worker refusals ("I appreciate you
+sharing this, but I need to clarify… these appear to be duplicate statements of
+intent…") at score ~0.84. Cause: `MemoryTracker` writes EVERY phase output to a
+**shared** store (`workspace_root().parent/shared_memory.db`, one DB across all
+runs — despite the "per-run" docstring) with **no filter**, and `recall()` injects
+the top-5 by similarity into every later phase. So a refusal stored once resurfaces
+at high similarity (it matches the very task that provoked it) in every future run
+and primes the next worker to echo it — a persistent, cross-run poison loop.
+Measured: `shared_memory.db` held 365 memories, **44 refusals (~12 %)**. **Fix:**
+`studio.panels.memory._is_low_value_memory` drops refusal / clarification /
+failure-narration openers in `record()`, and the 44 existing poison rows were
+purged (365 → 321). **Lesson:** a memory that cannot distinguish a *finding* from a
+*refusal* will, over runs, teach every agent to refuse — curating what ENTERS
+memory matters as much as curating the report; the recall signal is only as clean
+as the write filter.

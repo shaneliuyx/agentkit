@@ -22,6 +22,34 @@ from studio.events import MemoryEvent
 from studio.workspace import workspace_root
 
 
+#: Distinctive openers that mark an output as a REFUSAL / clarification request /
+#: failure-narration rather than research content. Storing these as episodic
+#: "findings" — and recalling them at high similarity into later phases — primes the
+#: next worker to echo the same refusal, a persistent poison loop across the SHARED
+#: store (DESIGN §14.6: a loop only fixes what its signal can name; here it must
+#: refuse to MEMORIZE non-content). Conservative: matched only against the opening
+#: of the output, where a refusal always leads, so genuine findings are not dropped.
+_LOW_VALUE_MARKERS = (
+    "i appreciate you sharing",
+    "i need to clarify",
+    "need to clarify",
+    "duplicate statements of intent",
+    "to help you effectively, i need",
+    "could you clarify",
+    "i could not find",
+    "i'm unable to",
+    "i am unable to",
+    "search unavailable",
+    "let me know what specific",
+)
+
+
+def _is_low_value_memory(output: str) -> bool:
+    """True when *output* opens like a refusal / clarification / failure-narration."""
+    head = output.strip()[:400].lower()
+    return any(marker in head for marker in _LOW_VALUE_MARKERS)
+
+
 class MemoryTracker:
     """Owns a per-run ``MemoryStore`` and turns it into ``memory`` frames.
 
@@ -43,8 +71,16 @@ class MemoryTracker:
             self._notice = f"memory store unavailable: {exc}"
 
     def record(self, step_id: str, output: str) -> None:
-        """Store one phase output as an episodic memory (best-effort)."""
+        """Store one phase output as an episodic memory (best-effort).
+
+        Skips refusals / clarification requests / failure-narration: memorizing them
+        poisons recall — a stored refusal resurfaces at high similarity in later
+        phases AND future runs (the store is shared) and primes the next worker to
+        echo it (DESIGN §14.6).
+        """
         if self._store is None or not output.strip():
+            return
+        if _is_low_value_memory(output):
             return
         try:
             self._store.add("episodic", output, metadata={"step_id": step_id})
