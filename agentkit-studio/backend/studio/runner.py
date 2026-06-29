@@ -1418,10 +1418,21 @@ class Runner:
             # back deterministically (whole-doc repair truncates a large artifact — verified).
             # Covers the single-epoch/cold-start case the seed-only repair clause and the
             # next-epoch self-heal both miss. No-op when the document is already clean.
-            if use_llm and _scored_text:
+            # NOT gated on use_llm: output VALIDITY is independent of the generation mode —
+            # a hill-climb run in the default "auto" mode (use_llm False) still ships a doc
+            # whose mermaid must be valid. base_client is always built, so repair can run.
+            if base_client is not None and _scored_text:
                 try:
+                    from studio.artifact_lint import lint_artifact as _lint_dbg
+                    _lints_before = _lint_dbg(_scored_text)
                     _rep, _rchanged = _repair_lints(
                         _scored_text, base_client, _original_requirement
+                    )
+                    # Observability (the bug was un-diagnosable because repair was silent):
+                    # record whether it ran, fired, and the residual lint count.
+                    _dbg(
+                        f"repair_lints: lints_before={len(_lints_before)} "
+                        f"changed={_rchanged} lints_after={len(_lint_dbg(_rep))}"
                     )
                     if _rchanged:
                         _scored_text = _rep
@@ -1431,8 +1442,8 @@ class Runner:
                                 _art_file.write_text(_scored_text)
                         except Exception:  # noqa: BLE001 — write-back is best-effort
                             pass
-                except Exception:  # noqa: BLE001 — repair must never break recording
-                    pass
+                except Exception as _rexc:  # noqa: BLE001 — repair must never break recording
+                    _dbg(f"repair_lints: EXCEPTION {_rexc!r}")
             # PLAN item 3: neutralize fabricated/unverified URLs before scoring AND serving,
             # so a reducer-invented link cannot earn citation credit or reach the user.
             # FAIL-OPEN — an empty verified set (search down) changes nothing.
