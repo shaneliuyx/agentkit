@@ -68,651 +68,56 @@ from studio.tools import ToolAugmentedClient, web_toolkit_available
 from studio.workspace import Workspace
 
 # ---------------------------------------------------------------------------
-# M8 / M9 — Epic plan parsing and CoT prompt builders (DESIGN §3, §5)
+# Re-exports — stateless helpers extracted into focused modules (SRP).
+# These names remain importable from ``studio.runner`` for callers/tests that do
+# ``from studio.runner import X``. The runner body uses them unchanged.
 # ---------------------------------------------------------------------------
-
-def _parse_epic_plan(text: str) -> list[dict]:
-    """Extract epics list from an EPIC_PLAN JSON block in LLM planner output.
-
-    Returns empty list on missing block or invalid JSON so the caller can
-    fall through to the standard agentkit plan() path.
-    """
-    m = _re.search(r"EPIC_PLAN:\s*```json\s*(\{.*?\})\s*```", text, _re.DOTALL)
-    if not m:
-        # Unfenced: LLMs may emit compact single-line JSON; greedy without DOTALL
-        # so `.` stops at newline boundaries and captures the full line-level object.
-        m = _re.search(r"EPIC_PLAN:\s*(\{.*\})", text)
-    if not m:
-        return []
-    try:
-        data = _json.loads(m.group(1))
-        return data.get("epics", [])
-    except (ValueError, KeyError):
-        return []
-
-
-def _build_planner_cot_prompt(
-    goal: str,
-    artifact_path: str,
-    artifact_summary: str,
-    weaknesses_block: str,
-) -> str:
-    """Strategic planner CoT prompt (DESIGN §3 — Planner CoT Prompt).
-
-    Returned string is passed as the sole user message to the LLM; the model
-    must emit an EPIC_PLAN JSON block that _parse_epic_plan() can extract.
-    """
-    return (
-        "You are the strategic planner for a multi-phase agent system.\n"
-        "The goal can be any type of task — research, writing, analysis, design,\n"
-        "code generation, data processing, or a mix. Do not assume a specific domain.\n"
-        "Think step by step.\n\n"
-        f"GOAL: {goal}\n"
-        f"DELIVERABLE PATH: {artifact_path}\n"
-        f"EXISTING DELIVERABLE: {artifact_summary or 'none'}\n"
-        f"ACCUMULATED WEAKNESSES:\n{weaknesses_block or '(none)'}\n\n"
-        "Step 1 — Understand the goal and the form of its deliverable.\n\n"
-        "Step 2 — Identify 2–5 major work phases (epics).\n"
-        "  Do not default to Research→Analysis→Writing unless those phases\n"
-        "  genuinely fit. Derive phase names from the goal itself.\n"
-        "  Each phase MUST be DISTINCT — never emit the same phase twice. A goal that\n"
-        "  lists several sub-tasks is ONE set of phases, not repeated per sub-task.\n\n"
-        "Step 3 — For each epic enumerate 6–15 parallel branches.\n"
-        "  Branches within an epic run in parallel — no inter-branch dependencies.\n"
-        "  Each branch must be completable by one agent with available tools.\n\n"
-        "Step 4 — Account for existing deliverable and weaknesses.\n"
-        "  If a deliverable exists: branches must address gaps only, not reconstruct.\n"
-        "  If no deliverable: Epic 1 branches should establish the initial structure.\n\n"
-        "Step 5 — Emit the plan:\n\n"
-        "EPIC_PLAN:\n"
-        "```json\n"
-        '{"epics": [{"id": "epic-1", "title": "...", "description": "...",\n'
-        '  "depends_on": [], "branches": [{"id": "b-1a", "description": "..."}]}]}\n'
-        "```\n"
-    )
-
-
-def _plan_from_epics(
-    requirement: str,
-    client,
-    weaknesses_block: str = "",
-    artifact_summary: str = "",
-) -> Plan:
-    """Epic-based planner (DESIGN §2.3) — replaces the flat cold decomposer.
-
-    The planner LLM is prompted with the CoT planner prompt and must emit an
-    EPIC_PLAN JSON block. Each epic becomes one phase (`PlanStep` with STAR
-    fan-out); `depends_on` sequences the phases. Falls back to the deterministic
-    `plan()` only when the LLM returns no parseable epics, so a malformed plan
-    never breaks a run.
-    """
-    prompt = _build_planner_cot_prompt(
-        goal=requirement,
-        artifact_path="artifact.md",
-        artifact_summary=artifact_summary,
-        weaknesses_block=weaknesses_block,
-    )
-    try:
-        resp = client.chat([{"role": "user", "content": prompt}])
-        epics = _parse_epic_plan(getattr(resp, "text", "") or "")
-    except Exception:  # noqa: BLE001 — any planner failure → deterministic fallback
-        epics = []
-    if not epics:
-        return plan(requirement)
-
-    epic_ids = {str(e.get("id")) for e in epics if e.get("id")}
-    steps = tuple(
-        PlanStep(
-            id=str(e["id"]),
-            description=str(e.get("description") or e.get("title") or e["id"]),
-            # keep only deps that resolve to a sibling epic (no self/dangling deps)
-            depends_on=tuple(
-                str(d) for d in e.get("depends_on", ())
-                if str(d) in epic_ids and str(d) != str(e["id"])
-            ),
-            topology=STAR,
-        )
-        for e in epics
-        if e.get("id")
-    )
-    if not steps:
-        return plan(requirement)
-    try:
-        return Plan(task=requirement, steps=steps)
-    except Exception:  # noqa: BLE001 — bad DAG → deterministic fallback
-        return plan(requirement)
-
-
-def _dedupe_plan_steps(plan_obj: Plan) -> Plan:
-    """Collapse phases with an identical normalized description — PATH-AGNOSTIC.
-
-    Applied to the FINAL plan, after the seeded / LLM-epic / deterministic planner has
-    run, because any of them can emit the same phase twice (the Pi/Craft run showed
-    "Craft agent…" and "create a research report" duplicated under the seeded planner —
-    `_plan_from_epics`'s id-dedup never saw it). Keeps the first step per normalized
-    description and remaps a dropped duplicate's id into its `depends_on` users so the DAG
-    stays connected. No-op (returns the original) when there are no duplicates.
-    """
-    seen: dict[str, str] = {}      # normalized description → kept step id
-    remap: dict[str, str] = {}     # dropped duplicate id → kept id
-    kept: list = []
-    for s in plan_obj.steps:
-        key = " ".join((s.description or "").lower().split())
-        if key and key in seen:
-            remap[s.id] = seen[key]
-            continue
-        if key:
-            seen[key] = s.id
-        kept.append(s)
-    if not remap:
-        return plan_obj
-    kept_ids = {s.id for s in kept}
-    new_steps = tuple(
-        replace(
-            s,
-            depends_on=tuple(
-                dict.fromkeys(
-                    remap.get(d, d) for d in s.depends_on
-                    if remap.get(d, d) in kept_ids and remap.get(d, d) != s.id
-                )
-            ),
-        )
-        for s in kept
-    )
-    try:
-        return replace(plan_obj, steps=new_steps)
-    except Exception:  # noqa: BLE001 — bad DAG → leave the plan as-is
-        return plan_obj
-
-
-def _today_note() -> str:
-    """Current-date context line for agent prompts (DESIGN §11.4).
-
-    Agents are otherwise date-blind and wrongly flag current-year sources as
-    'future-dated' credibility problems. A tool would force a round-trip per
-    agent for a value constant across the run; injecting it is cheaper and
-    guaranteed-seen.
-    """
-    import datetime
-    today = datetime.date.today()
-    return (
-        f"Today's date is {today.isoformat()}. Treat any date on or before today "
-        f"as current or past — do NOT flag dates in {today.year} or earlier as "
-        "'future-dated' or a credibility concern.\n\n"
-    )
-
-
-def _build_hub_cot_prompt(
-    goal: str,
-    artifact_path: str,
-    ledger_block: str,
-    weaknesses_block: str,
-    artifact_text: str,
-    max_tasks_per_agent: int,
-) -> str:
-    """Hub planning CoT prompt for one epic phase (DESIGN §5.1 / §5.2).
-
-    Injected as the step description so the hub LLM sees it as its task.
-    """
-    if artifact_text:
-        step1 = (
-            "Step 1 — Read the existing deliverable structure.\n"
-            "  Identify sections, coverage depth, and citation quality.\n"
-            "  List what is present and what is thin or missing.\n"
-        )
-    else:
-        step1 = (
-            "Step 1 — No existing deliverable found.\n"
-            "  Define the document structure: sections, purpose, and\n"
-            "  information needed to populate each section.\n"
-            f"  Deliverable will be created at: {artifact_path}\n"
-        )
-    return (
-        _today_note() +
-        "You are the planning hub for a multi-phase agent system.\n"
-        "Think through each step carefully before acting.\n\n"
-        "CONTEXT:\n"
-        f"  Goal: {goal}\n"
-        f"  Deliverable: {artifact_path}\n"
-        f"  {ledger_block}\n"
-        f"  Accumulated weaknesses:\n{weaknesses_block or '(none)'}\n\n"
-        f"{step1}\n"
-        "Step 2 — Compare against the goal. State gaps specifically.\n\n"
-        "Step 3 — Generalize weaknesses into universal requirements.\n\n"
-        "Step 4 — Define this phase's work items (additive/corrective only;\n"
-        "  no items from COMPLETED TASKS).\n\n"
-        "Step 5 — Assign work items to agents BY DOCUMENT SECTION.\n"
-        "  Rules:\n"
-        "    - Each agent owns a non-overlapping set of sections (e.g. \"## Results\",\n"
-        "      \"## Analysis\"). Assign by section heading, NOT by topic —\n"
-        "      \"improve Section X\" not \"cover Topic Y\". Section-scoped assignment\n"
-        "      guarantees non-overlapping anchors so worker PATCHES commute.\n"
-        f"    - Max {max_tasks_per_agent} sections per agent; last agent may receive fewer.\n"
-        "    - No section assigned to more than one agent.\n"
-        "    - Tell each agent its exact section headings (verbatim from the document)\n"
-        "      so its PATCHES anchors are unambiguous.\n"
-        "  Emit TASK_LIST, ASSIGNED, and DONE blocks (JSON).\n\n"
-        f"Step 6 — Emit DELIVERABLE_PATH: {artifact_path}\n"
-        "  Workers write PATCHES blocks targeting only their assigned sections —\n"
-        "  no direct file writes.\n"
-    )
-
-
-def _build_worker_cot_prompt(
-    task_list_for_agent: str,
-    artifact_current_text: str,
-) -> str:
-    """Worker (stateless suggester) CoT prompt (DESIGN §5.3).
-
-    Workers emit PATCHES suggestions only — they never write to disk. The anchor
-    rule is the crux: copy the assigned section heading VERBATIM from the current
-    deliverable so the Reducer can locate it unambiguously.
-    """
-    return (
-        _today_note() +
-        "You are a worker agent. You will suggest changes to a shared document.\n"
-        "Do NOT write to any file — emit patch suggestions only. Think step by step.\n\n"
-        f"TASK ASSIGNMENTS:\n{task_list_for_agent}\n\n"
-        f"CURRENT DELIVERABLE CONTENT:\n{artifact_current_text}\n\n"
-        "Step 1 — For each assigned task, state what you need to find or verify.\n\n"
-        "Step 2 — Execute: use web_search and web_fetch to gather evidence.\n"
-        "  For each source: note the URL, title, and key facts extracted.\n\n"
-        "Step 3 — Assess completeness. One more search if any task is thin.\n\n"
-        "Step 4 — Draft your patch suggestions (patch-or-silent, DESIGN §11.2).\n"
-        "  Rules:\n"
-        "    - Emit a PATCH for a section ONLY if you found sourced content (real URL)\n"
-        "      that improves it. Found nothing → emit NO patch for that section.\n"
-        "    - NEVER write prose explaining why you couldn't (no 'search unavailable',\n"
-        "      no 'I could not find'). Silence = no change; the reducer keeps the doc.\n"
-        "    - Use the exact section heading string as your anchor (e.g. \"## Results\").\n"
-        "      Copy the heading verbatim from CURRENT DELIVERABLE CONTENT — do not paraphrase.\n"
-        "    - Each patch targets ONLY sections you were assigned.\n"
-        "    - Do NOT write patches for sections assigned to other agents.\n"
-        "    - Prior weaknesses are labeled by section. Fix a \"[## Section]\" weakness\n"
-        "      ONLY if that section is one you were assigned — you cannot patch a\n"
-        "      section you do not own. A \"[document]\" weakness has NO single owner, so\n"
-        "      EVERY agent must address it within its OWN assigned sections (apply the\n"
-        "      global fix — e.g. grounding, no truncation, consistent terminology — to\n"
-        "      each section you hold). Never edit a section outside your set. (§11.4)\n"
-        "    - Prefer insert_after/append over replace — additive patches on distinct\n"
-        "      anchors commute; replace patches on the same anchor conflict.\n"
-        "    - Use the PATCHES JSON format exactly (see the patch schema).\n\n"
-        "Step 5 — Emit DONE markers: DONE: [\"task-id-1\", \"task-id-2\"]\n\n"
-        "Step 6 — Emit your PATCHES block (empty [] if you found nothing), then ONE\n"
-        "  status line: 'SEARCH: ok' or 'SEARCH: error' (error iff the search tool\n"
-        "  itself failed). The Reducer applies patches ADDITIVELY — it never rewrites\n"
-        "  or shortens the document (DESIGN §11.3).\n"
-    )
-
-
-def _build_executor_prompt(goal: str, artifact_text: str, weaknesses_block: str) -> str:
-    """STAR-spoke EXECUTOR prompt (§11.10 — the score-ceiling fix).
-
-    The spokes were given the HUB planning prompt ("you are the planning hub …
-    assign work … emit TASK_LIST/ASSIGNED"), so they PLANNED instead of fetching:
-    the reducer received analysis, the artifact never gained sourced content, and
-    the score stalled. This frames each spoke as a research EXECUTOR — fetch real
-    pages and emit RESEARCH_FINDING blocks WITH their URLs — never a planner.
-    """
-    art = (artifact_text or "").strip()
-    art_block = (
-        f"CURRENT DELIVERABLE (improve it; do not restate a plan):\n{art[:3000]}\n\n"
-        if art else ""
-    )
-    return (
-        _today_note()
-        + "You are a RESEARCH EXECUTOR, not a planner. DO the research NOW — do NOT "
-        "emit TASK_LIST, ASSIGNED, or any plan/assignment.\n\n"
-        f"GOAL: {goal}\n\n"
-        f"{art_block}"
-        f"WEAKNESSES TO FIX (concrete gaps):\n{weaknesses_block or '(none)'}\n\n"
-        "Step 1 — For each weakness in your focus, run web_search THEN web_fetch to "
-        "read the ACTUAL article content (not just the snippet).\n"
-        "Step 2 — Emit one RESEARCH_FINDING per page you fetched, exactly:\n"
-        "  RESEARCH_FINDING:\n"
-        "  ARTICLE_TITLE: <title>\n"
-        "  URL: <the EXACT url you fetched — REQUIRED, never omit>\n"
-        "  POPULARITY: <metric if stated, else n/a>\n"
-        "  PATCH_TARGET: <the '## Section' heading this improves>\n"
-        "  QUOTE: <COPY-PASTE one sentence EXACTLY from the fetched page — character "
-        "for character, no paraphrase, no edits, no ellipsis. This verbatim text IS "
-        "the evidence; do not summarize or restate it.>\n"
-        "  WHY: <why this quote matters to the GOAL, one sentence in your words>\n\n"
-        "Citing without substantiating is the #1 failure: a bare URL is NOT enough. "
-        "COPY the QUOTE verbatim from the page — do NOT restate the article in your own "
-        "words, PASTE its words. The quote is checked against the fetched page (a "
-        "fabricated one is dropped); WHY only frames the quote's relevance.\n"
-        "Rules: emit a RESEARCH_FINDING ONLY for a URL you actually fetched (so it "
-        "is real and verifiable); every finding MUST carry its URL AND a verbatim "
-        "QUOTE; found nothing for a weakness → emit nothing for it (no narration, "
-        "no plan).\n"
-        "OUTPUT FORMAT (critical): your ENTIRE response is RESEARCH_FINDING blocks and "
-        "nothing else. Do NOT write a report, executive summary, section prose, or any "
-        "'#'/'##' markdown headings — the reducer assembles the report FROM your "
-        "findings. A response that is prose instead of RESEARCH_FINDING blocks is "
-        "discarded and the document gains nothing.\n"
-    )
-
-
-def _build_reducer_refine_prompt(goal: str, artifact_path: str) -> str:
-    """Reducer Phase-2 editorial refinement prompt (DESIGN §2.2 Step 5).
-
-    Phase 1 (structural merge) is done mechanically by ``reduce_patches``; this
-    prompt drives the Phase-2 full-document polish. The merged text is appended
-    by the caller after this header (the ``{merged_text}`` slot)."""
-    return (
-        "You are the Reducer for this phase. All worker patches have been merged\n"
-        "into the document below. Your job is the SECOND phase: a full editorial\n"
-        "pass — not a mechanical merge. Think through each step in order.\n\n"
-        f"GOAL: {goal}\n"
-        f"DELIVERABLE PATH: {artifact_path}\n\n"
-        "Step 1 — Read the full merged document below as a document editor,\n"
-        "  forming an overall sense of its structure and intent.\n\n"
-        "Step 2 — Assess coherence: does the document flow logically section to\n"
-        "  section? Note every place the flow breaks.\n\n"
-        "Step 3 — Find and fix gaps: missing transitions, incomplete sentences,\n"
-        "  orphaned headings with no body.\n\n"
-        "Step 4 — Resolve every `<!-- conflict -->` marker by integrating or\n"
-        "  removing the marked content cleanly; no conflict markers may remain.\n\n"
-        "Step 5 — Remove redundancy: deduplicate content multiple workers inserted\n"
-        "  identically.\n\n"
-        "Step 6 — Enforce consistency: uniform terminology, citation style, and\n"
-        "  heading hierarchy throughout.\n\n"
-        "Step 7 — Improve quality: tighten prose, correct factual inconsistencies,\n"
-        "  improve clarity.\n\n"
-        "Step 8 — Emit the best possible COMPLETE document. Output the full refined\n"
-        "  document only — every section, no truncation, no commentary. Your output\n"
-        "  length must be >= the merged input length.\n\n"
-        "--- BEGIN MERGED DOCUMENT ---\n"
-    )
-
-
-def _parse_assigned(text: str) -> dict[str, list[str]]:
-    """Extract the hub's ASSIGNED block: agent → [section/branch ids] (DESIGN §3.3).
-
-    Returns {} when no parseable block is present (the validation then no-ops).
-    """
-    m = _re.search(r'ASSIGNED:\s*```json\s*(\{.*?\})\s*```', text, _re.DOTALL)
-    if not m:
-        m = _re.search(r'ASSIGNED:\s*(\{.*?\})', text, _re.DOTALL)
-    if not m:
-        return {}
-    try:
-        data = _json.loads(m.group(1))
-    except (ValueError, TypeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {
-        str(agent): [str(s) for s in sections]
-        for agent, sections in data.items()
-        if isinstance(sections, list)
-    }
-
-
-def _dedupe_assignment(
-    assigned: dict[str, list[str]],
-) -> tuple[dict[str, list[str]], list[str]]:
-    """Deterministically resolve overlapping section assignments (R2 enforcement).
-
-    The hub CoT prompt mandates non-overlapping, one-section-per-agent assignment,
-    but that is LLM-enforced. This validates the emitted ASSIGNED block in code:
-    the FIRST agent (in assignment order) to claim a section keeps it; any later
-    agent claiming the same section loses the duplicate. Returns
-    ``(clean_assignment, overlapping_ids)`` — overlapping_ids is empty on a clean
-    partition. Within-agent repeats are also collapsed.
-    """
-    seen: set[str] = set()
-    clean: dict[str, list[str]] = {}
-    overlaps: list[str] = []
-    for agent, sections in assigned.items():
-        kept: list[str] = []
-        for s in sections:
-            if s in seen:
-                if s not in overlaps:
-                    overlaps.append(s)
-                continue  # claimed by an earlier agent (or earlier in this list)
-            seen.add(s)
-            kept.append(s)
-        clean[agent] = kept
-    return clean, overlaps
-
-
-def _phase_search_failed(outputs: list[str]) -> bool:
-    """True iff every worker reported SEARCH: error and none produced findings (§14.2).
-
-    A phase where the search tool itself failed for ALL workers must HALT with a
-    visible notice — not silently no-op (which would look like "doc is already
-    perfect") and not write failure-narration. Returns False if any worker found
-    content (RESEARCH_FINDING / PATCHES) or reported SEARCH: ok, or if there are
-    no worker outputs to judge.
-    """
-    if not outputs:
-        return False
-    saw_error = False
-    for o in outputs:
-        low = o.lower()
-        # Real work: a RESEARCH_FINDING block, a NON-empty PATCHES array, or an
-        # explicit SEARCH: ok. (An empty `PATCHES: []` is no work, not evidence.)
-        if ("research_finding" in low
-                or _re.search(r"search:\s*ok", low)
-                or _parse_patches_from_output(o)):
-            return False
-        if _re.search(r"search:\s*error", low):
-            saw_error = True
-    return saw_error
-
-
-def _build_skeleton(goal: str, client=None, embedder=None) -> str:
-    """Build the initial document skeleton — a FIXED high-level, topic-agnostic ToC
-    (DESIGN §14.1 / §14.2).
-
-    Deliberately GENERIC: the same standard research-report sections (``DEFAULT_TEMPLATE``)
-    for every goal, so the report's topic is generated by its CONTENT — the workers'
-    grounded findings — not named by the template. The title is a placeholder the reducer
-    fills from those findings, NEVER the goal text. The old behavior derived goal-specific
-    headings and, via semantic template-reuse, seeded a prior topic's headings (e.g.
-    loop-engineering) into an unrelated report — the drift this removes. Headings +
-    placeholder bodies only: NO search/LLM needed, so it is robust to an outage, and
-    workers fill each section additively (create == improve). ``goal``/``client``/
-    ``embedder`` are accepted for call-site compatibility; only the structure is used.
-    """
-    from studio.rubric import DEFAULT_TEMPLATE
-
-    body = "".join(
-        f"## {section}\n_(pending — needs sourced content)_\n\n"
-        for section in DEFAULT_TEMPLATE
-    )
-    return "# _(report title — generated from the findings below)_\n\n" + body.rstrip() + "\n"
-
-
-def _detect_gaps(artifact_text: str) -> list[tuple[str, str]]:
-    """Detect gaps in the merged deliverable (DESIGN §11.4).
-
-    A gap is a section that is **empty or a placeholder**. Each gap is tagged with
-    its nearest **top-level** section (h1/h2) so the caller can consolidate by
-    section before sizing agents — a report has a bounded number of top-level
-    sections, so the worklist (and thus agent count) is structurally bounded.
-
-    Returns (top_level_section, message) tuples. Routed by the caller: non-last
-    phase → consolidated to distinct sections, handed to the next phase via the
-    ledger; last phase → messages carried to the next run as weaknesses.
-
-    NOTE (2026-06-27 fix): the old "substantive prose but no inline http → gap"
-    rule mis-flagged every well-formed section of a properly-cited report (whose
-    citations live in a References section, not inline) — ~74 false gaps that
-    exploded agent sizing. Removed: prose with content is NOT a gap; only
-    empty/placeholder sections are.
-    """
-    gaps: list[tuple[str, str]] = []
-    parts = _re.split(r'(?m)^(#{1,6}\s+.+)$', artifact_text)
-    # parts = [pre, heading1, body1, heading2, body2, ...]
-    it = iter(parts[1:])
-    top = "(document root)"
-    for heading in it:
-        body = next(it, '')
-        h, b = heading.strip(), body.strip()
-        level = len(h) - len(h.lstrip('#'))
-        if level <= 2:
-            top = h  # nearest h1/h2 owns the sub-sections beneath it
-        low = b.lower()
-        if not b or '_(pending' in low or 'placeholder' in low:
-            gaps.append((top, f"{h}: empty/placeholder — needs sourced content"))
-    return gaps
-
-
-def _gap_sections(gaps: list[tuple[str, str]]) -> list[str]:
-    """Consolidate gaps to distinct top-level sections (DESIGN §11.4).
-
-    Consolidation shrinks the LEDGER input (sections, not raw gap count) that
-    drives ``_max_workers`` (concurrency) and the hub prompt's ledger block.
-    It does NOT by itself bound the spoke COUNT: the fan-out derives breadth
-    from ``_facets`` (STAR/MESH) and the upstream item count (MAP), which read
-    prose/lists, not section count. The hard breadth cap is ``run_plan``'s
-    ``max_agents`` arg (the 2026-06-27 gap-flood fix). Order-preserving.
-    """
-    seen: set[str] = set()
-    out: list[str] = []
-    for top, _ in gaps:
-        if top not in seen:
-            seen.add(top)
-            out.append(top)
-    return out
-
-
-def _unresolved_block(weaknesses: list[str], repeat_failed: set[str], limit: int) -> str:
-    """User-facing 'known unresolved issues' block (DESIGN §11.4 — surface, don't hide).
-
-    A repeat-failure (recorded in >= ``limit`` prior runs) still present in this
-    run's weaknesses was attempted again — including the last phase — and remains
-    open. It is appended below the result shown in the chat window so the user
-    knows what could not be resolved, instead of being silently dropped. Returns
-    '' when nothing is still open.
-    """
-    from studio.task_runs import _norm_weakness
-    still_open = [w for w in weaknesses if _norm_weakness(w) in repeat_failed]
-    if not still_open:
-        return ""
-    return (
-        "\n\n---\n\n## ⚠️ Known unresolved issues\n\n"
-        f"_Attempted across {limit}+ runs (including this run's final phase) and "
-        "still open — surfaced, not hidden:_\n\n"
-        + "\n".join(f"- {w}" for w in still_open)
-    )
-
-
-def _strip_preamble(text: str) -> str:
-    """Strip any non-document preamble before the artifact's first markdown
-    heading (DESIGN §11.4). A reducer occasionally prepends review commentary
-    ('The artifact is complete... Weaknesses addressed: ✅... Remaining concern:')
-    instead of emitting the document. That commentary belongs in the chat (the
-    surfaced _unresolved_block), NEVER in the artifact — and the grow-only ratchet
-    would otherwise LOCK it into the seed forever (a clean-up that shortens the doc
-    is rejected as a regression). Applied at every artifact boundary (seed, reducer
-    read, write-back) so inherited corruption is sanitized and cannot propagate.
-
-    Strips everything before the first line beginning with '#'. No heading found =>
-    return unchanged (never destroy a genuinely heading-less document).
-
-    Also removes inherited '<!-- conflict(...): anchor not found -->' markers that
-    reduce_patches emitted on a missing anchor in an EARLIER version (before the
-    anchor-demotion fix) and that the additive merge then froze into the seed forever.
-    Anchor-demotion prevents NEW markers; this strips the old ones (the content beneath
-    a marker is kept — only the noise comment line is removed).
-    """
-    import re
-    text = re.sub(r"[ \t]*<!--\s*conflict.*?-->[ \t]*\n?", "", text)
-    m = re.search(r"^#", text, flags=re.MULTILINE)
-    return text[m.start():] if m else text
-
-
-def _merge_missing_sections(text: str, sections: list[str]) -> str:
-    """Append each template section ABSENT from *text* as an empty heading +
-    placeholder, giving a seeded hill-climb run a PATCH_TARGET for it (DESIGN §14.6).
-
-    A seeded run keeps the seed's structure: the reducer PATCHES existing headings
-    and never injects a missing one, so a required section absent from the seed is
-    mined as a weakness every epoch but never created. Laying down an empty heading
-    closes that loop — the additive pipeline then fills it. Concept-aware
-    (``sections_present``) so a renamed-but-present section ("Conclusion and Best
-    Practices" ≈ "Conclusion and Recommendations") is NOT duplicated. Returns *text*
-    unchanged when nothing is missing.
-    """
-    if not sections:
-        return text
-    from studio.rubric import sections_present
-    present = {s.lower() for s in sections_present(text, sections)}
-    missing = [s for s in sections if s.lower() not in present]
-    if not missing:
-        return text
-    add = "\n\n".join(f"## {s}\n\n_(to be completed)_" for s in missing)
-    return text.rstrip() + "\n\n" + add + "\n"
-
-
-def _weakness_score(
-    prior_weaknesses: list[str],
-    open_weaknesses: list[str],
-    embedder=None,
-    threshold: float = 0.85,
-) -> float:
-    """Hill-climb score = solved / total over the weakness set (§11.4).
-
-    A prior weakness is SOLVED only if NO still-open weakness is SEMANTICALLY
-    similar to it. Matching must be semantic, not string: the LLM miner re-words
-    the same issue every run ("no comparative metrics" -> "no systematic ranking"),
-    so exact/normalized-string matching counted a re-worded-but-unsolved weakness as
-    'solved' and inflated the score on an UNCHANGED artifact. total = prior + open
-    issues with no prior match (genuinely new). No weakness anywhere => 1.0.
-
-    Falls back to normalized-string matching when no embedder is available.
-    """
-    from studio.task_runs import _cosine, _norm_weakness
-    prior = [w for w in (prior_weaknesses or []) if w and w.strip()]
-    open_ = [w for w in (open_weaknesses or []) if w and w.strip()]
-    if not prior and not open_:
-        return 1.0
-
-    if embedder is not None:
-        try:
-            pe = embedder.embed(prior) if prior else []
-            oe = embedder.embed(open_) if open_ else []
-            def _hit(vec, others) -> bool:
-                return any(_cosine(vec, o) >= threshold for o in others)
-            solved = sum(1 for pv in pe if not _hit(pv, oe))
-            new_open = sum(1 for ov in oe if not _hit(ov, pe))
-            total = len(prior) + new_open
-            return round(solved / total, 2) if total else 1.0
-        except Exception:  # noqa: BLE001 — embedding unavailable → string fallback
-            pass
-
-    pn = {_norm_weakness(w) for w in prior}
-    on = {_norm_weakness(w) for w in open_}
-    total_set = pn | on
-    return 1.0 if not total_set else round(len(total_set - on) / len(total_set), 2)
-
-
-#: Max cited URLs to prefetch per reduce phase (bounds added fetch latency/cost).
-_PREFETCH_LIMIT = 8
-
-
-def _prefetch_cited(drafts: list[str], limit: int = _PREFETCH_LIMIT) -> int:
-    """Fetch cited-but-uncached URLs from the worker drafts so genuine sources pass the
-    grounding guard (the fetch-density fix). No-op when the fetch cache is empty — that
-    means no grounding drop happens (cache_active is False), so there is nothing to fix,
-    and tests stay offline. Bounded by ``limit`` to cap latency. Returns how many cited
-    URLs are now cached."""
-    from studio.tools import _fetch_cache, prefetch_url
-    if not _fetch_cache:
-        return 0
-    seen: list[str] = []
-    for d in drafts:
-        for m in _re.finditer(r'URL:\s*(https?://\S+)', d):
-            u = m.group(1).strip().rstrip('.,)')
-            if u not in seen:
-                seen.append(u)
-    fetched = sum(1 for u in seen[:limit] if prefetch_url(u))
-    _dbg(f"prefetch cited={len(seen)} fetched_ok={fetched} (cap {limit})")
-    return fetched
+from studio.prompts import (  # noqa: E402,F401
+    _build_executor_prompt,
+    _build_hub_cot_prompt,
+    _build_planner_cot_prompt,
+    _build_reducer_refine_prompt,
+    _build_skeleton,
+    _build_worker_cot_prompt,
+    _today_note,
+)
+from studio.findings import (  # noqa: E402,F401
+    _apply_ranking,
+    _findings_to_patches,
+    _make_section_reducer,
+    _parse_findings,
+    _parse_patches_from_output,
+    _prefetch_cited,
+    _research_findings_to_patches,
+    _weakness_score,
+)
+from studio.planning import (  # noqa: E402,F401
+    EpochResult,
+    _dedupe_assignment,
+    _dedupe_plan_steps,
+    _epoch_status,
+    _expand_topology,
+    _parse_assigned,
+    _parse_epic_plan,
+    _phase_search_failed,
+    _plan_from_epics,
+    _render_graph,
+    _with_upstream,
+)
+from studio.artifact_text import (  # noqa: E402,F401
+    _detect_gaps,
+    _ends_cleanly,
+    _gap_sections,
+    _merge_missing_sections,
+    _repair_lints,
+    _strip_preamble,
+    _synthesize_analysis,
+    _unresolved_block,
+)
+
+
+#: Emit sink: the runner calls this for every event; app.py wires it to a queue.
+Emit = Callable[[StudioEvent], None]
 
 
 def _dbg(msg: str) -> None:
@@ -730,447 +135,6 @@ def _dbg(msg: str) -> None:
             fh.write(msg + "\n")
     except OSError:
         pass
-
-
-def _apply_ranking(doc: str, findings: list) -> str:
-    """F4/F5: replace the source-selection section with the honest split ranking table.
-
-    Ranks EVERY source cited in the doc (this phase's rich findings supply title/popularity;
-    others are added bare from the doc's URLs for completeness). Best-effort: no findings / no
-    target section / a metric failure → doc unchanged. The S2/GitHub lookups go through
-    ``fetch_metrics`` (ONE S2 batch, cached in .web_cache.json under metric:<url>, degrade to
-    None) so they never block or crash a run."""
-    if not findings:
-        return doc
-    import json as _json
-    import os as _os
-    from agentkit.artifacts.metrics import fetch_metrics
-    from agentkit.artifacts.patcher import DocPatch, reduce_patches
-    from agentkit.artifacts.ranking import synthesize_ranking_table
-    from agentkit.artifacts.sections import split_sections
-    from agentkit.artifacts.types import Finding
-
-    target = next((h for h, _b in split_sections(doc)
-                   if 'source selection' in h.lower()
-                   or h.lower().strip().endswith('sources')
-                   or 'popularity' in h.lower()), None)
-    if target is None:
-        return doc
-    body = dict(split_sections(doc)).get(target, '')
-    if not body:
-        return doc
-    # rank ALL sources cited in the doc, enriched by this phase's findings
-    rich = {f.url: f for f in findings}
-    all_findings = [rich.get(u) or Finding(url=u)
-                    for u in {x.rstrip('.,)') for x in _re.findall(r'https?://\S+', doc)}]
-    if not all_findings:
-        return doc
-    from agentkit.artifacts.metrics import source_kind
-    # Only touch the network/cache file when a source actually HAS a fetchable metric
-    # (arxiv/github). A blog-only doc (e.g. offline tests) skips file I/O entirely → all
-    # sources are 'reported', no network, no .web_cache.json read/write.
-    if not any(source_kind(f.url)[0] for f in all_findings):
-        metrics = {f.url: None for f in all_findings}
-    else:
-        cache: dict = {}
-        try:
-            if _os.path.exists('.web_cache.json'):
-                with open('.web_cache.json') as _cf:
-                    cache = _json.load(_cf)
-        except Exception:  # noqa: BLE001
-            cache = {}
-        try:
-            metrics = fetch_metrics([f.url for f in all_findings],
-                                    s2_key=_os.environ.get('SEMANTIC_SCHOLAR_API_KEY'), cache=cache)
-            with open('.web_cache.json', 'w') as _cf:   # persist metric:<url> entries
-                _json.dump(cache, _cf)
-        except Exception:  # noqa: BLE001 — metrics best-effort; never block
-            metrics = {}
-    table = synthesize_ranking_table(all_findings, metrics)
-    return reduce_patches(
-        doc, [[DocPatch(op='replace', anchor=body, content=f"{target}\n\n{table}\n",
-                        source='ranking')]]
-    ).text
-
-
-def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], embedder=None):
-    """Build the section-aware STAR reducer closure (DESIGN §4.5; Lever 3).
-
-    Returns ``run_plan``'s reducer hook ``(worker_drafts) -> (merged_text, tokens)``.
-
-    PATCH-BASED (Lever 3): instead of re-emitting the full ~38K document — whose
-    output a completion cap (``max_tokens``) truncates mid-section (the v29
-    truncation/incomplete weaknesses) — the reducer asks the model for a SMALL list
-    of section PATCHES and applies them MECHANICALLY via ``reduce_patches``. The
-    model never re-emits the document, so truncation is impossible and output tokens
-    drop ~10x. As a deterministic floor, the workers' own RESEARCH_FINDING blocks are
-    converted to additive patches too — so a phase always makes grounded progress even
-    if the model emits no usable PATCHES. Additive only; the runner's grow-only
-    writeback ratchet still rejects any shrink. Sections are the artifact's ``##``
-    headings — the structure lives in the markdown + weakness tags, no Section type.
-    """
-    wk_block = "\n".join(f"- {w}" for w in (weaknesses or [])) or "(none)"
-    art_block = artifact_text.strip()
-
-    def reduce(drafts: list[str]) -> tuple[str, int]:
-        workers = "\n\n".join(f"[worker {i + 1}]\n{d}" for i, d in enumerate(drafts))
-        prompt = (
-            _today_note() +
-            "You are the section-aware reducer of a multi-worker research phase.\n"
-            "Do NOT re-emit the document. Emit a SMALL JSON list of PATCHES that fold "
-            "each worker's SOURCED finding into the CURRENT ARTIFACT, section by "
-            "section (sections are the '##' headings).\n\n"
-            "Each patch is one object:\n"
-            '  {"op": "insert_after", "anchor": "## <exact section heading from the '
-            'artifact>", "content": "<a substantiating SENTENCE woven from the '
-            'finding: its central claim + a short verbatim quote + the source URL>"}\n'
-            '  - op is "insert_after" (add prose under a heading) or "replace" (swap a '
-            "placeholder line for grounded prose).\n"
-            "  - anchor MUST be text that already exists in the CURRENT ARTIFACT.\n"
-            "  - content ADDS grounded prose and keeps every source URL.\n\n"
-            "RULES — violating these REGRESSES the deliverable:\n"
-            "  - Additive only: a patch may ADD substance, never delete or shorten "
-            "existing sourced content.\n"
-            "  - Every added claim keeps its source URL from the worker's "
-            "RESEARCH_FINDING.\n"
-            "  - A weakness below resolved by a worker (with a real URL) → weave it in "
-            "as a sentence, not a bare citation line.\n"
-            "  - No worker content for a section → emit no patch for it.\n\n"
-            f"SECTION WEAKNESSES (review checklist):\n{wk_block}\n\n"
-            f"CURRENT ARTIFACT:\n--- BEGIN ---\n{art_block or '(empty)'}\n--- END ---\n\n"
-            f"WORKER OUTPUTS:\n{workers}\n\n"
-            "Output ONLY:\nPATCHES:\n```json\n[ ... ]\n```\n"
-            "Nothing else — no document, no preamble, no commentary."
-        )
-        res = client.chat([{"role": "user", "content": prompt}])
-        tokens = int(getattr(res, "total_tokens", 0) or 0)
-        llm_patches = _parse_patches_from_output(res.text or "")
-        # Deterministic floor: convert the workers' own RESEARCH_FINDING blocks to
-        # additive patches. Guarantees grounded progress when the model emits no
-        # usable PATCHES, and folds in any finding it skipped. The reduce_patches
-        # duplicate-guard makes the overlap idempotent.
-        # Fetch-density fix: spokes cite ~12 URLs/phase but fetch ~1, so the grounding
-        # guard dropped 80-100% of real findings. Fetch the cited-but-uncached URLs now
-        # so genuine sources survive grounding (a 404/fabricated URL still drops).
-        _prefetch_cited(drafts)
-        findings: list = []
-        raw_findings = 0
-        for d in drafts:
-            raw_findings += len(_re.findall(r'#{0,6}\s*RESEARCH_FINDING', d))
-            findings += _parse_findings(d)
-        # F1: collapse near-duplicate findings (STRUM merge) BEFORE they become patches, so
-        # the additive merge stops dumping ~26 repetitive citations as an unordered block.
-        from agentkit.artifacts.dedup import dedupe_findings
-        findings, n_dedup = dedupe_findings(findings, embedder)
-        floor_patches = _findings_to_patches(findings)
-        patches = llm_patches + floor_patches
-        if not patches:
-            _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
-                 f"llm={len(llm_patches)} floor=0 dedup={n_dedup} → NO PATCHES (no findings survived)")
-            return art_block, tokens  # nothing to add → unchanged (no truncation)
-        # Resolve anchors before merging: a finding's PATCH_TARGET that is not a real
-        # heading in the doc would otherwise become a '<!-- conflict -->' marker that
-        # pollutes the artifact (the throughput fix surfaced 13 such markers in one
-        # phase). Demote any insert_after with a missing anchor to a clean append.
-        for p in patches:
-            if getattr(p, "op", "") == "insert_after" and p.anchor and p.anchor not in art_block:
-                p.op, p.anchor = "append", None
-        from agentkit.artifacts.patcher import reduce_patches
-        rr = reduce_patches(art_block, [patches])
-        # F4/F5: replace the source-selection section with the honest split ranking table.
-        merged = _apply_ranking(rr.text, findings)
-        _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
-             f"llm={len(llm_patches)} floor={len(floor_patches)} dedup={n_dedup} "
-             f"applied_delta={len(rr.text) - len(art_block)} conflicts={len(rr.conflicts)} "
-             f"ranked_delta={len(merged) - len(rr.text)}")
-        return merged.strip(), tokens
-
-    return reduce
-
-
-def _parse_findings(text: str) -> list:
-    """Parse RESEARCH_FINDING blocks → grounded ``agentkit.artifacts.types.Finding`` objects.
-
-    Bare ``RESEARCH_FINDING:`` and ``## RESEARCH_FINDING`` both parse. Dual grounding oracle
-    (Lever 1): keep a finding iff its URL is http(s) AND — when the fetch cache holds pages —
-    its URL was fetched OR its verbatim quote appears on a fetched page; else drop (a true
-    fabrication: invented URL AND invented quote). ``quote_verified`` gates whether the
-    verbatim quote is later woven. CLAIM/CONTENT/KEY_INSIGHT fold into ``why`` (the schema
-    dropped the rephrased CLAIM — the verbatim QUOTE is the evidence)."""
-    from agentkit.artifacts.types import Finding
-    from studio.tools import _fetch_cache, _quote_in_cache, _url_in_cache
-
-    cache_active = bool(_fetch_cache)
-    out: list = []
-    for m in _re.finditer(
-        r'#{0,6}\s*RESEARCH_FINDING(.*?)(?=#{0,6}\s*RESEARCH_FINDING|\Z)', text, _re.DOTALL
-    ):
-        block = m.group(1)
-
-        def _f(name: str) -> str:
-            fm = _re.search(rf'{name}:\s*(.+)', block)
-            return fm.group(1).strip() if fm else ''
-
-        url = _f('URL')
-        if not url.lower().startswith('http'):
-            continue  # not a sourced finding → not content
-        quote = _f('QUOTE').strip().strip('"')
-        quote_verified = bool(quote) and _quote_in_cache(quote)
-        grounded = (not cache_active) or _url_in_cache(url) or quote_verified
-        if cache_active and not grounded:
-            continue
-        out.append(Finding(
-            url=url,
-            title=_f('ARTICLE_TITLE'),
-            quote=quote,
-            why=_f('WHY') or _f('CLAIM') or _f('CONTENT') or _f('KEY_INSIGHT'),
-            popularity=_f('POPULARITY'),
-            patch_target=_f('PATCH_TARGET'),
-            quote_verified=quote_verified,
-            grounded=grounded,
-        ))
-
-    # JSON-wrapped findings: oMLX local models (qwen2.5-coder) emit the finding as a
-    # JSON object — fenced ```json {"RESEARCH_FINDING": {...}}``` or bare — which the
-    # plain ARTICLE_TITLE:/URL: parse above misses (``"URL":`` doesn't match ``URL:`` so
-    # the url comes out empty and the finding is dropped → 0 findings, fetched pages
-    # never reach the doc). Parse those too, through the SAME grounding oracle. Haiku
-    # uses the plain format + native tool_calls, so its text has no fences → no-op here.
-    import json as _json
-    _blocks = _re.findall(r"```[a-zA-Z_]*\s*\n?(.*?)```", text, _re.DOTALL)
-    _stripped = text.strip()
-    if _stripped.startswith("{") and _stripped.endswith("}"):
-        _blocks.append(_stripped)
-    for _blk in _blocks:
-        try:
-            _obj = _json.loads(_blk.strip())
-        except Exception:  # noqa: BLE001 — a non-JSON fence is not a finding
-            continue
-        for _rec in (_obj if isinstance(_obj, list) else [_obj]):
-            _r = _rec.get("RESEARCH_FINDING", _rec) if isinstance(_rec, dict) else None
-            if not isinstance(_r, dict):
-                continue
-
-            def _jf(*keys: str, _r: dict = _r) -> str:
-                for k in keys:
-                    v = _r.get(k)
-                    if v not in (None, ""):
-                        return str(v)
-                return ""
-
-            j_url = _jf("URL", "url")
-            if not j_url.lower().startswith("http"):
-                continue
-            j_quote = _jf("QUOTE", "quote").strip().strip('"')
-            j_qv = bool(j_quote) and _quote_in_cache(j_quote)
-            j_grounded = (not cache_active) or _url_in_cache(j_url) or j_qv
-            if cache_active and not j_grounded:
-                continue
-            out.append(Finding(
-                url=j_url,
-                title=_jf("ARTICLE_TITLE", "title"),
-                quote=j_quote,
-                why=_jf("WHY", "why", "CLAIM", "CONTENT", "KEY_INSIGHT"),
-                popularity=_jf("POPULARITY", "popularity"),
-                patch_target=_jf("PATCH_TARGET", "patch_target"),
-                quote_verified=j_qv,
-                grounded=j_grounded,
-            ))
-    return out
-
-
-def _findings_to_patches(findings: list) -> list:
-    """Grounded ``Finding`` objects → additive, WOVEN DocPatches (Lever 2: verbatim copy-paste
-    evidence). The verbatim QUOTE is the evidence when verified; ``why`` frames it. Each becomes
-    an ``insert_after`` its PATCH_TARGET (or ``append`` if none). Additive only."""
-    from agentkit.artifacts.patcher import DocPatch
-
-    patches: list = []
-    for f in findings:
-        cite = f"[{f.title or f.url}]({f.url})"
-        has_pop = bool(f.popularity and f.popularity.lower() != 'n/a')
-        pop_clause = f", {f.popularity}" if has_pop else ""
-        lead = f"{f.why.rstrip('.')}: " if f.why else ""
-        if f.quote_verified:  # COPY-PASTE: the verbatim source excerpt IS the evidence
-            content = f'\n\n{lead}"{f.quote}" ({cite}{pop_clause}).\n'
-        elif f.why:           # no verifiable quote → grounded by URL; framing + citation
-            content = f"\n\n{f.why.rstrip('.')} ({cite}{pop_clause}).\n"
-        else:                 # nothing to weave → bare citation line
-            content = f"\n- {cite}{(' (' + f.popularity + ')') if has_pop else ''}\n"
-        if f.patch_target:
-            patches.append(DocPatch(op="insert_after", anchor=f.patch_target, content=content, source="finding"))
-        else:
-            patches.append(DocPatch(op="append", anchor=None, content=content, source="finding"))
-    return patches
-
-
-def _research_findings_to_patches(text: str) -> list:
-    """Back-compat one-shot: parse + ground + weave (the post-loop patch path). The reducer
-    uses _parse_findings + dedupe_findings + _findings_to_patches separately so it can collapse
-    near-duplicate findings before they become patches (F1)."""
-    return _findings_to_patches(_parse_findings(text))
-
-
-def _parse_patches_from_output(text: str) -> list:
-    """Extract DocPatch list from a worker's PATCHES JSON block (DESIGN §2.2).
-
-    Returns empty list when no block is present — the caller falls through to
-    the RESEARCH_FINDING reducer path unchanged.
-    """
-    from agentkit.artifacts.patcher import DocPatch
-
-    m = _re.search(r'PATCHES:\s*```json\s*(\[.*?\])\s*```', text, _re.DOTALL)
-    if not m:
-        m = _re.search(r'"patches"\s*:\s*(\[.*?\])', text, _re.DOTALL)
-    if not m:
-        return []
-    try:
-        items = _json.loads(m.group(1))
-        return [
-            DocPatch(
-                op=item.get("op", "append"),
-                anchor=item.get("anchor"),
-                content=item.get("content", ""),
-                source=item.get("source", ""),
-            )
-            for item in items
-            if isinstance(item, dict)
-        ]
-    except (ValueError, TypeError):
-        return []
-
-
-# ---------------------------------------------------------------------------
-
-#: Emit sink: the runner calls this for every event; app.py wires it to a queue.
-Emit = Callable[[StudioEvent], None]
-
-
-def _render_graph(plan_obj: Plan) -> GraphEvent:
-    """Derive the render graph (SPEC §6): a phase node per step, expanded into
-    intra-phase agent nodes per topology, plus inter-phase ``depends_on`` edges.
-
-    Node kinds: ``phase`` (the step) + ``agent``/``hub``/``reduce``/``stage`` for
-    the topology expansion. The runtime ``n_agents`` (from ``phase_done``)
-    reconciles spoke counts later on the frontend.
-    """
-    nodes: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
-    peers = 3  # default fan-out breadth (mirrors dynamic._DEFAULT_PEERS)
-
-    for step in plan_obj.steps:
-        phase_id = step.id
-        nodes.append(
-            {
-                "id": phase_id,
-                "kind": "phase",
-                "phase": phase_id,
-                "label": step.description[:80],
-                "state": "pending",
-            }
-        )
-        topo = step.topology or SINGLE
-        _expand_topology(nodes, edges, phase_id, topo, peers)
-        for dep in step.depends_on:
-            edges.append({"from": dep, "to": phase_id, "kind": "depends"})
-
-    return GraphEvent(nodes=nodes, edges=edges)
-
-
-def _expand_topology(
-    nodes: list[dict[str, Any]],
-    edges: list[dict[str, Any]],
-    phase_id: str,
-    topo: str,
-    peers: int,
-) -> None:
-    """Append intra-phase agent nodes/edges for one phase's topology."""
-
-    def agent(idx: int, kind: str = "agent") -> str:
-        nid = f"{phase_id}:{kind}{idx}"
-        nodes.append(
-            {"id": nid, "kind": kind, "phase": phase_id, "label": kind, "state": "pending"}
-        )
-        return nid
-
-    if topo == SINGLE:
-        a = agent(0)
-        edges.append({"from": phase_id, "to": a, "kind": "intra"})
-    elif topo == STAR:
-        spokes = [agent(i) for i in range(peers)]
-        reduce_id = agent(0, "reduce")
-        for s in spokes:
-            edges.append({"from": phase_id, "to": s, "kind": "intra"})
-            edges.append({"from": s, "to": reduce_id, "kind": "reduce"})
-    elif topo == MESH:
-        ps = [agent(i) for i in range(peers)]
-        for i, a in enumerate(ps):
-            for b in ps[i + 1 :]:
-                edges.append({"from": a, "to": b, "kind": "mesh"})
-        reduce_id = agent(0, "reduce")
-        for a in ps:
-            edges.append({"from": a, "to": reduce_id, "kind": "reduce"})
-    elif topo == MAP:
-        # MAP fan-out: N workers (one per upstream item), then reduce.
-        # peers is a best-effort count — actual count depends on upstream list.
-        workers = [agent(i) for i in range(peers)]
-        reduce_id = agent(0, "reduce")
-        for w in workers:
-            edges.append({"from": phase_id, "to": w, "kind": "intra"})
-            edges.append({"from": w, "to": reduce_id, "kind": "reduce"})
-    elif topo == PIPELINE:
-        stages = [agent(i, "stage") for i in range(3)]  # mirrors _PIPELINE_STAGES
-        edges.append({"from": phase_id, "to": stages[0], "kind": "intra"})
-        for a, b in zip(stages, stages[1:]):
-            edges.append({"from": a, "to": b, "kind": "pipeline"})
-
-
-def _with_upstream(description: str, upstream: str) -> str:
-    """Fold upstream outputs into a step description — byte-identical to
-    ``agentkit.topology.dynamic._with_upstream`` so the Studio-driven single-step
-    sub-plan produces the same prompts a full ``run_plan`` would."""
-    if upstream:
-        return f"{description}\n\nContext from prior steps:\n{upstream}"
-    return description
-
-
-#: A document is "complete" if its last non-space char closes a sentence/structure.
-#: Used to reject a truncated artifact in favor of a complete synthesis (see the
-#: result_output selection below). Markdown reports legitimately end on a period,
-#: list/table row, fence, blockquote, or heading underline — so the set is permissive;
-#: a bare cutoff mid-word/URL (the truncation symptom) fails it.
-_CLEAN_END_CHARS = frozenset(".!?)]\"'`|>*-_")
-
-
-def _ends_cleanly(text: str) -> bool:
-    """True if ``text`` ends at a sentence/structure boundary (not truncated mid-line).
-
-    Research reports end with reference lines like "- Author. 'Title.' https://url"
-    where the last WORD is a URL, not the line itself. Check last word for URL prefix.
-    """
-    stripped = text.rstrip()
-    if not stripped:
-        return False
-    last_line = stripped.split("\n")[-1].strip()
-    last_word = last_line.split()[-1] if last_line.split() else ""
-    if last_word.startswith("http://") or last_word.startswith("https://"):
-        return True
-    return stripped[-1] in _CLEAN_END_CHARS
-
-
-@dataclass(frozen=True)
-class EpochResult:
-    """Per-epoch outcome returned by :meth:`Runner._run_inner` (DESIGN §14.4).
-
-    ``run()`` consumes it to decide whether the epoch loop continues. ``status``
-    is one of ``improving`` / ``plateau`` / ``converged`` — the same value the
-    pass's :class:`HillClimbEvent` carries for the frontend timeline.
-    """
-
-    version: int
-    score: float
-    delta: float
-    status: str
 
 
 class Runner:
@@ -1329,8 +293,17 @@ class Runner:
         session_cfg = dict(getattr(self._session, "hill_climb_config", None) or {})
         if "max_epochs" not in session_cfg:
             try:
-                from studio.task_runs import TaskRunStore, task_hash as _task_hash
-                persisted = TaskRunStore().latest_config(_task_hash(requirement))
+                from studio.task_runs import (
+                    TaskRunStore,
+                    base_identity as _base_identity,
+                    task_hash as _task_hash,
+                )
+                # PLAN item 5: key the config lookup on the lineage base, not the raw
+                # (possibly conversational) requirement, so a "Continue run" finds its
+                # prior epoch budget instead of cold-starting.
+                persisted = TaskRunStore().latest_config(
+                    _task_hash(_base_identity(requirement))
+                )
             except Exception:  # noqa: BLE001 — persistence is best-effort
                 persisted = {}
             if persisted:
@@ -1408,142 +381,15 @@ class Runner:
             if self._effective_hc is not None
             else (getattr(session, "hill_climb_config", None) or {})
         )
-        _artifact_copied = False
-        _eff_ws2 = None
-        _weaknesses_block = ""  # prior-run lessons → planner/hub constraints
-        _seed_len = 0           # length of the seeded prior artifact (anti-regression)
-        _seed_text = ""         # full prior artifact text (Phase-1 keep/discard gate)
-        # §11.4 loop-closure check: normalized weaknesses recorded in >= REPEAT_LIMIT
-        # prior runs of this task were injected and never fixed. The reducer drops
-        # them from its handoff (below) instead of grinding on them forever. Empty
-        # when not hill-climbing.
-        _repeat_failed: set[str] = set()
-        if _hc_cfg.get("auto_improve"):
-            from studio.task_runs import TaskRunStore, task_hash as _task_hash
-            _thash = _task_hash(_base_requirement)
-            # Pass the embedder so each run's requirement is embedded for R10
-            # cross-task similarity retrieval (no-op when embedder is None).
-            _store = TaskRunStore(embedder=self._embedder)
-            _repeat_failed = _store.repeat_failures(_thash)
-            # Use latest run with actual artifact content — LLM self-eval scores
-            # are noisy; the most recent non-empty artifact has accumulated the
-            # most incremental work and is the best hill-climb seed.
-            from studio.workspace import workspace_root as _ws_root_fn3
-            _eff_ws2 = self._workspace_root or _ws_root_fn3()
-            _prior = _store.latest_with_content(_thash, ws_root=_eff_ws2)
-            if _prior:
-                _prior_art = _eff_ws2 / _prior.session_id / "artifact.md"
-                _artifact_copied = False
-                # Seed source: the prior session's on-disk artifact.md when it
-                # survives (richest — the section-keyed handoff), ELSE the DB-
-                # persisted result_text. The fallback is load-bearing: artifact.md
-                # is a TRANSIENT working file written only when a run goes through
-                # the reducer/patch path — a raw-synthesis run (e.g. an oMLX model
-                # that dumped findings instead of patching sections) finalizes
-                # result.md but NEVER writes artifact.md. The durable deliverable
-                # is result.md == result_text in the DB, recorded for every run.
-                # Keying the seed on artifact.md alone meant most priors had no
-                # seed → _artifact_copied stayed False → the keep/discard gate
-                # below was SKIPPED → a regressed epoch overwrote the served
-                # deliverable with no protection (the hill-climb regression that
-                # served a 0.12 stub over a 0.41 prior; DESIGN §14.6).
-                _raw_seed: str | None = None
-                if _prior_art.exists():
-                    try:
-                        _raw_seed = _prior_art.read_text()
-                    except OSError:
-                        _raw_seed = None
-                if _raw_seed is None and (_prior.result_text or "").strip():
-                    _raw_seed = _prior.result_text
-                if _raw_seed is not None:
-                    _curr_ws = Workspace(session.session_id, root=_eff_ws2)
-                    # §11.4: SANITIZE inherited corruption first — an artifact a
-                    # prior reducer poisoned with a commentary preamble would
-                    # otherwise be locked in by the grow-only ratchet forever (a
-                    # clean-up that shortens it reads as a regression). Strip on seed
-                    # so _seed_len is the CLEAN baseline the run grows from. Seed the
-                    # current workspace's artifact.md so the run edits rather than
-                    # regenerates, and _seed_text feeds the Phase-1 keep/discard gate.
-                    try:
-                        _seed_clean = _strip_preamble(_raw_seed)
-                        (_curr_ws.root / "artifact.md").write_text(_seed_clean)
-                        _artifact_copied = True
-                        _seed_len = len(_seed_clean)
-                        _seed_text = _seed_clean  # Phase-1 gate: prior best to beat
-                    except OSError:
-                        _seed_len = 0
-                        _seed_text = ""
-                # Accumulate weaknesses from this task's prior runs AND from
-                # semantically SIMILAR prior tasks (R10) — every failure lesson,
-                # including cross-task ones, carries forward. Deduplicated by
-                # exact string; exact-task lessons rank first. Degrades to
-                # exact-task-only when no embedder is available.
-                # Cap to the top-N most relevant lessons (exact-task first). The
-                # full accumulated set across many prior runs can be dozens of
-                # items; injecting all of them bloats the requirement and makes
-                # the planner explode each lesson into its own phase. 10 is plenty
-                # of signal without overwhelming the plan.
-                _MAX_INJECTED_WEAKNESSES = 10
-                _all_weaknesses = _store.accumulated_weaknesses(
-                    requirement, _thash, embedder=self._embedder,
-                )[:_MAX_INJECTED_WEAKNESSES]
-                # Weaknesses are CONSTRAINTS for the planner/hub (quality bar to
-                # meet), NOT tasks to decompose — threaded via _weaknesses_block
-                # into _plan_from_epics so epic planning treats them correctly,
-                # and onto session.weaknesses so each phase hub sees them too.
-                _weaknesses_block = "\n".join(f"- {w}" for w in _all_weaknesses)
-                session.weaknesses = _all_weaknesses  # hub reads getattr(session,"weaknesses")
-                _fix_items = "\n".join(
-                    f"  {i+1}. {w}" for i, w in enumerate(_all_weaknesses)
-                )
-                # Workers use web_search/web_fetch only — no write_file tool. Multiple
-                # workers run concurrently; writing a shared artifact.md would cause
-                # conflicts. Each worker's TEXT OUTPUT is its "temp file": the runner
-                # collects outputs[step.id] = sr.output and the reducer receives all
-                # of them via upstream context. RESEARCH_FINDING blocks let the reducer
-                # apply each finding independently.
-                #
-                # Prompt structure: imperative tool-call instruction FIRST, schema
-                # SECOND. "FIND AND OUTPUT" framing causes narration (model says "I'll
-                # search" but never calls the tool). "Use web_search tool right now"
-                # triggers actual tool_call responses the loop can execute.
-                # Gate the patch-or-silent EDIT contract on a real seed, not just on
-                # a prior RUN existing. PATCH_TARGET ("a section heading in the
-                # artifact") + "find nothing → output NOTHING, the reducer keeps the
-                # existing doc" only make sense when there IS a seeded doc. Injected
-                # without one (prior run recorded but its artifact.md never written),
-                # a weak model is told to patch a phantom: most workers go silent →
-                # the reducer has no base → a 28-line scrap dump that scores BELOW a
-                # clean from-scratch run (v2 0.12 < v1 0.41). With no seed, fall back
-                # to normal generation; weaknesses still steer the planner softly via
-                # _weaknesses_block / session.weaknesses set above (DESIGN §14.6).
-                if _fix_items and _artifact_copied:
-                    _finding_schema = (
-                        "## RESEARCH_FINDING\n"
-                        "ARTICLE_TITLE: <exact title>\n"
-                        "URL: https://<exact URL — required>\n"
-                        "POPULARITY: <verifiable signal: top-N result, N shares, N citations>\n"
-                        "PUBLICATION: <date or unknown>\n"
-                        "KEY_INSIGHT: <one sentence relevant to the task>\n"
-                        "PATCH_TARGET: <exact article name or section heading in the artifact>\n"
-                    )
-                    requirement = (
-                        f"{requirement}\n\n"
-                        f"Use the web_search tool right now to find the following missing data:\n"
-                        f"{_fix_items}\n\n"
-                        f"For each item found, output a RESEARCH_FINDING block:\n"
-                        f"{_finding_schema}\n"
-                        f"Call web_search immediately.\n\n"
-                        f"WORKER CONTRACT (DESIGN §11.2) — patch-or-silent:\n"
-                        f"  - Found sourced content (with a real URL) → output a RESEARCH_FINDING.\n"
-                        f"  - Found nothing → output NOTHING. Do NOT write a sentence explaining\n"
-                        f"    why (no 'web search unavailable', no 'I could not find...'). Silence\n"
-                        f"    means 'no change' — the reducer keeps the existing doc as-is.\n"
-                        f"  - End with exactly ONE status line:\n"
-                        f"      SEARCH: ok      (the search tool worked, whatever it returned)\n"
-                        f"      SEARCH: error   (the search tool itself failed — quota/timeout/down)\n"
-                        f"  URL is required in every RESEARCH_FINDING. Failure-narration is forbidden."
-                    )
+        (
+            requirement, _weaknesses_block, _artifact_copied, _eff_ws2,
+            _seed_len, _seed_text,
+        ) = self._seed_carry_forward(
+            session=session,
+            requirement=requirement,
+            _base_requirement=_base_requirement,
+            _hc_cfg=_hc_cfg,
+        )
 
         # session frame
         self._emit(
@@ -1715,12 +561,322 @@ class Runner:
                     _dbg("seeded missing template section(s)")
             except Exception:  # noqa: BLE001 — structure-merge is best-effort
                 pass
-        cancelled = False
-        final_output = ""
         #: Gate outcomes collected across phases — the Loop Doctor's safe_actions
         #: check reads these at run end (no re-running of any gate).
         gate_events: list[GateEvent] = []
 
+        cancelled, final_output, _seed_text = self._run_phase_loop(
+            session=session,
+            plan_obj=plan_obj,
+            client=client,
+            base_client=base_client,
+            budget=budget,
+            _ledger=_ledger,
+            _sizing_cfg=_sizing_cfg,
+            _lc=_lc,
+            _eff_ws2=_eff_ws2,
+            _artifact_copied=_artifact_copied,
+            _seed_len=_seed_len,
+            _seed_text=_seed_text,
+            use_llm=use_llm,
+            requirement=requirement,
+            mem=mem,
+            dag=dag,
+            selfimp=selfimp,
+            outputs=outputs,
+            gate_events=gate_events,
+            _reducer_gaps=_reducer_gaps,
+        )
+
+        # budget gauge
+        if budget is not None:
+            self._emit(
+                BudgetEvent(
+                    spent=budget.spent_total,
+                    ceiling=session.budget_ceiling,
+                    exceeded=False,
+                )
+            )
+
+        # If the final step produced less than its direct predecessor, fall back
+        # to the predecessor's output. In research loops, the last step is a
+        # meta "stop/continue" decision — the real artifact lives in the step it
+        # depends on (its direct predecessor in the DAG).
+        last_step = plan_obj.steps[-1] if plan_obj.steps else None
+        predecessor_id = (
+            last_step.depends_on[-1] if (last_step and last_step.depends_on) else None
+        )
+        predecessor_output = outputs.get(predecessor_id, "") if predecessor_id else ""
+        result_output = (
+            predecessor_output
+            if predecessor_output and len(predecessor_output) > len(final_output)
+            else final_output
+        )
+
+        # Steps that write their artifact to artifact.md produce content in a file
+        # rather than the LLM text response, so prefer the file — BUT only when it is
+        # complete. Auto-improve copies the prior best artifact into the workspace as a
+        # seed; if the agent doesn't overwrite it, the file is a STALE (and here,
+        # truncated) seed. The old "prefer the longest text" rule then re-kept that
+        # truncated seed over the agent's fresh, complete-but-shorter synthesis — every
+        # iteration re-scored the same truncated text and the score could never climb
+        # past the "not truncated" criterion. Fix: only prefer the file when it is longer
+        # AND ends cleanly; a truncated file loses to the agent's actual final output.
+        ws_artifact = self._read_workspace_artifact()
+        if ws_artifact and len(ws_artifact) > len(result_output) and _ends_cleanly(ws_artifact):
+            result_output = ws_artifact
+
+        # §11.10: strip any reducer commentary preamble from the DISPLAYED/stored
+        # result too — not just artifact.md. A reducer that narrated ("The artifact
+        # is complete… Weaknesses addressed: ✅… Remaining concern: future-dated…")
+        # leaves that in result_output even when artifact.md was sanitized, since
+        # the preamble version is longer and wins the length check above. That
+        # commentary belongs in the surfaced _unresolved_block (chat), never in the
+        # deliverable shown to the user.
+        result_output = _strip_preamble(result_output)
+
+        # verification (pure tier, always runs)
+        verify_event = build_verify_event(result_output)
+        self._emit(verify_event)
+
+        # Loop Doctor (M8): audit the finished run against loop-library's
+        # checklist, composed from the run's collected gate/verify outcomes +
+        # the budget ceiling + the plan DAG. Suggestions only — never applied.
+        loopdoctor_event = build_loopdoctor_event(
+            plan_step_dicts,
+            budget_ceiling=session.budget_ceiling,
+            gate_events=gate_events,
+            verify_event=verify_event,
+        )
+        self._emit(loopdoctor_event)
+
+        # Record the finished run so GET /export can serialize it to a loop (M9).
+        session.record_run(
+            RunSnapshot(
+                requirement=requirement,
+                plan_steps=plan_step_dicts,
+                topology=topology_map,
+                loopdoctor_checks=loopdoctor_event.checks,
+                budget_ceiling=session.budget_ceiling,
+                result=result_output,
+                cancelled=cancelled,
+            )
+        )
+
+        _outcome, result_output = self._postrun_score_and_record(
+            session=session,
+            result_output=result_output,
+            outputs=outputs,
+            base_client=base_client,
+            use_llm=use_llm,
+            _base_requirement=_base_requirement,
+            _original_requirement=_original_requirement,
+            _artifact_copied=_artifact_copied,
+            _seed_text=_seed_text,
+            _reducer_gaps=_reducer_gaps,
+            _hc_cfg=_hc_cfg,
+            _outcome=_outcome,
+        )
+
+        # §14.4: the terminal `done` now lives in run() (emitted once after the epoch
+        # loop). Stash this pass's final output + cancel flag so run() can build it,
+        # and hand back the per-epoch outcome that drives continue/stop.
+        self._last_result = result_output
+        self._last_cancelled = cancelled
+        return _outcome
+
+    def _seed_carry_forward(
+        self, *, session, requirement: str, _base_requirement: str, _hc_cfg: dict,
+    ) -> tuple[str, str, bool, object, int, str]:
+        """Hill-climb seed carry-forward (DESIGN §14.4 / §14.6 / §11.4).
+
+        When auto_improve is on and a prior run exists for this task, copy its artifact
+        into the current workspace, accumulate prior+similar-task weaknesses, and (when a
+        real seed exists) switch the requirement to the patch-or-silent worker contract.
+        Returns ``(requirement, _weaknesses_block, _artifact_copied, _eff_ws2, _seed_len,
+        _seed_text)``. Extracted verbatim from ``_run_inner``; behavior unchanged.
+        """
+        _artifact_copied = False
+        _eff_ws2 = None
+        _weaknesses_block = ""  # prior-run lessons → planner/hub constraints
+        _seed_len = 0           # length of the seeded prior artifact (anti-regression)
+        _seed_text = ""         # full prior artifact text (Phase-1 keep/discard gate)
+        # §11.4 loop-closure check: normalized weaknesses recorded in >= REPEAT_LIMIT
+        # prior runs of this task were injected and never fixed. The reducer drops
+        # them from its handoff (below) instead of grinding on them forever. Empty
+        # when not hill-climbing.
+        _repeat_failed: set[str] = set()
+        if _hc_cfg.get("auto_improve"):
+            from studio.task_runs import (
+                TaskRunStore,
+                base_identity as _base_identity,
+                task_hash as _task_hash,
+            )
+            # PLAN item 5: hash the lineage base so a "Continue run" / chat-history re-run
+            # seeds from the prior artifact instead of forking a new cold-start lineage.
+            _thash = _task_hash(_base_identity(_base_requirement))
+            # Pass the embedder so each run's requirement is embedded for R10
+            # cross-task similarity retrieval (no-op when embedder is None).
+            _store = TaskRunStore(embedder=self._embedder)
+            _repeat_failed = _store.repeat_failures(_thash)
+            # Use latest run with actual artifact content — LLM self-eval scores
+            # are noisy; the most recent non-empty artifact has accumulated the
+            # most incremental work and is the best hill-climb seed.
+            from studio.workspace import workspace_root as _ws_root_fn3
+            _eff_ws2 = self._workspace_root or _ws_root_fn3()
+            _prior = _store.latest_with_content(_thash, ws_root=_eff_ws2)
+            if _prior:
+                _prior_art = _eff_ws2 / _prior.session_id / "artifact.md"
+                _artifact_copied = False
+                # Seed source: the prior session's on-disk artifact.md when it
+                # survives (richest — the section-keyed handoff), ELSE the DB-
+                # persisted result_text. The fallback is load-bearing: artifact.md
+                # is a TRANSIENT working file written only when a run goes through
+                # the reducer/patch path — a raw-synthesis run (e.g. an oMLX model
+                # that dumped findings instead of patching sections) finalizes
+                # result.md but NEVER writes artifact.md. The durable deliverable
+                # is result.md == result_text in the DB, recorded for every run.
+                # Keying the seed on artifact.md alone meant most priors had no
+                # seed → _artifact_copied stayed False → the keep/discard gate
+                # below was SKIPPED → a regressed epoch overwrote the served
+                # deliverable with no protection (the hill-climb regression that
+                # served a 0.12 stub over a 0.41 prior; DESIGN §14.6).
+                _raw_seed: str | None = None
+                if _prior_art.exists():
+                    try:
+                        _raw_seed = _prior_art.read_text()
+                    except OSError:
+                        _raw_seed = None
+                if _raw_seed is None and (_prior.result_text or "").strip():
+                    _raw_seed = _prior.result_text
+                if _raw_seed is not None:
+                    _curr_ws = Workspace(session.session_id, root=_eff_ws2)
+                    # §11.4: SANITIZE inherited corruption first — an artifact a
+                    # prior reducer poisoned with a commentary preamble would
+                    # otherwise be locked in by the grow-only ratchet forever (a
+                    # clean-up that shortens it reads as a regression). Strip on seed
+                    # so _seed_len is the CLEAN baseline the run grows from. Seed the
+                    # current workspace's artifact.md so the run edits rather than
+                    # regenerates, and _seed_text feeds the Phase-1 keep/discard gate.
+                    try:
+                        _seed_clean = _strip_preamble(_raw_seed)
+                        (_curr_ws.root / "artifact.md").write_text(_seed_clean)
+                        _artifact_copied = True
+                        _seed_len = len(_seed_clean)
+                        _seed_text = _seed_clean  # Phase-1 gate: prior best to beat
+                    except OSError:
+                        _seed_len = 0
+                        _seed_text = ""
+                # Accumulate weaknesses from this task's prior runs AND from
+                # semantically SIMILAR prior tasks (R10) — every failure lesson,
+                # including cross-task ones, carries forward. Deduplicated by
+                # exact string; exact-task lessons rank first. Degrades to
+                # exact-task-only when no embedder is available.
+                # Cap to the top-N most relevant lessons (exact-task first). The
+                # full accumulated set across many prior runs can be dozens of
+                # items; injecting all of them bloats the requirement and makes
+                # the planner explode each lesson into its own phase. 10 is plenty
+                # of signal without overwhelming the plan.
+                _MAX_INJECTED_WEAKNESSES = 10
+                _all_weaknesses = _store.accumulated_weaknesses(
+                    requirement, _thash, embedder=self._embedder,
+                )[:_MAX_INJECTED_WEAKNESSES]
+                # Weaknesses are CONSTRAINTS for the planner/hub (quality bar to
+                # meet), NOT tasks to decompose — threaded via _weaknesses_block
+                # into _plan_from_epics so epic planning treats them correctly,
+                # and onto session.weaknesses so each phase hub sees them too.
+                _weaknesses_block = "\n".join(f"- {w}" for w in _all_weaknesses)
+                session.weaknesses = _all_weaknesses  # hub reads getattr(session,"weaknesses")
+                _fix_items = "\n".join(
+                    f"  {i+1}. {w}" for i, w in enumerate(_all_weaknesses)
+                )
+                # Workers use web_search/web_fetch only — no write_file tool. Multiple
+                # workers run concurrently; writing a shared artifact.md would cause
+                # conflicts. Each worker's TEXT OUTPUT is its "temp file": the runner
+                # collects outputs[step.id] = sr.output and the reducer receives all
+                # of them via upstream context. RESEARCH_FINDING blocks let the reducer
+                # apply each finding independently.
+                #
+                # Prompt structure: imperative tool-call instruction FIRST, schema
+                # SECOND. "FIND AND OUTPUT" framing causes narration (model says "I'll
+                # search" but never calls the tool). "Use web_search tool right now"
+                # triggers actual tool_call responses the loop can execute.
+                # Gate the patch-or-silent EDIT contract on a real seed, not just on
+                # a prior RUN existing. PATCH_TARGET ("a section heading in the
+                # artifact") + "find nothing → output NOTHING, the reducer keeps the
+                # existing doc" only make sense when there IS a seeded doc. Injected
+                # without one (prior run recorded but its artifact.md never written),
+                # a weak model is told to patch a phantom: most workers go silent →
+                # the reducer has no base → a 28-line scrap dump that scores BELOW a
+                # clean from-scratch run (v2 0.12 < v1 0.41). With no seed, fall back
+                # to normal generation; weaknesses still steer the planner softly via
+                # _weaknesses_block / session.weaknesses set above (DESIGN §14.6).
+                if _fix_items and _artifact_copied:
+                    _finding_schema = (
+                        "## RESEARCH_FINDING\n"
+                        "ARTICLE_TITLE: <exact title>\n"
+                        "URL: https://<exact URL — required>\n"
+                        "POPULARITY: <verifiable signal: top-N result, N shares, N citations>\n"
+                        "PUBLICATION: <date or unknown>\n"
+                        "KEY_INSIGHT: <one sentence relevant to the task>\n"
+                        "PATCH_TARGET: <exact article name or section heading in the artifact>\n"
+                    )
+                    requirement = (
+                        f"{requirement}\n\n"
+                        f"Use the web_search tool right now to find the following missing data:\n"
+                        f"{_fix_items}\n\n"
+                        f"For each item found, output a RESEARCH_FINDING block:\n"
+                        f"{_finding_schema}\n"
+                        f"Call web_search immediately.\n\n"
+                        f"WORKER CONTRACT (DESIGN §11.2) — patch-or-silent:\n"
+                        f"  - Found sourced content (with a real URL) → output a RESEARCH_FINDING.\n"
+                        f"  - Found nothing → output NOTHING. Do NOT write a sentence explaining\n"
+                        f"    why (no 'web search unavailable', no 'I could not find...'). Silence\n"
+                        f"    means 'no change' — the reducer keeps the existing doc as-is.\n"
+                        f"  - End with exactly ONE status line:\n"
+                        f"      SEARCH: ok      (the search tool worked, whatever it returned)\n"
+                        f"      SEARCH: error   (the search tool itself failed — quota/timeout/down)\n"
+                        f"  URL is required in every RESEARCH_FINDING. Failure-narration is forbidden."
+                    )
+        return (
+            requirement, _weaknesses_block, _artifact_copied, _eff_ws2,
+            _seed_len, _seed_text,
+        )
+
+    def _run_phase_loop(
+        self,
+        *,
+        session,
+        plan_obj,
+        client,
+        base_client,
+        budget,
+        _ledger,
+        _sizing_cfg,
+        _lc,
+        _eff_ws2,
+        _artifact_copied: bool,
+        _seed_len: int,
+        _seed_text: str,
+        use_llm: bool,
+        requirement: str,
+        mem,
+        dag,
+        selfimp,
+        outputs: dict[str, str],
+        gate_events: list[GateEvent],
+        _reducer_gaps: list[str],
+    ) -> tuple[bool, str, str]:
+        """Per-phase execution loop + the post-loop atomic patch-apply
+        (DESIGN §3 / §5 / §11). Drives each phase through ``run_plan`` on a single-step
+        sub-plan, emits the per-phase event sequence, writes back the grow-only artifact,
+        then folds worker PATCHES/RESEARCH_FINDING blocks into artifact.md. Mutates
+        ``outputs`` / ``gate_events`` / ``_reducer_gaps`` in place; returns
+        ``(cancelled, final_output, _seed_text)``. Behavior and event ordering are
+        unchanged — extracted verbatim from ``_run_inner``.
+        """
+        cancelled = False
+        final_output = ""
         for step in plan_obj.steps:
             if session.cancel_requested:
                 cancelled = True
@@ -1807,6 +963,10 @@ class Runner:
                         f"  - You may ONLY ADD content that comes from a worker's RESEARCH_FINDING\n"
                         f"    (with its URL). No finding for a section → leave that section exactly\n"
                         f"    as-is.\n"
+                        f"  - CITE ONLY a URL that appears verbatim in a worker RESEARCH_FINDING\n"
+                        f"    above. NEVER invent, guess, or alter a URL. If a claim has no such\n"
+                        f"    URL, state it WITHOUT a citation — a fabricated link is worse than\n"
+                        f"    none (it is detected and penalised).\n"
                         f"{_repair_clause}"
                         f"  - If workers found NOTHING (no RESEARCH_FINDING blocks above) AND there\n"
                         f"    is no repair exception above, output the CURRENT ARTIFACT completely\n"
@@ -2145,88 +1305,38 @@ class Runner:
                     # agent that owns that section (an agent can't patch unassigned
                     # sections — DESIGN §11.4).
                     _reducer_gaps.extend(f"[{_sec}] {_m}" for _sec, _m in _gaps)
+        return cancelled, final_output, _seed_text
 
-        # budget gauge
-        if budget is not None:
-            self._emit(
-                BudgetEvent(
-                    spent=budget.spent_total,
-                    ceiling=session.budget_ceiling,
-                    exceeded=False,
-                )
-            )
-
-        # If the final step produced less than its direct predecessor, fall back
-        # to the predecessor's output. In research loops, the last step is a
-        # meta "stop/continue" decision — the real artifact lives in the step it
-        # depends on (its direct predecessor in the DAG).
-        last_step = plan_obj.steps[-1] if plan_obj.steps else None
-        predecessor_id = (
-            last_step.depends_on[-1] if (last_step and last_step.depends_on) else None
-        )
-        predecessor_output = outputs.get(predecessor_id, "") if predecessor_id else ""
-        result_output = (
-            predecessor_output
-            if predecessor_output and len(predecessor_output) > len(final_output)
-            else final_output
-        )
-
-        # Steps that write their artifact to artifact.md produce content in a file
-        # rather than the LLM text response, so prefer the file — BUT only when it is
-        # complete. Auto-improve copies the prior best artifact into the workspace as a
-        # seed; if the agent doesn't overwrite it, the file is a STALE (and here,
-        # truncated) seed. The old "prefer the longest text" rule then re-kept that
-        # truncated seed over the agent's fresh, complete-but-shorter synthesis — every
-        # iteration re-scored the same truncated text and the score could never climb
-        # past the "not truncated" criterion. Fix: only prefer the file when it is longer
-        # AND ends cleanly; a truncated file loses to the agent's actual final output.
-        ws_artifact = self._read_workspace_artifact()
-        if ws_artifact and len(ws_artifact) > len(result_output) and _ends_cleanly(ws_artifact):
-            result_output = ws_artifact
-
-        # §11.10: strip any reducer commentary preamble from the DISPLAYED/stored
-        # result too — not just artifact.md. A reducer that narrated ("The artifact
-        # is complete… Weaknesses addressed: ✅… Remaining concern: future-dated…")
-        # leaves that in result_output even when artifact.md was sanitized, since
-        # the preamble version is longer and wins the length check above. That
-        # commentary belongs in the surfaced _unresolved_block (chat), never in the
-        # deliverable shown to the user.
-        result_output = _strip_preamble(result_output)
-
-        # verification (pure tier, always runs)
-        verify_event = build_verify_event(result_output)
-        self._emit(verify_event)
-
-        # Loop Doctor (M8): audit the finished run against loop-library's
-        # checklist, composed from the run's collected gate/verify outcomes +
-        # the budget ceiling + the plan DAG. Suggestions only — never applied.
-        loopdoctor_event = build_loopdoctor_event(
-            plan_step_dicts,
-            budget_ceiling=session.budget_ceiling,
-            gate_events=gate_events,
-            verify_event=verify_event,
-        )
-        self._emit(loopdoctor_event)
-
-        # Record the finished run so GET /export can serialize it to a loop (M9).
-        session.record_run(
-            RunSnapshot(
-                requirement=requirement,
-                plan_steps=plan_step_dicts,
-                topology=topology_map,
-                loopdoctor_checks=loopdoctor_event.checks,
-                budget_ceiling=session.budget_ceiling,
-                result=result_output,
-                cancelled=cancelled,
-            )
-        )
-
+    def _postrun_score_and_record(
+        self,
+        *,
+        session,
+        result_output: str,
+        outputs: dict[str, str],
+        base_client,
+        use_llm: bool,
+        _base_requirement: str,
+        _original_requirement: str,
+        _artifact_copied: bool,
+        _seed_text: str,
+        _reducer_gaps: list[str],
+        _hc_cfg: dict,
+        _outcome: EpochResult,
+    ) -> tuple[EpochResult, str]:
+        """Post-run pipeline (DESIGN §14): score -> synthesize -> repair_lints ->
+        neutralize URLs -> mine weaknesses -> epoch gate -> rubric/adjusted score ->
+        record -> emit HillClimbEvent. Extracted verbatim from ``_run_inner``; the
+        stage ORDER is load-bearing and unchanged, and every fail-open ``try`` guard
+        is preserved. Returns ``(outcome, result_output)`` — ``result_output`` may be
+        mutated by the synthesis/repair/neutralize/epoch-gate stages.
+        """
         # Hill climb post-run: score output, mine weaknesses, record, emit HillClimbEvent.
         # Runs regardless of hill_climb_config so task_hash-based lookup always has data.
         try:
             from studio.task_runs import (
                 TaskRun,
                 TaskRunStore,
+                base_identity as _base_identity,
                 mine_weaknesses_from_outputs,
                 score_result,
                 task_hash as _task_hash,
@@ -2236,8 +1346,9 @@ class Runner:
             _store = TaskRunStore(embedder=self._embedder)
             # Hash the BASE requirement (goal-invariant identity) — must match the
             # auto_improve seed-lookup hash above so a run records under the same
-            # task_hash it seeded from.
-            _thash = _task_hash(_base_requirement)
+            # task_hash it seeded from. PLAN item 5: base_identity strips the GUI
+            # continuation wrapper so a continued run records into the prior lineage.
+            _thash = _task_hash(_base_identity(_base_requirement))
             from studio.workspace import workspace_root as _ws_root_fn
             _effective_ws_root = self._workspace_root or _ws_root_fn()
             _art_file = _effective_ws_root / session.session_id / "artifact.md"
@@ -2275,6 +1386,67 @@ class Runner:
                         _verified_urls = verified_urls_in_cache(
                             _json.load(_cf), _scored_text or ""
                         )
+            except Exception:  # noqa: BLE001
+                pass
+            # PLAN item 1A: synthesis/analysis pass. The additive reducer cannot rewrite
+            # (anti-regression §14.6), so its output is grounded-but-pasted. This adds an
+            # analysis layer (interpretation + cross-source comparison) without dropping any
+            # citation. Runs once per pass on the raw judge client (no tools/fetch), only on
+            # a substantial, citation-bearing research doc; rejected if it loses a URL.
+            if use_llm and _scored_text and len(_scored_text) > 800 and "http" in _scored_text:
+                try:
+                    _syn, _changed = _synthesize_analysis(
+                        _scored_text, base_client, _original_requirement
+                    )
+                    if _changed:
+                        _scored_text = _syn
+                        result_output = _syn
+                        # Re-derive the verified set against the synthesized text.
+                        try:
+                            import json as _json2
+                            import os as _os2
+                            from studio.task_runs import verified_urls_in_cache as _vuc
+                            if _os2.path.exists(".web_cache.json"):
+                                with open(".web_cache.json") as _cf2:
+                                    _verified_urls = _vuc(_json2.load(_cf2), _scored_text)
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception:  # noqa: BLE001 — synthesis must never break recording
+                    pass
+            # §14.6 root-cause fix (reported broken-diagram bug): lint the OUTPUT and, if a
+            # mermaid block is malformed, repair JUST that block via the model and splice it
+            # back deterministically (whole-doc repair truncates a large artifact — verified).
+            # Covers the single-epoch/cold-start case the seed-only repair clause and the
+            # next-epoch self-heal both miss. No-op when the document is already clean.
+            if use_llm and _scored_text:
+                try:
+                    _rep, _rchanged = _repair_lints(
+                        _scored_text, base_client, _original_requirement
+                    )
+                    if _rchanged:
+                        _scored_text = _rep
+                        result_output = _rep
+                        try:
+                            if _art_file.exists():
+                                _art_file.write_text(_scored_text)
+                        except Exception:  # noqa: BLE001 — write-back is best-effort
+                            pass
+                except Exception:  # noqa: BLE001 — repair must never break recording
+                    pass
+            # PLAN item 3: neutralize fabricated/unverified URLs before scoring AND serving,
+            # so a reducer-invented link cannot earn citation credit or reach the user.
+            # FAIL-OPEN — an empty verified set (search down) changes nothing.
+            try:
+                from studio.task_runs import neutralize_unverified_urls
+                _cleaned = neutralize_unverified_urls(_scored_text, _verified_urls)
+                if _cleaned != _scored_text:
+                    _scored_text = _cleaned
+                    result_output = neutralize_unverified_urls(result_output, _verified_urls)
+                    try:
+                        if _art_file.exists():
+                            _art_file.write_text(_scored_text)
+                    except Exception:  # noqa: BLE001 — write-back is best-effort
+                        pass
             except Exception:  # noqa: BLE001
                 pass
             _score, _scorer_feedback = score_result(
@@ -2454,12 +1626,9 @@ class Runner:
             _hc_cfg2 = _hc_cfg
             _min_delta = float(_hc_cfg2.get("min_improvement", 0.02))
             _max_epochs = int(_hc_cfg2.get("max_epochs", 5))
-            if _version >= _max_epochs:
-                _status = "converged"
-            elif _version > 1 and _delta < _min_delta:
-                _status = "plateau"
-            else:
-                _status = "improving"
+            # PLAN item 8: status from the PER-RUN epoch index, not the cumulative version
+            # (which fired "converged" mid-improvement on any task with history).
+            _status = _epoch_status(self._epoch, _delta, _min_delta, _max_epochs)
             # §14.4: hand this pass's outcome back to run() so it can drive the loop.
             _outcome = EpochResult(
                 version=_version, score=_score, delta=_delta, status=_status
@@ -2477,13 +1646,7 @@ class Runner:
             )
         except Exception:  # noqa: BLE001 — scoring failure must never crash the run
             pass
-
-        # §14.4: the terminal `done` now lives in run() (emitted once after the epoch
-        # loop). Stash this pass's final output + cancel flag so run() can build it,
-        # and hand back the per-epoch outcome that drives continue/stop.
-        self._last_result = result_output
-        self._last_cancelled = cancelled
-        return _outcome
+        return _outcome, result_output
 
     # -- helpers -----------------------------------------------------------
 

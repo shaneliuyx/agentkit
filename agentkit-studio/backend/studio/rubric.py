@@ -51,16 +51,38 @@ def _content_tokens(s: str) -> set[str]:
 
 #: Criterion weights (sum = 1.0). Sourcing/verification dominate — the report's own
 #: thesis is that VERIFIED sourcing is the bottleneck, and it's the most gameable.
+# PLAN item 1B: the loop was climbing to a copy-paste local optimum because the rubric
+# rewarded quote DENSITY (evidence_depth) and had no analysis criterion at all. Add an
+# `analysis` criterion and DOWN-WEIGHT raw quote density (0.20 → 0.12), so the loop climbs
+# toward synthesis/interpretation, not pasting. (The LLM-judged version of this signal —
+# G-Eval/RAGAS — is PLAN item 2, deliberately not built here; this is the deterministic
+# proxy that keeps the rubric reproducible and model-free.)
 _WEIGHTS = {
-    "sourcing": 0.25,        # CRAAP authority: distinct cited sources
-    "verification": 0.25,    # CRAAP accuracy: sources actually verified (cache oracle)
-    "evidence_depth": 0.20,  # correctness/helpfulness: direct quotes / concrete evidence
-    "structure": 0.15,       # completeness: summary + sections + conclusion
-    "methodology": 0.15,     # completeness: methodology/scope transparency + non-thin body
+    "sourcing": 0.22,        # CRAAP authority: distinct cited sources
+    "verification": 0.22,    # CRAAP accuracy: sources actually verified (cache oracle)
+    "evidence_depth": 0.12,  # correctness/helpfulness: direct quotes / concrete evidence
+    "analysis": 0.18,        # synthesis: interpretation + cross-source comparison (item 1B)
+    "structure": 0.14,       # completeness: summary + sections + conclusion
+    "methodology": 0.12,     # completeness: methodology/scope transparency + non-thin body
 }
 _TARGET_SOURCES = 8          # DEER "inclusion of requested items": reward up to N sources
 _TARGET_QUOTES = 8           # direct-evidence density target
 _TARGET_WORDS = 1500         # body-depth floor (a stub must not score full marks)
+_TARGET_ANALYSIS = 6         # analytical/comparative discourse markers for full analysis credit
+
+#: Discourse markers of analysis & cross-source comparison — interpretation rather than
+#: quotation. Their density is the deterministic `analysis` signal (PLAN item 1B): a report
+#: that only pastes sources has few; one that synthesizes ("in contrast", "this implies",
+#: "compared to", "the trade-off") has many.
+_ANALYSIS_MARKERS = re.compile(
+    r"(?i)\b("
+    r"however|therefore|thus|hence|whereas|nonetheless|consequently|as a result"
+    r"|in contrast|on the other hand|by comparison|compared (?:to|with)|relative to|unlike"
+    r"|this (?:suggests|implies|indicates|means|shows)|which (?:suggests|implies|indicates)"
+    r"|trade[- ]?off|the (?:key |main )?(?:implication|takeaway|insight)"
+    r"|more (?:effective|reliable|robust|mature|popular) than|differ(?:s|ent|ence)?"
+    r")\b"
+)
 
 
 def _clamp01(x: float) -> float:
@@ -100,6 +122,7 @@ def score_breakdown(
     has_method = bool(re.search(r"(?i)methodolog|scope|limitation", t))
     quotes = len(_BLOCKQUOTE_RE.findall(t)) + t.count('"') // 2
     words = len(t.split())
+    n_analysis = len(_ANALYSIS_MARKERS.findall(t))
 
     req = [s.strip() for s in (required_sections or []) if s and s.strip()]
     if req:                                                   # template-coverage structure
@@ -125,6 +148,7 @@ def score_breakdown(
         "sourcing": _clamp01(n_urls / _TARGET_SOURCES),
         "verification": _clamp01(n_verified / _TARGET_SOURCES),
         "evidence_depth": _clamp01(quotes / _TARGET_QUOTES),
+        "analysis": _clamp01(n_analysis / _TARGET_ANALYSIS),
         "structure": structure,
         "methodology": (1.0 if has_method else 0.0) * 0.5 + _clamp01(words / _TARGET_WORDS) * 0.5,
     }

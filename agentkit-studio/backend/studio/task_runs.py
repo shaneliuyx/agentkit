@@ -19,6 +19,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,124 @@ def _db_path() -> Path:
 def task_hash(requirement: str) -> str:
     """Stable 12-char key derived from the requirement text."""
     return hashlib.sha256(requirement.strip().lower().encode()).hexdigest()[:12]
+
+
+def base_identity(requirement: str) -> str:
+    """Stable lineage identity for a (possibly conversational) requirement (PLAN item 5).
+
+    The GUI "Continue run" wraps the task in a conversational blob
+    ("Original task: X\\n\\nContext from previous run: …\\n\\nFollow-up: Y") and the chat
+    path prepends flattened turns then "[CURRENT REQUEST]: Z". Hashing those rotates
+    ``task_hash`` on every continuation, so the re-run COLD-STARTS instead of seeding the
+    prior artifact (no carry-forward, repairs never fire). Extract the ORIGINAL task so a
+    continuation shares the first run's ``task_hash`` and actually continues the lineage.
+
+    ponytail: this couples to the two GUI continuation formats. If those markers change,
+    the robust upgrade is to thread an explicit ``base_requirement`` param end-to-end
+    (frontend → /run → runner) instead of recovering it by string-matching here.
+    """
+    r = requirement or ""
+    # Chat path: the bare current request follows the LAST "[CURRENT REQUEST]:" marker.
+    m = re.search(r"\[CURRENT REQUEST\]:\s*(.+)\Z", r, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # "Continue run" blob: the original task follows "Original task:" up to a blank line.
+    m = re.search(r"(?is)^\s*Original task:\s*(.+?)(?:\n\s*\n|\Z)", r)
+    if m:
+        return m.group(1).strip()
+    return r.strip()
+
+
+#: Query params that identify a session/campaign, not the resource — dropped when
+#: canonicalizing a URL for verification matching so a tracked link still matches its
+#: clean cached form (PLAN item 7).
+_TRACKING_PARAMS = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "mc_cid", "mc_eid", "ref", "ref_src", "source",
+})
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _normalize_url(u: str) -> str:
+    """Canonicalize a URL for set-membership matching (PLAN item 7).
+
+    Forces scheme to ``https``, lowercases the host, drops a trailing slash, strips
+    tracking query params, and removes the fragment — so ``http`` vs ``https``, a trailing
+    slash, or a ``utm_*`` tag no longer makes a REAL citation look unverified (the
+    false-unverified bug). Returns a lowercase fallback when the input is not parseable.
+    """
+    s = (u or "").strip().rstrip(".,)\"'>")
+    try:
+        p = urllib.parse.urlsplit(s)
+    except ValueError:
+        return s.lower()
+    if not p.netloc:                       # not an absolute URL — nothing to canonicalize
+        return s.lower()
+    path = p.path.rstrip("/")
+    kept = [
+        (k, v) for k, v in urllib.parse.parse_qsl(p.query)
+        if k.lower() not in _TRACKING_PARAMS
+    ]
+    query = urllib.parse.urlencode(kept)
+    return urllib.parse.urlunsplit(("https", p.netloc.lower(), path, query, ""))
+
+
+def neutralize_unverified_urls(
+    text: str, verified_urls: list[str] | None, *, placeholder: str = "(unverified)"
+) -> str:
+    """Replace any cited URL NOT in the verified set with ``placeholder`` (PLAN item 3).
+
+    The reducer can invent plausible URLs from real domains; the cache check DETECTS them
+    but nothing strips them. This does, so the cleaned doc is what gets scored/served.
+
+    FAIL-OPEN (critical): an empty/None verified set means verification was UNAVAILABLE
+    (search down, cache unreadable) — not that every citation is fake. In that case nothing
+    is changed, so a transient outage never blanks out every real citation. URLs are
+    normalized (scheme/slash/tracking) before matching so a genuine link is not neutralized
+    over a cosmetic format difference.
+    """
+    verified = verified_urls or []
+    if not verified or not text:
+        return text or ""
+    vset = {_normalize_url(u) for u in verified}
+
+    def _sub(m: "re.Match[str]") -> str:
+        raw = m.group(0)
+        core = raw.rstrip(".,)\"'>")     # split off trailing punctuation to re-append
+        trail = raw[len(core):]
+        return raw if _normalize_url(core) in vset else placeholder + trail
+
+    return _URL_RE.sub(_sub, text)
+
+
+#: A mined "weakness" matching this is actually a POSITIVE statement the miner hallucinated
+#: as a gap (e.g. "The report is complete and satisfies all task constraints"). These wrongly
+#: drive ``adjusted_score`` down and seed phantom fixes, so they are dropped (PLAN item 6).
+_NON_WEAKNESS_RE = re.compile(
+    r"(?i)("
+    r"no (?:major |significant |further )?(?:weakness|gap|issue|concern|problem)(?:es|s)?\b"
+    r"|^none\b"
+    r"|satisf(?:y|ies|ied) all|meets all|fully (?:meets|satisfies|complete|addressed)"
+    r"|is (?:complete|comprehensive|thorough|excellent|strong|robust|well[- ]?structured"
+    r"|well[- ]?organized|well[- ]?sourced)"
+    r"|complete and (?:satisf|meets|strong|comprehensive)"
+    r"|no (?:further )?(?:improvement|change|action|work)s? (?:needed|required)"
+    r"|nothing (?:is )?missing"
+    r")"
+)
+
+
+def _is_non_weakness(w: str) -> bool:
+    """True when a mined "weakness" is actually a success statement (miner hallucination).
+
+    Grounding the eval (PLAN item 6): a positive assertion is not a gap, so counting it as
+    one falsely depresses the score and seeds a fix for nothing. An empty string is also
+    not an actionable weakness.
+    """
+    s = _norm_weakness(w)
+    if not s:
+        return True
+    return bool(_NON_WEAKNESS_RE.search(s))
 
 
 # Loop-closure check (DESIGN §11.4): a weakness re-recorded in this many DISTINCT
@@ -119,11 +238,15 @@ def verified_urls_in_cache(cache_data: dict, text: str) -> list[str]:
             fu = k[len("fetch:"):].rsplit(":", 1)[0].strip()
             if fu.lower().startswith("http"):
                 cached.add(fu)
+    # PLAN item 7: match on the NORMALIZED form (scheme/trailing-slash/tracking-param
+    # invariant) so a real citation that differs only by http↔https, a trailing slash, or a
+    # utm_* tag is not wrongly flagged unverified. The ORIGINAL cited string is returned.
+    cached_norm = {_normalize_url(u) for u in cached}
     seen: set[str] = set()
     out: list[str] = []
     for u in _re.findall(r"https?://\S+", text or ""):
         u = u.rstrip(".,)")
-        if u in cached and u not in seen:
+        if _normalize_url(u) in cached_norm and u not in seen:
             seen.add(u)
             out.append(u)
     return out
@@ -650,7 +773,10 @@ def mine_weaknesses_from_outputs(
         _combined = _outputs_block + (f"\n\n{_lbl}: {_win}" if _win else "")
         for _w in _mine_one(_combined):
             _k = _norm_weakness(_w)
-            if _k and _k not in _seen:
+            # PLAN item 6: drop miner hallucinations — a positive "the report is complete"
+            # statement is not a gap, so it must not count as an unsolved weakness (which
+            # would falsely depress adjusted_score and seed a phantom fix).
+            if _k and _k not in _seen and not _is_non_weakness(_w):
                 _seen.add(_k)
                 _merged.append(_w)
     return _merged[:_MINE_MAX_WEAKNESSES]
