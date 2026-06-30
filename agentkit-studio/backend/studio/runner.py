@@ -1526,6 +1526,7 @@ class Runner:
             try:
                 from studio.report_quality import (
                     build_publish_revision_prompt,
+                    build_revision_evidence_text,
                     evaluate_publish_readiness,
                 )
                 _publish = evaluate_publish_readiness(
@@ -1534,11 +1535,7 @@ class Runner:
                     verified_urls=_verified_urls or None,
                 )
                 if use_llm and _publish.issues:
-                    _evidence_text = "\n\n".join(
-                        f"[{_sid}]\n{_out}"
-                        for _sid, _out in outputs.items()
-                        if isinstance(_out, str) and "http" in _out
-                    )
+                    _evidence_text = build_revision_evidence_text(outputs)
                     if _evidence_text:
                         _rev_prompt = build_publish_revision_prompt(
                             _original_requirement,

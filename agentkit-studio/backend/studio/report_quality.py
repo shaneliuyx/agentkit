@@ -164,6 +164,22 @@ def _clip_block(text: str, max_chars: int = _REVISION_PROMPT_MAX_CHARS) -> str:
     return body[:max_chars].rstrip() + "\n\n[truncated]"
 
 
+def build_revision_evidence_text(
+    outputs: dict[str, str],
+    *,
+    max_chars: int = _REVISION_PROMPT_MAX_CHARS,
+) -> str:
+    """Return URL-bearing phase outputs for a publish-revision prompt."""
+    chunks: list[str] = []
+    for step_id, output in outputs.items():
+        if not isinstance(output, str):
+            continue
+        if "http://" not in output and "https://" not in output:
+            continue
+        chunks.append(f"[{step_id}]\n{output.strip()}")
+    return _clip_block("\n\n".join(chunks), max_chars)
+
+
 def build_publish_revision_prompt(
     requirement: str,
     draft: str,

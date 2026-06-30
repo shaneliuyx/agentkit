@@ -1,4 +1,8 @@
-from studio.report_quality import build_publish_revision_prompt, evaluate_publish_readiness
+from studio.report_quality import (
+    build_publish_revision_prompt,
+    build_revision_evidence_text,
+    evaluate_publish_readiness,
+)
 
 
 def test_non_report_request_passes_publish_gate() -> None:
@@ -77,3 +81,29 @@ def test_publish_revision_prompt_is_generic_and_evidence_bounded() -> None:
     assert "[truncated]" in prompt
     assert "Catalog management for agent loops" not in prompt
     assert "local catalogs are best suited" not in prompt
+
+
+def test_revision_evidence_text_uses_only_url_bearing_outputs() -> None:
+    evidence = build_revision_evidence_text(
+        {
+            "scope": "No source here.",
+            "fetch": "Useful quote from https://example.com/source.",
+            "empty": "",
+            "synthesis": "Another source http://example.org/ref.",
+        }
+    )
+
+    assert "[fetch]" in evidence
+    assert "https://example.com/source" in evidence
+    assert "[synthesis]" in evidence
+    assert "http://example.org/ref" in evidence
+    assert "[scope]" not in evidence
+
+
+def test_revision_evidence_text_is_bounded() -> None:
+    evidence = build_revision_evidence_text(
+        {"fetch": "https://example.com/source " + ("x" * 1000)},
+        max_chars=120,
+    )
+
+    assert evidence.endswith("[truncated]")

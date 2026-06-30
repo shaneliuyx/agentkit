@@ -211,6 +211,14 @@ Objective: implement the research report generator improvement plan and validate
    - result: no genericity issues.
    - command: `pytest tests/test_genericity_audit.py tests/test_report_quality.py tests/test_tools.py tests/test_artifact_lint.py tests/test_model_profiles.py tests/test_report_profiles.py tests/test_m8_m9_helpers.py::test_build_planner_cot_prompt_guides_report_plan_depth tests/test_runner.py::test_gemma_profile_limits_searches_in_runner_tool_loop tests/test_runner.py::test_gemma_report_request_keeps_llm_epic_planning_by_default tests/test_runner.py::test_publish_gate_emits_failure_for_report_without_sources -q`
    - result: 50 passed.
+60. Extracted publish-revision evidence selection into `build_revision_evidence_text()` in `backend/studio/report_quality.py`:
+   - includes only phase outputs that contain `http://` or `https://`;
+   - labels each excerpt by phase/step id;
+   - applies the same moving-window cap used by the revision prompt.
+61. Added focused tests for the evidence selector and reran verification:
+   - command: `pytest tests/test_genericity_audit.py tests/test_report_quality.py tests/test_tools.py tests/test_artifact_lint.py tests/test_model_profiles.py tests/test_report_profiles.py tests/test_m8_m9_helpers.py::test_build_planner_cot_prompt_guides_report_plan_depth tests/test_runner.py::test_gemma_profile_limits_searches_in_runner_tool_loop tests/test_runner.py::test_gemma_report_request_keeps_llm_epic_planning_by_default tests/test_runner.py::test_publish_gate_emits_failure_for_report_without_sources -q`
+   - result: 52 passed.
+   - genericity audit on `runner.py`, `report_quality.py`, and `genericity_audit.py`: no genericity issues.
 
 ## Current Next Steps
 
