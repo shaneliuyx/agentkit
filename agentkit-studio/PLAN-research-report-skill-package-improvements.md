@@ -6,9 +6,9 @@ Date: 2026-06-30
 
 This plan compares the current `agentkit-studio` codebase with the curated local references in `ref/research_report_agent_skill_package/` and `ref/enhanced_report_bundle/`, then turns the comparison into implementation work. The goal is not to copy the package. Studio is already a richer FastAPI/React multi-agent runner with SSE, hill-climb persistence, tool execution, section reducers, deterministic scoring, and export. The useful package lessons are the missing product contracts around evidence state, hard-fail governance, final packaging, and human review.
 
-Product target: a generic research report generator. The system must work for technical, market, policy, academic, product, competitive, literature-review, and general explanatory reports. Agent-framework/Pi/Craft examples are validation fixtures and optional presets, not the default domain. Topic-specific behavior should come from intake, report profile, template preset, evidence policy, and user constraints, not hardcoded prompts or code paths.
+Product target: a generic research report generator. The Studio source code and built-in mechanisms must work for technical, market, policy, academic, product, competitive, literature-review, and general explanatory reports. Generated reports themselves must be specific to the user's task, topic, audience, and evidence; "generic" is a source-code/product constraint, not a desired report style. Agent-framework/Pi/Craft examples are validation fixtures and optional presets, not the default domain. Topic-specific behavior should come from intake, report profile, template preset, evidence policy, user constraints, fetched evidence, and reviewed catalog/template data, not hardcoded prompts or code paths.
 
-Standing guardrail: production changes must remain domain-neutral. Do not add fixed prose, fixed conclusions, topic-specific recovery drafts, model-id branches such as "weak model report mode," or one-off templates for a single example. Any reusable improvement should be expressed as generic report-state, evidence, template/catalog, prompt, validation, or UI behavior; domain examples belong in tests, fixtures, references, or reviewed catalog entries.
+Standing guardrail: production changes must remain task-neutral while generated reports remain task-specific. Do not add fixed prose, fixed conclusions, topic-specific recovery drafts, model-id branches such as "weak model report mode," or one-off templates for a single example. Any reusable improvement should be expressed as generic report-state, evidence, template/catalog, prompt, validation, or UI behavior; domain examples belong in tests, fixtures, references, user input, fetched evidence, or reviewed catalog entries.
 
 ## Evidence Base
 
@@ -1381,15 +1381,16 @@ Rationale:
 ### O10. Audit Report-Generator Code For Genericity Before Landing Changes
 
 Goal: make the standing generic-report rule enforceable. Each report-generator
-implementation slice should prove that production behavior remains
-domain-neutral before it is committed or promoted.
+implementation slice should prove that Studio source-code behavior remains
+task-neutral before it is committed or promoted, while preserving the requirement
+that generated reports be specific to the user's task and evidence.
 
 Implementation:
 
 1. Add a genericity audit checklist to every report-generator slice.
    - Check changed production files under `backend/studio`, `frontend/src`, and
      any reused shared helpers.
-   - Look for fixed report prose, fixed conclusions, topic-specific recovery
+   - Look for fixed report prose in source code, fixed conclusions, topic-specific recovery
      drafts, one-off template sections, model-id branches that change report
      semantics, and hardcoded example-domain assumptions.
    - Allowed locations for topic-specific examples: `tests/`, fixtures, `ref/`,
@@ -1431,7 +1432,7 @@ are discovered.
 Acceptance tests:
 
 - Scanner flags a production string that contains a fixed example report answer
-  or topic-specific recovery draft.
+  or topic-specific recovery draft in source code.
 - Scanner ignores the same text in `tests/`, fixtures, and `ref/`.
 - Scanner does not flag generic report-generator terms such as template,
   citation, source, evidence, section, loop, skill, and catalog by default.

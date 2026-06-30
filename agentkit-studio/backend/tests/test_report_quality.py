@@ -73,6 +73,7 @@ def test_publish_revision_prompt_is_generic_and_evidence_bounded() -> None:
     assert "[publish-gate] Final output is too short." in prompt
     assert "https://example.com/battery-policy" in prompt
     assert "Do not invent source URLs" in prompt
+    assert "specific to the user's task" in prompt
     assert "[truncated]" in prompt
     assert "Catalog management for agent loops" not in prompt
     assert "local catalogs are best suited" not in prompt

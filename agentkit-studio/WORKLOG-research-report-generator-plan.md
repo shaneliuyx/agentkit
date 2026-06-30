@@ -192,6 +192,13 @@ Objective: implement the research report generator improvement plan and validate
 53. Re-ran focused tests after adding the generic revision prompt helper and O10 plan task:
    - command: `pytest tests/test_report_quality.py tests/test_tools.py tests/test_artifact_lint.py tests/test_model_profiles.py tests/test_report_profiles.py tests/test_m8_m9_helpers.py::test_build_planner_cot_prompt_guides_report_plan_depth tests/test_runner.py::test_gemma_profile_limits_searches_in_runner_tool_loop tests/test_runner.py::test_gemma_report_request_keeps_llm_epic_planning_by_default tests/test_runner.py::test_publish_gate_emits_failure_for_report_without_sources -q`
    - result: 47 passed.
+54. User clarified the genericity rule: "generic" restricts Studio source code and built-in mechanisms, not generated report content. Generated reports must be specific to the user's task, topic, audience, and evidence. Updated the plan, prompt helper wording, local `AGENTS.md`, and genericity-audit wording to reflect that distinction.
+55. Added the first genericity scanner slice:
+   - `backend/studio/genericity_audit.py` scans Python production string literals for obvious fixed report drafts and known example fallback phrases.
+   - `backend/tests/test_genericity_audit.py` verifies production fixed-report prose is flagged, allowed paths (`tests`, fixtures, `ref`) are ignored, and generic report-generator terms are allowed.
+56. Re-ran focused tests after the correction:
+   - command: `pytest tests/test_genericity_audit.py tests/test_report_quality.py tests/test_tools.py tests/test_artifact_lint.py tests/test_model_profiles.py tests/test_report_profiles.py tests/test_m8_m9_helpers.py::test_build_planner_cot_prompt_guides_report_plan_depth tests/test_runner.py::test_gemma_profile_limits_searches_in_runner_tool_loop tests/test_runner.py::test_gemma_report_request_keeps_llm_epic_planning_by_default tests/test_runner.py::test_publish_gate_emits_failure_for_report_without_sources -q`
+   - result: 50 passed.
 
 ## Current Next Steps
 
@@ -207,4 +214,4 @@ Objective: implement the research report generator improvement plan and validate
 - The current slice keeps LLM planning as default. Methodology stages from `ref/.../agent_loop.md` are retained as seedable/catalog scaffolding, not automatic routing.
 - Static generic/profile templates are code defaults. Learned/approved reusable skeletons belong in `TemplateStore`/DB after audit metadata and replacement/quarantine logic exists.
 - The latest E2E (`s_fa0fecbb18a6`) proves compatibility with the original planner/topology path, but not report-quality success.
-- Standing guardrail: AgentKit Studio's report generator is generic. Never add domain-specific production prose, fixed conclusions, model-id report branches, or example-specific templates; implement reusable evidence, prompt, catalog/template, validation, and UI mechanisms instead.
+- Standing guardrail: AgentKit Studio's source code and built-in report-generator mechanisms are generic/task-neutral, but generated reports must be task-specific and evidence-specific. Never add domain-specific production prose, fixed conclusions, model-id report branches, or example-specific templates; implement reusable evidence, prompt, catalog/template, validation, and UI mechanisms instead.
