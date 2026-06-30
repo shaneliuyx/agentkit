@@ -1519,6 +1519,29 @@ class Runner:
                             and any(_s in _w.lower() for _s in _present)
                         )
                     ]
+            # Deterministic report publish gate: catches outputs that are structurally clean
+            # but fail the user's report contract (for example no citations or topic drift).
+            # It does not replace LLM planning; it only surfaces a final readiness verdict and
+            # feeds failures into the existing weakness/adjusted-score path.
+            try:
+                from studio.report_quality import evaluate_publish_readiness
+                _publish = evaluate_publish_readiness(
+                    _original_requirement,
+                    _scored_text or result_output or "",
+                    verified_urls=_verified_urls or None,
+                )
+                _pg = GateEvent(
+                    name="publish-ready",
+                    outcome=_publish.outcome,
+                    detail=_publish.detail,
+                    sandboxed=True,
+                )
+                self._emit(_pg)
+                if _publish.issues:
+                    _seen_w = set(_weaknesses)
+                    _weaknesses = [w for w in _publish.issues if w not in _seen_w] + _weaknesses
+            except Exception:  # noqa: BLE001 — publish gate must never break recording
+                pass
             # Semantic dedup: the moving-window miner can surface the SAME issue under two
             # section prefixes (e.g. the popularity-ranking gap as both [## Source Selection]
             # and [## Key Findings]). Exact-string dedup misses these re-phrasings, so they

@@ -974,6 +974,24 @@ def test_gemma_report_request_keeps_llm_epic_planning_by_default(fake_client_fac
     assert plan_event.steps
 
 
+def test_publish_gate_emits_failure_for_report_without_sources(fake_client_factory) -> None:
+    events: list[StudioEvent] = []
+    session = _make_session()
+    runner = Runner(session, events.append, client_factory=fake_client_factory, embedder=None)
+    runner.run(
+        "Write a research report about catalog management for agent loops and skills. "
+        "Use fetched evidence and citations."
+    )
+
+    gates = [
+        e for e in events
+        if e.EVENT_TYPE == "gate" and getattr(e, "name", "") == "publish-ready"
+    ]
+    assert gates
+    assert gates[0].outcome == "fail"
+    assert "no source URL" in gates[0].detail
+
+
 # --------------------------------------------------------------------------- #
 # §14.4 Epoch heartbeat — one Run auto-iterates to max_epochs                  #
 # --------------------------------------------------------------------------- #

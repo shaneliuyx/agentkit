@@ -156,12 +156,37 @@ Objective: implement the research report generator improvement plan and validate
    - Output quality: still bad for the requested generic catalog-management report; zero URLs, no placeholder text, but semantically drifted to workflow-vs-agent auditability and did not cover local/remote catalogs or implementation steps.
    - `lint_artifact()` reported no issues because the output was structurally clean but semantically incomplete. This validates the plan need for evidence matrix, semantic/request-alignment gate, deterministic report assembly, and publish gate; prompt heuristics alone are insufficient.
 40. Stopped the foreground uvicorn backend after E2E; no long-running exec sessions remain from the live test.
+41. Continued implementation because `s_fa0fecbb18a6` proved the real path runs but produces a structurally clean, semantically bad report.
+42. Added `backend/studio/report_quality.py`:
+   - deterministic publish-readiness checks for report-like requests;
+   - non-report tasks pass through;
+   - report tasks fail when requested evidence/citations are absent, the report is too short, or important request terms are missing.
+43. Wired `evaluate_publish_readiness()` into `Runner._postrun_score_and_record()` after final cleanup and before adjusted scoring:
+   - emits `GateEvent(name="publish-ready")`;
+   - prepends publish-gate issues into `_weaknesses`, so adjusted score and hill-climb feedback reflect request-alignment failures.
+44. Added tests:
+   - `backend/tests/test_report_quality.py`;
+   - `test_publish_gate_emits_failure_for_report_without_sources`.
+45. Ran focused tests:
+   - command: `pytest tests/test_report_quality.py tests/test_tools.py tests/test_artifact_lint.py tests/test_model_profiles.py tests/test_report_profiles.py tests/test_m8_m9_helpers.py::test_build_planner_cot_prompt_guides_report_plan_depth tests/test_runner.py::test_gemma_profile_limits_searches_in_runner_tool_loop tests/test_runner.py::test_gemma_report_request_keeps_llm_epic_planning_by_default tests/test_runner.py::test_publish_gate_emits_failure_for_report_without_sources -q`
+   - result: 46 passed.
+46. Ran bounded real Gemma E2E session `s_617c7f5b7aa0`.
+   - Runtime: 52.5 seconds.
+   - Planner behavior: preserved original `_plan_from_epics()` path and emitted the same 3-epic structure as the prior compatible run.
+   - Output remained bad: 642 chars, zero URLs, semantic drift to workflow-vs-agent auditability.
+   - New publish gate worked: emitted `GateEvent(name="publish-ready", outcome="fail")`.
+   - Gate detail:
+     - requested evidence/citations but final output has no source URL;
+     - final output is too short to be a complete research report;
+     - final output misses important request terms including catalog, management, loop, skill, local, remote, operational, risk.
+   - This proves the system now detects the bad report rather than silently presenting it as publish-ready. Next improvement should use this gate to trigger revision/evidence-matrix assembly, not just report failure.
+47. Stopped foreground uvicorn backend after E2E.
 
 ## Current Next Steps
 
-1. Stage only scoped changes for commit; runner/test_runner/prompts had pre-existing unrelated modifications, so partial staging is required.
-2. Commit the implementation slice.
-3. Next implementation should target evidence matrix / semantic alignment / publish-gate behavior, because E2E shows planner prompt improvements alone do not make Gemma produce a good report.
+1. Stage only scoped changes for commit; runner/test_runner had pre-existing unrelated modifications, so partial staging is required.
+2. Commit the publish-gate slice.
+3. Next implementation: feed publish-gate failure into an explicit revision/evidence-matrix pass or loop retry.
 
 ## Notes For Resume
 
