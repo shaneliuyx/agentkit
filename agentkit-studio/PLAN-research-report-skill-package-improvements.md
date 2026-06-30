@@ -947,7 +947,46 @@ Implementation:
    - Expose template presets in the rubric/config UI.
    - Route automatically from `ResearchConfig.report_type`, with user override.
 
-2. Add editorial lint checks:
+2. Keep static generic/profile presets in code, and use the SQLite template DB only
+   for learned or explicitly approved reusable skeletons.
+   - Current code validation: `backend/studio/templates.py` defines
+     `TemplateStore(report_templates)` with `save_template()` and
+     `find_template()`, and `backend/studio/runner.py` saves decent report
+     skeletons after a run. However, the run path does not currently call
+     `find_template()` for generation, and `_build_skeleton()` deliberately
+     stopped semantic template reuse because prior topic-specific headings could
+     leak into unrelated reports.
+   - Therefore, `backend/studio/report_profiles.py` should own built-in default
+     templates; `TemplateStore` should be treated as a managed template catalog,
+     not the source of truth for generic defaults.
+   - Add metadata columns or a sidecar table for DB templates:
+     `template_id`, `name`, `report_type`, `source` (`learned|approved|imported`),
+     `status` (`active|stale|disabled`), `quality_score`, `created_from_session`,
+     `approved_by`, `last_used_at`, and `failure_reason`.
+   - Only auto-select a DB template when all are true:
+     report type matches, status is `active`, source is `approved` or quality
+     score clears threshold, semantic similarity clears a high threshold, and
+     deterministic lints find no duplicate headings/placeholders/off-profile
+     sections.
+   - If no DB template passes, fall back to the code profile preset.
+
+3. Replace or quarantine original bad DB templates.
+   - Add a maintenance command or API such as
+     `POST /catalog/templates/audit` and `POST /catalog/templates/{id}/replace`.
+   - Audit every row in `report_templates` with the same structural lints used
+     for final reports:
+     duplicate headings, placeholders, topic-specific leakage, unsolicited code
+     sections, missing references, and broken/unverified links.
+   - Mark bad rows `stale` or `disabled`; do not delete by default, because old
+     run provenance may still need to explain where a skeleton came from.
+   - Seed approved replacements for the generic and profile templates from
+     `report_profiles.py`, or let the user promote a clean generated skeleton.
+   - Rationale: replacing the DB contents directly is necessary if earlier
+     experiments saved Pi/Craft or agent-framework-specific skeletons. Without
+     quarantine, a future semantic match can reintroduce the exact topic drift
+     `_build_skeleton()` was changed to avoid.
+
+4. Add editorial lint checks:
    - repeated headings or near-duplicate sections,
    - scratchpad markers,
    - unverified popularity numbers,
@@ -956,7 +995,7 @@ Implementation:
    - missing explanation near diagrams/code examples when diagrams/code are present or requested,
    - off-profile content, such as unsolicited code blocks in a market/policy/general report.
 
-3. Add cleanup reducers.
+5. Add cleanup reducers.
    - Use existing citation-preserving rewrite functions, but gate them through citation/URL retention checks.
    - Never remove sourced facts or evidence items while de-duplicating prose.
 
@@ -971,6 +1010,9 @@ Acceptance tests:
 - Generic default remains compact and topic-neutral.
 - Enhanced technical preset includes all 12 technical sections.
 - Market/policy/literature-review presets do not include code sections unless requested.
+- DB template audit disables skeletons with placeholders, duplicate headings, or off-profile sections.
+- DB template auto-selection prefers active approved templates and falls back to code presets when no safe match exists.
+- Replacing a stale DB template preserves provenance while preventing future automatic reuse.
 - Duplicate heading lint catches repeated sections.
 - Editorial cleanup does not drop citations.
 
@@ -1007,13 +1049,25 @@ Root causes in current code:
 
 Design principle:
 
-- Treat weak models as unreliable generators but useful extractors when the task is small and the output schema is narrow.
-- Move quality control earlier: plan in small windows, fetch in bounded batches, extract evidence into typed records, assemble deterministically, then ask the model only for section-sized synthesis.
-- Prefer deterministic rejection/repair over asking the same model to self-correct a large document.
+- Preserve the original architecture: LLM epic planning and automatic topology
+  selection remain the default. Model profiles provide budgets, prompt hints,
+  and validation thresholds; they should not silently replace the planner or
+  hardcode product workflow branches.
+- Make the planner smarter instead of replacing it: the planner prompt should
+  ask the LLM to choose compact, standard, or staged report planning based on
+  requested report size, evidence burden, risk, report profile, and user
+  constraints.
+- Treat weaker local models as needing stronger guardrails around action count,
+  context size, and publish gates, while still letting the LLM reason about
+  stage planning unless the user explicitly seeds a fixed loop/template.
+- Move quality control earlier through typed evidence, moving windows, and
+  deterministic publish gates; avoid hardcoded topic logic such as "simple
+  report" or "weak LLM means use this exact plan."
 
-### O1. Add A Weak-Model Mode
+### O1. Add Model Profiles For Budget And Prompt Hints
 
-Add a mode flag derived from model id and config.
+Add model profiles derived from model id and user/config overrides. These are
+capability hints, not workflow overrides.
 
 Implementation:
 
@@ -1031,10 +1085,21 @@ Implementation:
 2. Resolve the profile in `Runner.__init__` or `_run_inner` from `session.llm_info` / backend model id.
 3. Pass the profile into:
    - `ToolAugmentedClient`,
-   - planner prompt construction,
+   - planner prompt construction as optional budget/schema guidance only,
    - worker/executor prompt construction,
    - section reducer,
    - post-run finalization.
+4. Do not bypass `_plan_from_epics()` or automatic topology selection solely
+   because the profile says weak instruction following. If a fixed report loop
+   is desired, use the existing seed-loop/catalog path so the choice is explicit
+   and observable via `LoopSeedEvent`.
+5. Enhance `_build_planner_cot_prompt()` with report-depth heuristics:
+   - compact/brief report: 1-2 epics;
+   - standard sourced report: 3-4 epics, borrowing the methodology stages as
+     guidance;
+   - large/high-impact/disputed report: 4-5 epics with explicit verification,
+     limitations, revision, and publish/human-review gates.
+   The prompt must state these are heuristics, not hardcoded stages.
 
 Tradeoff: hardcode Gemma-specific checks vs user-configurable profile.
 
@@ -1047,6 +1112,8 @@ Acceptance tests:
 - Gemma model id resolves to weak profile.
 - Unknown model id resolves to default profile.
 - Weak profile lowers tool loop and action budgets without changing strong profile defaults.
+- Gemma/profile resolution does not automatically bypass LLM epic planning.
+- Planner prompt contains report-depth heuristics and still emits `EPIC_PLAN`.
 
 ### O2. Bound Actions Per Phase And Per Worker
 
@@ -1250,11 +1317,14 @@ Acceptance tests:
 - Clean artifact passes.
 - Gate failure is persisted and export manifest includes the failure list.
 
-### O8. Make The Generic Research-Report Loop More Explicit For Weak Models
+### O8. Make The Generic Research-Report Loop Explicit As A Seedable Methodology
 
-The local `research-report-agent` loop should not seed broad abstract steps only, and it should not assume a technical-agent topic.
+The local `research-report-agent` loop should not seed broad abstract steps only,
+and it should not assume a technical-agent topic. It should be available through
+catalog/seed-loop management as an explicit methodology choice, while ordinary
+unseeded runs continue to use LLM epic planning and automatic topology selection.
 
-Replace or augment steps with weak-model-friendly steps:
+Replace or augment the seeded loop steps with methodology-friendly steps:
 
 1. `Scope`: produce JSON only: topic, report_type, audience, purpose, required sections, source policy, output policy, max sources per section.
 2. `Plan sources`: produce a section-to-query table; max 2 queries per section.
@@ -1275,7 +1345,10 @@ Profile-specific behavior:
 
 Rationale:
 
-- A weak model should not be asked to "write a complete report" from a long mixed context. It should perform small typed transformations.
+- A model should not be forced into this plan just because of its model id. The
+  stage loop is useful when the user chooses the research-report methodology or
+  when an intake/config explicitly requests fixed-stage generation. Keeping it
+  in the catalog preserves compatibility with the original LLM-first planner.
 
 Acceptance tests:
 
@@ -1283,6 +1356,7 @@ Acceptance tests:
 - Each step includes an action budget and output schema.
 - Final loop has no step that asks the model to echo a full long document.
 - Same weak-model controls apply across at least two non-agent topics, for example market research and policy analysis.
+- Unseeded LLM-mode report requests still go through `_plan_from_epics()` and automatic topology selection.
 
 ### O9. Add Regression Test Using The Bad Artifact
 

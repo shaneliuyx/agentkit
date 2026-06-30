@@ -62,6 +62,7 @@ from studio.panels.router import build_router_event
 from studio.panels.security import run_gate_event
 from studio.panels.selfimprove import SelfImproveTracker
 from studio.panels.verify import build_verify_event
+from studio.model_profiles import resolve_model_profile
 from studio.session import RunSnapshot, Session
 from studio.shared_bridge import TokenAccounting, UsageReport
 from studio.tools import ToolAugmentedClient, web_toolkit_available
@@ -1687,6 +1688,12 @@ class Runner:
         )
         if not enabled:
             return client
+        model_id = str(
+            (self._session.llm_info or {}).get("model")
+            or (self._session.llm_spec or {}).get("model")
+            or ""
+        )
+        model_profile = resolve_model_profile(model_id)
         workspace = Workspace(self._session.session_id, root=self._workspace_root)
         return ToolAugmentedClient(
             client,
@@ -1708,6 +1715,9 @@ class Runner:
             fetch_fn=self._fetch_fn,
             workspace=workspace,
             artifact_path=artifact_path,
+            max_iters=model_profile.max_tool_iters,
+            max_searches=model_profile.max_searches,
+            max_successful_fetches=model_profile.max_successful_fetches,
         )
 
     def _gate_event_for(self, step_id: str, output: str) -> GateEvent:

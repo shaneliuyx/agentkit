@@ -897,6 +897,83 @@ def test_tool_loop_emits_tool_events(fake_client) -> None:
     assert tool_results and tool_results[0].n_results == 1
 
 
+def test_gemma_profile_limits_searches_in_runner_tool_loop(fake_client) -> None:
+    """Gemma's weak-model profile reaches the real runner tool wrapper."""
+    from agentkit.types import ChatResult
+
+    class _TwoSearchClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, tools=None) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(
+                    text="", total_tokens=1, tool_calls=[("web_search", {"query": "one"})]
+                )
+            if self.calls == 2:
+                return ChatResult(
+                    text="", total_tokens=1, tool_calls=[("web_search", {"query": "two"})]
+                )
+            return ChatResult(text="answer.", total_tokens=1)
+
+    def factory(_on_usage) -> LLMClient:
+        return _TwoSearchClient()
+
+    queries: list[str] = []
+
+    def fake_search(query, *, results=5):
+        from web_toolkit import SearchResult
+
+        queries.append(query)
+        return [SearchResult(title="t", url="https://x.test/t", snippet="s")]
+
+    events: list[StudioEvent] = []
+    session = _make_session()
+    session.llm_info = {
+        "label": "gemma",
+        "model": "gemma-4-26B-A4B-it-heretic-4bit",
+    }
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=factory,
+        embedder=None,
+        search_fn=fake_search,
+    )
+    runner.run("write a short note")
+
+    rejected = [
+        e for e in events
+        if e.EVENT_TYPE == "tool_result" and e.tool == "web_search" and e.rejected
+    ]
+    assert queries == ["one"]
+    assert rejected
+    assert "budget exhausted" in rejected[0].notice
+
+
+def test_gemma_report_request_keeps_llm_epic_planning_by_default(fake_client_factory) -> None:
+    """Weak-model budgets must not bypass the original LLM planner by default."""
+    events: list[StudioEvent] = []
+    session = _make_session(mode="llm")
+    session.llm_info = {
+        "label": "gemma",
+        "model": "gemma-4-26B-A4B-it-heretic-4bit",
+    }
+    runner = Runner(session, events.append, client_factory=fake_client_factory, embedder=None)
+    runner.run("Write a generic research report about local and remote skill catalogs.")
+
+    plan_event = [e for e in events if e.EVENT_TYPE == "plan"][0]
+    assert [step["id"] for step in plan_event.steps] != [
+        "intake-profile",
+        "source-plan",
+        "retrieve-verify",
+        "assemble-rewrite",
+        "lint-publish",
+    ]
+    assert plan_event.steps
+
+
 # --------------------------------------------------------------------------- #
 # §14.4 Epoch heartbeat — one Run auto-iterates to max_epochs                  #
 # --------------------------------------------------------------------------- #

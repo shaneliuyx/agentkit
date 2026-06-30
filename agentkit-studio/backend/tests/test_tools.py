@@ -184,6 +184,76 @@ def test_max_iters_caps_runaway_loop() -> None:
     assert inner.calls == 4
 
 
+def test_search_budget_rejects_extra_searches() -> None:
+    class _TwoSearches:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, tools=None) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(text="", total_tokens=1, tool_calls=[("web_search", {"query": "one"})])
+            if self.calls == 2:
+                return ChatResult(text="", total_tokens=1, tool_calls=[("web_search", {"query": "two"})])
+            return ChatResult(text="done", total_tokens=1)
+
+    queries: list[str] = []
+    results: list[tuple[str, str, bool]] = []
+
+    def search(query: str, *, results: int = 5) -> list[SearchResult]:
+        queries.append(query)
+        return _fake_search(query, results=results)
+
+    c = ToolAugmentedClient(
+        _TwoSearches(),
+        search_fn=search,
+        max_searches=1,
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
+            (tool, notice, rejected)
+        ),
+    )
+    res = c.chat([{"role": "user", "content": "q"}])
+
+    assert res.text == "done"
+    assert queries == ["one"]
+    assert ("web_search", "web_search search calls budget exhausted (1). Use the gathered evidence and produce the requested final answer.", True) in results
+
+
+def test_successful_fetch_budget_rejects_after_success() -> None:
+    class _TwoFetches:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, tools=None) -> ChatResult:
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResult(text="", total_tokens=1, tool_calls=[("web_fetch", {"url": "https://x.test/one"})])
+            if self.calls == 2:
+                return ChatResult(text="", total_tokens=1, tool_calls=[("web_fetch", {"url": "https://x.test/two"})])
+            return ChatResult(text="done", total_tokens=1)
+
+    fetched: list[str] = []
+    results: list[tuple[str, str, bool]] = []
+
+    def fetch(url: str, *, selector: str | None = None) -> FetchResult:
+        fetched.append(url)
+        return FetchResult(url=url, ok=True, content="page content", bytes=12)
+
+    c = ToolAugmentedClient(
+        _TwoFetches(),
+        fetch_fn=fetch,
+        max_successful_fetches=1,
+        on_tool_result=lambda sid, tool, summary, n, notice, rejected: results.append(
+            (tool, notice, rejected)
+        ),
+    )
+    res = c.chat([{"role": "user", "content": "q"}])
+
+    assert res.text == "done"
+    assert fetched == ["https://x.test/one"]
+    assert ("web_fetch", "web_fetch successful fetches budget exhausted (1). Use the gathered evidence and produce the requested final answer.", True) in results
+
+
 def test_iteration_exhaustion_forces_synthesis_despite_preamble() -> None:
     """Root-cause fix: a model that emits PREAMBLE text ("I'll fetch now…") alongside
     a tool call every turn exhausts the iteration cap while still in tool_use. The old

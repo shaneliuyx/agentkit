@@ -411,6 +411,8 @@ class ToolAugmentedClient:
         workspace: Workspace | None = None,
         artifact_path: Path | None = None,
         max_iters: int = _MAX_TOOL_ITERS,
+        max_searches: int | None = None,
+        max_successful_fetches: int | None = None,
         context_compact: bool = True,
     ) -> None:
         self._inner = inner
@@ -422,6 +424,8 @@ class ToolAugmentedClient:
         self._workspace = workspace
         self._artifact_path = artifact_path
         self._max_iters = max_iters
+        self._max_searches = max_searches
+        self._max_successful_fetches = max_successful_fetches
         self._context_compact = context_compact
         #: Per-instance registry — blocks concurrent threads from fetching the
         #: same URL simultaneously (dog-pile prevention within one run).
@@ -459,6 +463,7 @@ class ToolAugmentedClient:
         total_tokens = 0
         last: ChatResult | None = None
         call_seq = 0  # globally-unique, valid-char tool_call ids across the chat
+        budget_state = {"web_search": 0, "web_fetch_success": 0}
         # True only when the model STOPPED calling tools on its own (Anthropic's
         # end_turn) — i.e. it produced a real final answer. False means the loop ran
         # out of iterations while the model was still in tool_use, so `last.text` is
@@ -520,7 +525,7 @@ class ToolAugmentedClient:
                         "function": {"name": name, "arguments": json.dumps(args)},
                     }
                 )
-                msg = self._dispatch(name, args)
+                msg = self._dispatch(name, args, budget_state=budget_state)
                 msg["tool_call_id"] = cid
                 msg.pop("name", None)  # OpenAI tool msg keys on tool_call_id, not name
                 tool_messages.append(msg)
@@ -605,15 +610,36 @@ class ToolAugmentedClient:
 
     # -- dispatch ----------------------------------------------------------
 
-    def _dispatch(self, name: str, args: dict[str, Any]) -> Message:
+    def _dispatch(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        budget_state: dict[str, int] | None = None,
+    ) -> Message:
         """Route a tool call to its executor; emit events; return the tool msg."""
         step_id = self._step_id_getter()
         if self._on_tool_call:
             self._on_tool_call(step_id, name, dict(args))
+        if name == "web_search" and budget_state is not None:
+            if self._max_searches is not None and budget_state["web_search"] >= self._max_searches:
+                return self._budget_rejection(step_id, name, self._max_searches, "search calls")
+            budget_state["web_search"] += 1
+        if name == "web_fetch" and budget_state is not None:
+            if (
+                self._max_successful_fetches is not None
+                and budget_state["web_fetch_success"] >= self._max_successful_fetches
+            ):
+                return self._budget_rejection(
+                    step_id, name, self._max_successful_fetches, "successful fetches"
+                )
         if name == "web_search":
             return self._run_search(step_id, args)
         if name == "web_fetch":
-            return self._run_fetch(step_id, args)
+            msg = self._run_fetch(step_id, args)
+            if budget_state is not None and self._tool_message_success(msg):
+                budget_state["web_fetch_success"] += 1
+            return msg
         if name == "read_file":
             return self._run_read(step_id, args)
         if name == "write_file":
@@ -624,6 +650,22 @@ class ToolAugmentedClient:
             return self._run_patch_artifact(step_id, args)
         # Unknown tool: report it back so the model can recover.
         return self._tool_message(name, {"error": f"unknown tool {name!r}"})
+
+    def _budget_rejection(self, step_id: str, name: str, limit: int, label: str) -> Message:
+        notice = (
+            f"{name} {label} budget exhausted ({limit}). "
+            "Use the gathered evidence and produce the requested final answer."
+        )
+        self._emit_result(step_id, name, notice, 0, notice, rejected=True)
+        return self._tool_message(name, {"error": notice, "budget_exhausted": True})
+
+    @staticmethod
+    def _tool_message_success(msg: Message) -> bool:
+        try:
+            payload = json.loads(str(msg.get("content") or "{}"))
+        except Exception:  # noqa: BLE001 - malformed tool messages are not successes
+            return False
+        return "error" not in payload
 
     def _emit_result(
         self,

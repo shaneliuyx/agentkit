@@ -6,6 +6,8 @@ fence into a named weakness so the reducer repairs it.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from studio.artifact_lint import lint_artifact
 
 
@@ -48,3 +50,43 @@ def test_flags_unbalanced_code_fence() -> None:
 def test_clean_document_has_no_issues() -> None:
     assert lint_artifact("# Title\n\n## A\nbody\n\n## B\nmore\n") == []
     assert lint_artifact("") == []
+
+
+def test_bad_report_fixture_flags_known_quality_failures() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "bad_report_duplicate_sections.md"
+    issues = lint_artifact(fixture.read_text(encoding="utf-8"))
+    joined = "\n".join(issues)
+
+    assert "Duplicate section heading" in joined
+    assert "Placeholder text remains" in joined
+    assert "unverified" in joined.lower()
+    assert "Citation wall" in joined
+    assert "Code fragment appears outside" in joined
+    assert "Long evidence-bearing section has no citation URL" in joined
+
+
+def test_profile_appropriate_clean_report_has_no_new_quality_issues() -> None:
+    text = """# Market Report
+
+## Executive Summary
+
+The market is expanding according to a primary filing
+([Example](https://example.com/filing)).
+
+## Evidence and Analysis
+
+The reported growth signal is supported by the filing
+([Example](https://example.com/filing)) and an independent survey
+([Survey](https://example.com/survey)).
+
+## Limitations and Uncertainty
+
+The sample is narrow, so the estimate should be treated as directional
+([Survey](https://example.com/survey)).
+
+## References
+
+- https://example.com/filing
+- https://example.com/survey
+"""
+    assert lint_artifact(text) == []

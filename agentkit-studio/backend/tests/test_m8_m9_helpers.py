@@ -334,6 +334,16 @@ def test_build_planner_cot_prompt_none_weaknesses_safe() -> None:
     assert "EPIC_PLAN:" in prompt
 
 
+def test_build_planner_cot_prompt_guides_report_plan_depth() -> None:
+    prompt = _build_planner_cot_prompt("write a research report", "path", "", "")
+
+    assert "requested report size" in prompt
+    assert "Compact report" in prompt
+    assert "Standard report" in prompt
+    assert "Large, high-impact" in prompt
+    assert "planning heuristics, not hardcoded stages" in prompt
+
+
 # ---------------------------------------------------------------------------
 # _build_hub_cot_prompt
 # ---------------------------------------------------------------------------

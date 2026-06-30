@@ -1,0 +1,64 @@
+from studio.report_profiles import (
+    build_methodology_report_plan,
+    build_methodology_report_prompt,
+    is_report_request,
+    resolve_report_profile,
+)
+
+
+def test_general_profile_is_generic_and_omits_code_by_default() -> None:
+    profile = resolve_report_profile(None)
+
+    assert profile.report_type == "general"
+    assert "Evidence and Analysis" in profile.sections
+    assert not any("Code" in section for section in profile.sections)
+    assert profile.code_default is False
+
+
+def test_technical_profile_allows_code_and_diagrams() -> None:
+    profile = resolve_report_profile("technical")
+
+    assert profile.code_default is True
+    assert profile.diagrams_default is True
+    assert any("Code" in section for section in profile.sections)
+
+
+def test_market_profile_does_not_inherit_technical_sections() -> None:
+    profile = resolve_report_profile("market")
+
+    assert "Competitive Landscape" in profile.sections
+    assert not any("Code" in section for section in profile.sections)
+    assert not any("Architecture" in section for section in profile.sections)
+
+
+def test_methodology_report_prompt_is_evidence_first() -> None:
+    prompt = build_methodology_report_prompt(
+        "Write a generic research report about agent loop skill catalogs."
+    )
+
+    assert "Use the upstream ResearchConfig" in prompt
+    assert "Executive Summary" in prompt
+    assert "References" in prompt
+    assert "Do not include EPIC_PLAN" in prompt
+    assert "Do not include code blocks" in prompt
+
+
+def test_methodology_report_plan_follows_reference_stages() -> None:
+    plan = build_methodology_report_plan(
+        "Write a generic research report about remote catalog management."
+    )
+
+    assert is_report_request(plan.task)
+    assert [step.id for step in plan.steps] == [
+        "intake-profile",
+        "source-plan",
+        "retrieve-verify",
+        "assemble-rewrite",
+        "lint-publish",
+    ]
+    assert all(step.topology == "single" for step in plan.steps)
+    assert "ResearchConfig" in plan.steps[0].description
+    assert "section-to-query plan" in plan.steps[1].description
+    assert "Evidence Matrix" in plan.steps[2].description
+    assert "Deterministic Section Assembly" in plan.steps[3].description
+    assert "Publish Gate" in plan.steps[4].description
