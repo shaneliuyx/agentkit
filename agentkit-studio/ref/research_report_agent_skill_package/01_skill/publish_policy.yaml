@@ -1,0 +1,63 @@
+publish_policy:
+  publish_ready:
+    minimum_score: 90
+    hard_fails_allowed: 0
+  allow_minor_revision:
+    minimum_score: 80
+    hard_fails_allowed: 0
+  require_major_revision:
+    minimum_score: 70
+  require_research_restart:
+    below_score: 70
+
+profile_policy:
+  default_report_type: general
+  supported_report_types:
+    - general
+    - technical
+    - market
+    - policy
+    - academic
+    - literature_review
+    - competitive
+    - product
+  code_required_by_default: false
+  diagrams_required_by_default: false
+  allow_user_section_override: true
+
+mandatory_artifacts:
+  - final_report
+  - evidence_matrix
+  - source_notes
+  - weighted_scorecard
+  - publish_gate_result
+  - run_manifest
+
+profile_optional_artifacts:
+  technical:
+    - code_or_pseudocode
+    - diagrams
+    - evaluation_notes
+  market:
+    - comparison_table
+    - market_signal_table
+  policy:
+    - stakeholder_matrix
+    - option_tradeoff_table
+  literature_review:
+    - search_method
+    - bibliography
+
+hard_fail_rules:
+  - missing_citations_for_major_claims
+  - unverified_claim_used_as_key_finding
+  - source_misrepresentation
+  - placeholder_references_remaining
+  - malformed_or_unverified_links_remaining
+  - duplicate_outline_remaining
+  - unbalanced_code_fence
+  - code_claimed_runnable_but_not_tested
+  - no_limitations_or_uncertainty
+  - no_clear_answer_to_user_request
+  - unsafe_tool_or_data_handling
+  - excessive_copied_text

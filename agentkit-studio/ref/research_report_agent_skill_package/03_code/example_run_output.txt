@@ -1,0 +1,14 @@
+$ python3 score_report.py
+ScoreResult(total_score=86.9, decision='MINOR_REVISION_REQUIRED', hard_fails=[], category_scores={'scope_and_framing': 8.0, 'toc_completeness': 6.3, 'source_quality': 10.2, 'citation_integrity': 10.8, 'evidence_synthesis': 9.600000000000001, 'analytical_depth': 8.5, 'practical_usefulness': 9.0, 'code_quality': 6.4, 'diagrams_and_tables': 5.4, 'readability': 5.699999999999999, 'reflection_limitations': 4.0, 'governance_safety': 3.0})
+
+$ python3 research_report_agent.py
+
+--- Iteration 1 ---
+Report is publish-ready.
+
+Final scorecard:
+{
+  "score": 100,
+  "hard_fails": [],
+  "decision": "publish_ready"
+}

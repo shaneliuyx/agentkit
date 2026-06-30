@@ -1,0 +1,54 @@
+[
+  {
+    "step": 1,
+    "phase": "intake",
+    "status": "ok",
+    "message": "ResearchConfig resolved",
+    "data": {
+      "topic": "<topic>",
+      "report_type": "general",
+      "audience": "<audience>",
+      "purpose": "<purpose>",
+      "source_policy": {
+        "min_sources": 3,
+        "prefer_primary_sources": true
+      },
+      "output_policy": {
+        "code": "optional",
+        "diagrams": "optional",
+        "tables": "recommended"
+      }
+    }
+  },
+  {
+    "step": 2,
+    "phase": "evidence",
+    "status": "ok",
+    "message": "Evidence matrix built",
+    "data": {
+      "evidence_count": 0,
+      "verified_count": 0,
+      "weak_or_unverified_count": 0
+    }
+  },
+  {
+    "step": 3,
+    "phase": "assembly",
+    "status": "ok",
+    "message": "Report assembled from selected profile and evidence",
+    "data": {
+      "template": "generic",
+      "sections": []
+    }
+  },
+  {
+    "step": 4,
+    "phase": "publish_gate",
+    "status": "pending",
+    "message": "Publish gate not yet evaluated",
+    "data": {
+      "publish_ready": false,
+      "hard_fails": []
+    }
+  }
+]

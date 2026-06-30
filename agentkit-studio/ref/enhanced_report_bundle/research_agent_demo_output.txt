@@ -1,0 +1,5 @@
+Step 1: load_notes -> ok
+Step 2: draft_summary -> ok
+Step 3: validate_summary -> ok
+Step 4: write_report -> ok
+Done. Created demo_report.md and checkpoint.json

@@ -1,0 +1,23 @@
+flowchart LR
+    U[User Request] --> IG[Input Guardrail]
+    IG --> P[Planner / Pi Reasoning Layer]
+    P --> QP[Research Query Planner]
+    QP --> C[Craft Orchestrator]
+
+    C --> WS[Web Search]
+    C --> DR[Document Reader]
+    C --> CR[Code Runner]
+    C --> DG[Diagram Generator]
+    C --> FW[File Writer]
+
+    WS --> EV[Evidence Validator]
+    DR --> EV
+    CR --> EV
+    DG --> EV
+
+    EV --> MEM[(Checkpoint + Evidence Store)]
+    MEM --> SYN[Synthesis Writer]
+    SYN --> OE[Output Evaluator]
+    OE -->|Revise| P
+    OE -->|Pass| OG[Output Guardrail]
+    OG --> PKG[Final Report Package]

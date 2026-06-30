@@ -1,0 +1,33 @@
+[
+  {
+    "id": "S1",
+    "title": "Primary source example",
+    "url": "https://example.com/primary-source",
+    "source_type": "official",
+    "publication_date": "unknown",
+    "reliability": 5,
+    "relevance": 5,
+    "status": "verified",
+    "used_in": [
+      "Key Findings",
+      "Evidence and Analysis"
+    ],
+    "summary": "Example shape for a high-authority source note.",
+    "caveats": ""
+  },
+  {
+    "id": "S2",
+    "title": "Independent corroborating source example",
+    "url": "https://example.com/corroborating-source",
+    "source_type": "industry_or_academic",
+    "publication_date": "unknown",
+    "reliability": 4,
+    "relevance": 4,
+    "status": "partially_supported",
+    "used_in": [
+      "Evidence and Analysis"
+    ],
+    "summary": "Example shape for corroborating evidence with caveats.",
+    "caveats": "Confirm date, methodology, and independence before using as a key finding."
+  }
+]

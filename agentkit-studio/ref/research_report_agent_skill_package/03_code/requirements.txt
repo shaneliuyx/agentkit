@@ -1,0 +1,5 @@
+# This package intentionally uses only the Python standard library.
+# Optional tools for your own environment:
+# pydantic>=2
+# pytest>=8
+# rich>=13

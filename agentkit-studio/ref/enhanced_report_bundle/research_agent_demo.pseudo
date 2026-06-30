@@ -1,0 +1,18 @@
+ALGORITHM EnhanceResearchAgentReport
+  INPUT report_goal, source_notes
+  INITIALIZE planner, orchestrator, validator, memory
+
+  plan <- planner.decompose(report_goal)
+
+  FOR each task IN plan DO
+      observation <- orchestrator.execute(task)
+      memory.append(observation)
+
+      IF validator.rejects(observation) THEN
+          plan <- planner.revise(plan, memory)
+      END IF
+  END FOR
+
+  final_report <- planner.synthesize(memory)
+  publish(final_report)
+END ALGORITHM

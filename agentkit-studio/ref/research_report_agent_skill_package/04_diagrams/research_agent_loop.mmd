@@ -1,0 +1,16 @@
+flowchart TD
+    A[User Request] --> B[Intake & Scope Clarification]
+    B --> C[Report Plan + Initial ToC]
+    C --> D[Research Query Plan]
+    D --> E[Retrieve Sources]
+    E --> F[Source Quality Filter]
+    F --> G{Enough Evidence?}
+    G -- No --> D
+    G -- Yes --> H[Evidence Matrix]
+    H --> I[Draft Report]
+    I --> J[Generate Diagrams, Tables, Examples]
+    J --> K[Quality Scoring]
+    K --> L{Score >= 90 and No Hard Fail?}
+    L -- No --> M[Evaluator Feedback + Revision Plan]
+    M --> I
+    L -- Yes --> N[Final Report Package]

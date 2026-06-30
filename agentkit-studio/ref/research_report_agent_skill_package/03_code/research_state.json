@@ -1,0 +1,53 @@
+{
+  "topic": "Agent system design for research report generation",
+  "audience": "cloud architects and AI solution builders",
+  "purpose": "guide implementation of a reliable research-report agent",
+  "toc": [
+    "Executive Summary",
+    "Background and Context",
+    "Research Questions",
+    "Methodology",
+    "Current State",
+    "Deep Analysis",
+    "Practical Implementation",
+    "Quality and Governance",
+    "Reflection and Limitations",
+    "Recommendations",
+    "Conclusion",
+    "References"
+  ],
+  "research_questions": [
+    "What is the current state of Agent system design for research report generation?",
+    "Why does Agent system design for research report generation matter to cloud architects and AI solution builders?",
+    "What evidence supports the main claims about Agent system design for research report generation?",
+    "What are the practical implementation steps for Agent system design for research report generation?",
+    "What risks, limitations, and open questions remain?"
+  ],
+  "scorecard": {
+    "score": 100,
+    "hard_fails": [],
+    "decision": "publish_ready"
+  },
+  "sources": [
+    {
+      "title": "Foundational paper or official documentation",
+      "source_type": "primary",
+      "claim": "Agent system design for research report generation requires structured planning, evidence collection, and evaluation.",
+      "url": "https://example.com/source-1",
+      "date": "2026",
+      "reliability": 5,
+      "relevance": 5,
+      "status": "verified"
+    },
+    {
+      "title": "Implementation guide",
+      "source_type": "technical documentation",
+      "claim": "Practical Agent system design for research report generation systems need checkpoints, guardrails, and traceability.",
+      "url": "https://example.com/source-2",
+      "date": "2026",
+      "reliability": 4,
+      "relevance": 5,
+      "status": "verified"
+    }
+  ]
+}
