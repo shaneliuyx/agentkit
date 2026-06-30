@@ -8,6 +8,8 @@ This plan compares the current `agentkit-studio` codebase with the curated local
 
 Product target: a generic research report generator. The system must work for technical, market, policy, academic, product, competitive, literature-review, and general explanatory reports. Agent-framework/Pi/Craft examples are validation fixtures and optional presets, not the default domain. Topic-specific behavior should come from intake, report profile, template preset, evidence policy, and user constraints, not hardcoded prompts or code paths.
 
+Standing guardrail: production changes must remain domain-neutral. Do not add fixed prose, fixed conclusions, topic-specific recovery drafts, model-id branches such as "weak model report mode," or one-off templates for a single example. Any reusable improvement should be expressed as generic report-state, evidence, template/catalog, prompt, validation, or UI behavior; domain examples belong in tests, fixtures, references, or reviewed catalog entries.
+
 ## Evidence Base
 
 Current Studio capabilities:
@@ -1376,6 +1378,66 @@ Rationale:
 
 - The current system had many individual guards but still shipped this artifact. A regression fixture makes the real failure non-negotiable.
 
+### O10. Audit Report-Generator Code For Genericity Before Landing Changes
+
+Goal: make the standing generic-report rule enforceable. Each report-generator
+implementation slice should prove that production behavior remains
+domain-neutral before it is committed or promoted.
+
+Implementation:
+
+1. Add a genericity audit checklist to every report-generator slice.
+   - Check changed production files under `backend/studio`, `frontend/src`, and
+     any reused shared helpers.
+   - Look for fixed report prose, fixed conclusions, topic-specific recovery
+     drafts, one-off template sections, model-id branches that change report
+     semantics, and hardcoded example-domain assumptions.
+   - Allowed locations for topic-specific examples: `tests/`, fixtures, `ref/`,
+     user input, and reviewed catalog/template data.
+
+2. Add a small scanner or pytest helper.
+   - Start with changed production files only to avoid noisy historical debt.
+   - Flag suspicious string literals that look like complete report paragraphs,
+     fixed example answers, or domain-specific fallback drafts.
+   - Report file/line and phrase; do not auto-fix.
+   - Maintain a short allowlist for generic product terms such as `template`,
+     `citation`, `source`, `evidence`, `section`, `loop`, `skill`, and
+     `catalog`.
+
+3. Apply the audit to shared-library reuse.
+   - If `/Users/yuxinliu/code/agentkit` or
+     `/Users/yuxinliu/code/agent-prep/shared` code is reused or modified for
+     this project, audit those helper changes too.
+   - Shared helpers should expose generic primitives, policies, and adapters,
+     not Studio's current example topics or validation fixtures.
+
+4. Record the audit result in the worklog for each slice.
+   - `pass`: no production genericity issues found.
+   - `warn`: domain term remains with rationale because it is a generic product
+     term or catalog/template data.
+   - `fail`: required code or prompt change before the slice can land.
+
+Tradeoff: manual checklist vs automated scanner.
+
+- Manual review catches semantic lock-in and avoids false positives, but it is
+  easy to skip during fast iterations.
+- A scanner is incomplete and may need allowlists, but it catches obvious
+  hardcoded fallback prose and makes the rule visible in local/CI checks.
+
+Recommended: use both. Start with this checklist plus a conservative scanner
+over changed production strings, then tighten the scanner as concrete failures
+are discovered.
+
+Acceptance tests:
+
+- Scanner flags a production string that contains a fixed example report answer
+  or topic-specific recovery draft.
+- Scanner ignores the same text in `tests/`, fixtures, and `ref/`.
+- Scanner does not flag generic report-generator terms such as template,
+  citation, source, evidence, section, loop, skill, and catalog by default.
+- Every report-generator slice records whether the genericity audit passed,
+  warned with rationale, or found required changes.
+
 ## Enhanced Report Coverage Checklist
 
 The enhanced report's suggestions are addressed as follows:
@@ -1395,6 +1457,7 @@ The enhanced report's suggestions are addressed as follows:
 - Human approval/review for high-impact actions: Workstreams F, B, K.
 - Weak local model reliability, moving-window execution, action caps, and schema-first outputs: Workstream O.
 - Regression prevention for the known bad generated report: Workstream O.
+- Genericity audit for report-generator production code: Workstream O10.
 
 ## Feasibility And Shared-Library Reuse Audit
 

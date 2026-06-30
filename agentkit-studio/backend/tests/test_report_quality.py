@@ -1,4 +1,4 @@
-from studio.report_quality import evaluate_publish_readiness
+from studio.report_quality import build_publish_revision_prompt, evaluate_publish_readiness
 
 
 def test_non_report_request_passes_publish_gate() -> None:
@@ -58,3 +58,21 @@ preserving governance and rollback paths.
     )
 
     assert result.publish_ready is True
+
+
+def test_publish_revision_prompt_is_generic_and_evidence_bounded() -> None:
+    prompt = build_publish_revision_prompt(
+        "Write a research report about battery recycling policy. Use fetched evidence.",
+        "Short draft.",
+        ["[publish-gate] Final output is too short."],
+        "Evidence excerpt with https://example.com/battery-policy " + ("x" * 20_000),
+        max_chars=200,
+    )
+
+    assert "battery recycling policy" in prompt
+    assert "[publish-gate] Final output is too short." in prompt
+    assert "https://example.com/battery-policy" in prompt
+    assert "Do not invent source URLs" in prompt
+    assert "[truncated]" in prompt
+    assert "Catalog management for agent loops" not in prompt
+    assert "local catalogs are best suited" not in prompt

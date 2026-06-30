@@ -67,6 +67,8 @@ _EVIDENCE_MARKERS = (
     "evidence",
 )
 
+_REVISION_PROMPT_MAX_CHARS = 12_000
+
 
 @dataclass(frozen=True)
 class PublishGateResult:
@@ -153,3 +155,47 @@ def evaluate_publish_readiness(
         issues.append(f"[publish-gate] Final output misses important request terms: {shown}{suffix}.")
 
     return PublishGateResult(not issues, tuple(issues))
+
+
+def _clip_block(text: str, max_chars: int = _REVISION_PROMPT_MAX_CHARS) -> str:
+    body = (text or "").strip()
+    if len(body) <= max_chars:
+        return body
+    return body[:max_chars].rstrip() + "\n\n[truncated]"
+
+
+def build_publish_revision_prompt(
+    requirement: str,
+    draft: str,
+    issues: tuple[str, ...] | list[str],
+    evidence: str,
+    *,
+    max_chars: int = _REVISION_PROMPT_MAX_CHARS,
+) -> str:
+    """Build a domain-neutral prompt for a publish-gate revision pass.
+
+    The prompt does not provide topic content. It only supplies the user's
+    request, the failed draft, gate issues, and evidence excerpts already
+    available to the run.
+    """
+    issue_text = "\n".join(f"- {issue}" for issue in issues) or "- No explicit issue text."
+    evidence_text = _clip_block(evidence, max_chars)
+    draft_text = _clip_block(draft, max_chars)
+    req_text = _clip_block(requirement, max_chars // 2)
+
+    return (
+        "You are revising a generic research report after a publish-readiness gate failed.\n"
+        "Use only the user's request, the existing draft, and the evidence excerpts below.\n"
+        "Do not invent source URLs, citations, quotes, data, or named sources. Cite only URLs "
+        "that appear verbatim in the evidence excerpts. If the evidence is insufficient, say "
+        "what remains unverified in a Limitations or Open Questions section.\n"
+        "Keep the report domain-neutral: adapt to the user's topic instead of applying any "
+        "fixed template, fixed conclusion, or example-specific prose.\n\n"
+        "Required output: publishable Markdown with clear sections, source-backed claims, "
+        "limitations, and concrete next steps when the request asks for them.\n\n"
+        f"USER REQUEST:\n{req_text}\n\n"
+        f"PUBLISH-GATE ISSUES:\n{issue_text}\n\n"
+        f"FAILED DRAFT:\n{draft_text}\n\n"
+        f"EVIDENCE EXCERPTS:\n{evidence_text}\n\n"
+        "Return only the revised Markdown report."
+    )

@@ -181,12 +181,23 @@ Objective: implement the research report generator improvement plan and validate
      - final output misses important request terms including catalog, management, loop, skill, local, remote, operational, risk.
    - This proves the system now detects the bad report rather than silently presenting it as publish-ready. Next improvement should use this gate to trigger revision/evidence-matrix assembly, not just report failure.
 47. Stopped foreground uvicorn backend after E2E.
+48. Started implementing a cache-based recovery draft, then user correctly rejected it because it hardcoded catalog-management prose into production code and the system must serve generic cases.
+49. Removed the hardcoded recovery builder and its runner call/test from the worktree before committing. Current production behavior remains generic:
+   - detect publish-readiness failures deterministically;
+   - do not synthesize domain-specific replacement content;
+   - future recovery must use generic LLM/evidence-matrix revision prompts based on the user's request and fetched evidence.
+50. Persisted the user correction as a standing local guardrail in `AGENTS.md` and the plan: the report generator is generic; production code must not hardcode topic-specific prose, conclusions, model-specific report branches, or one-off templates. Domain examples belong only in tests, fixtures, references, user input, or reviewed catalog/template data.
+51. Added Workstream O10 to the plan: every report-generator slice must include a genericity audit over changed production code and any reused shared helpers. The planned scanner/checklist must flag fixed report prose, topic-specific recovery drafts, fixed conclusions, one-off template sections, and model-id semantic branches while ignoring tests, fixtures, `ref/`, and reviewed catalog/template data.
+52. Genericity audit for this slice: pass with one allowed fixture. Production code contains no hardcoded catalog-management fallback prose after removal. The remaining catalog-management paragraph is only in `backend/tests/test_report_quality.py` as a unit-test fixture.
+53. Re-ran focused tests after adding the generic revision prompt helper and O10 plan task:
+   - command: `pytest tests/test_report_quality.py tests/test_tools.py tests/test_artifact_lint.py tests/test_model_profiles.py tests/test_report_profiles.py tests/test_m8_m9_helpers.py::test_build_planner_cot_prompt_guides_report_plan_depth tests/test_runner.py::test_gemma_profile_limits_searches_in_runner_tool_loop tests/test_runner.py::test_gemma_report_request_keeps_llm_epic_planning_by_default tests/test_runner.py::test_publish_gate_emits_failure_for_report_without_sources -q`
+   - result: 47 passed.
 
 ## Current Next Steps
 
-1. Stage only scoped changes for commit; runner/test_runner had pre-existing unrelated modifications, so partial staging is required.
-2. Commit the publish-gate slice.
-3. Next implementation: feed publish-gate failure into an explicit revision/evidence-matrix pass or loop retry.
+1. Stage and commit the guardrail/generic-prompt/checklist slice.
+2. Next implementation: generic evidence-matrix revision loop, with no domain hardcoding.
+3. Add the O10 scanner/checklist test before the next production report-generator slice lands.
 
 ## Notes For Resume
 
@@ -196,3 +207,4 @@ Objective: implement the research report generator improvement plan and validate
 - The current slice keeps LLM planning as default. Methodology stages from `ref/.../agent_loop.md` are retained as seedable/catalog scaffolding, not automatic routing.
 - Static generic/profile templates are code defaults. Learned/approved reusable skeletons belong in `TemplateStore`/DB after audit metadata and replacement/quarantine logic exists.
 - The latest E2E (`s_fa0fecbb18a6`) proves compatibility with the original planner/topology path, but not report-quality success.
+- Standing guardrail: AgentKit Studio's report generator is generic. Never add domain-specific production prose, fixed conclusions, model-id report branches, or example-specific templates; implement reusable evidence, prompt, catalog/template, validation, and UI mechanisms instead.
