@@ -1524,12 +1524,63 @@ class Runner:
             # It does not replace LLM planning; it only surfaces a final readiness verdict and
             # feeds failures into the existing weakness/adjusted-score path.
             try:
-                from studio.report_quality import evaluate_publish_readiness
+                from studio.report_quality import (
+                    build_publish_revision_prompt,
+                    evaluate_publish_readiness,
+                )
                 _publish = evaluate_publish_readiness(
                     _original_requirement,
                     _scored_text or result_output or "",
                     verified_urls=_verified_urls or None,
                 )
+                if use_llm and _publish.issues:
+                    _evidence_text = "\n\n".join(
+                        f"[{_sid}]\n{_out}"
+                        for _sid, _out in outputs.items()
+                        if isinstance(_out, str) and "http" in _out
+                    )
+                    if _evidence_text:
+                        _rev_prompt = build_publish_revision_prompt(
+                            _original_requirement,
+                            _scored_text or result_output or "",
+                            _publish.issues,
+                            _evidence_text,
+                        )
+                        _rev = base_client.chat([{"role": "user", "content": _rev_prompt}])
+                        _rev_text = _strip_preamble(getattr(_rev, "text", "") or "").strip()
+                        if _rev_text:
+                            _rev_verified = _verified_urls
+                            try:
+                                import json as _json3
+                                import os as _os3
+                                from studio.task_runs import verified_urls_in_cache as _vuc3
+                                if _os3.path.exists(".web_cache.json"):
+                                    with open(".web_cache.json") as _cf3:
+                                        _rev_verified = _vuc3(_json3.load(_cf3), _rev_text)
+                            except Exception:  # noqa: BLE001
+                                pass
+                            _rev_publish = evaluate_publish_readiness(
+                                _original_requirement,
+                                _rev_text,
+                                verified_urls=_rev_verified or None,
+                            )
+                            _rg = GateEvent(
+                                name="publish-revision",
+                                outcome=_rev_publish.outcome,
+                                detail=_rev_publish.detail,
+                                sandboxed=True,
+                            )
+                            self._emit(_rg)
+                            if _rev_publish.publish_ready:
+                                _scored_text = _rev_text
+                                result_output = _rev_text
+                                _verified_urls = _rev_verified
+                                _publish = _rev_publish
+                                try:
+                                    if _art_file.exists():
+                                        _art_file.write_text(_scored_text)
+                                except Exception:  # noqa: BLE001
+                                    pass
                 _pg = GateEvent(
                     name="publish-ready",
                     outcome=_publish.outcome,

@@ -199,6 +199,18 @@ Objective: implement the research report generator improvement plan and validate
 56. Re-ran focused tests after the correction:
    - command: `pytest tests/test_genericity_audit.py tests/test_report_quality.py tests/test_tools.py tests/test_artifact_lint.py tests/test_model_profiles.py tests/test_report_profiles.py tests/test_m8_m9_helpers.py::test_build_planner_cot_prompt_guides_report_plan_depth tests/test_runner.py::test_gemma_profile_limits_searches_in_runner_tool_loop tests/test_runner.py::test_gemma_report_request_keeps_llm_epic_planning_by_default tests/test_runner.py::test_publish_gate_emits_failure_for_report_without_sources -q`
    - result: 50 passed.
+57. Wired a generic publish-revision attempt into `Runner._postrun_score_and_record()`:
+   - only runs in LLM mode after a publish-readiness failure;
+   - only runs when prior phase outputs contain URLs/evidence context;
+   - uses `build_publish_revision_prompt()` with the user's request, failed draft, gate issues, and evidence excerpts;
+   - accepts the revised report only if it passes `evaluate_publish_readiness()` after URL-cache verification;
+   - emits `publish-revision` before the final `publish-ready` event.
+58. Genericity audit caught hardcoded example phrases inside the first scanner implementation itself. Removed that phrase list and kept the scanner generic/report-shape based.
+59. Re-ran genericity audit and focused tests:
+   - command: `python -c "from studio.genericity_audit import audit_genericity; issues=audit_genericity(['studio/runner.py','studio/report_quality.py','studio/genericity_audit.py']); print('\\n'.join(i.format() for i in issues) or 'no genericity issues')"`
+   - result: no genericity issues.
+   - command: `pytest tests/test_genericity_audit.py tests/test_report_quality.py tests/test_tools.py tests/test_artifact_lint.py tests/test_model_profiles.py tests/test_report_profiles.py tests/test_m8_m9_helpers.py::test_build_planner_cot_prompt_guides_report_plan_depth tests/test_runner.py::test_gemma_profile_limits_searches_in_runner_tool_loop tests/test_runner.py::test_gemma_report_request_keeps_llm_epic_planning_by_default tests/test_runner.py::test_publish_gate_emits_failure_for_report_without_sources -q`
+   - result: 50 passed.
 
 ## Current Next Steps
 

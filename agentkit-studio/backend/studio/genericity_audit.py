@@ -24,13 +24,6 @@ _GENERIC_TERMS = {
     "template",
     "url",
 }
-_KNOWN_EXAMPLE_PHRASES = (
-    "catalog management for agent loops",
-    "local catalogs are best suited",
-    "remote catalogs are useful",
-    "workflow-vs-agent auditability",
-)
-
 
 @dataclass(frozen=True)
 class GenericityIssue:
@@ -66,18 +59,7 @@ def _looks_like_fixed_report(text: str) -> bool:
 
 
 def _literal_issues(path: Path, text: str, line: int) -> list[GenericityIssue]:
-    low = text.lower()
     issues: list[GenericityIssue] = []
-    for phrase in _KNOWN_EXAMPLE_PHRASES:
-        if phrase in low:
-            issues.append(
-                GenericityIssue(
-                    str(path),
-                    line,
-                    phrase,
-                    "topic-specific example prose in production string",
-                )
-            )
     if _looks_like_fixed_report(text):
         snippet = " ".join(text.strip().split())[:100]
         issues.append(
