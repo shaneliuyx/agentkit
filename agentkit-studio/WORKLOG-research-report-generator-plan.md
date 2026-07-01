@@ -605,6 +605,14 @@ Objective: implement the research report generator improvement plan and validate
      - `pytest backend/tests/test_report_profiles.py backend/tests/test_rubric_profile_api.py -q` → 9 passed.
      - `python -m py_compile backend/studio/report_profiles.py backend/studio/app.py backend/tests/test_rubric_profile_api.py` → passed.
      - `npm run build` in `frontend/` → passed.
+112. Added and committed structured-control completion caps:
+   - Commit message: `Cap structured LLM control outputs`.
+   - Added `MaxTokensClient`, a minimal wrapper that passes `max_tokens` when the underlying client supports it and falls back for plain clients.
+   - Updated the Gemma profile to use its real 100K context setting while capping planner and topology-selector completions to 1024 and 512 tokens.
+   - This fixes the clean-checkout dependency from the runner's already-committed `MaxTokensClient` usage.
+   - Validation:
+     - `pytest backend/tests/test_client_max_tokens.py backend/tests/test_model_profiles.py backend/tests/test_runner.py::test_gemma_planning_and_topology_selection_are_capped -q` → 5 passed.
+     - `python -m py_compile backend/studio/client.py backend/studio/model_profiles.py backend/tests/test_client_max_tokens.py backend/tests/test_model_profiles.py` → passed.
 
 ## Current Next Steps
 

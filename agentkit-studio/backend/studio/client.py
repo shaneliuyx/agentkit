@@ -110,6 +110,34 @@ class StudioChatClient:
         return _resilient(_call, retries=self.retries)
 
 
+class MaxTokensClient:
+    """LLMClient wrapper that caps completion size for structured control calls."""
+
+    def __init__(self, inner: Any, max_tokens: int | None) -> None:
+        self._inner = inner
+        self.max_tokens = max_tokens
+
+    @property
+    def n_calls(self) -> int:
+        return int(getattr(self._inner, "n_calls", 0) or 0)
+
+    @property
+    def total_tokens(self) -> int:
+        return int(getattr(self._inner, "total_tokens", 0) or 0)
+
+    def chat(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ChatResult:
+        if self.max_tokens is None:
+            return self._inner.chat(messages, tools=tools)
+        try:
+            return self._inner.chat(messages, tools=tools, max_tokens=self.max_tokens)
+        except TypeError:
+            return self._inner.chat(messages, tools=tools)
+
+
 def _extract_tool_calls(message: Any) -> list[tuple[str, dict[str, Any]]]:
     """Map native OpenAI ``tool_calls`` → agentkit ``[(name, args), ...]``.
 

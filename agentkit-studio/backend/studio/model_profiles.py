@@ -14,6 +14,8 @@ class ModelProfile:
     name: str
     weak_instruction_following: bool = False
     context_chars: int = 80_000
+    planner_max_tokens: int | None = None
+    topology_max_tokens: int | None = None
     max_tool_iters: int = 8
     max_actions_per_phase: int = 8
     max_searches: int = 3
@@ -28,7 +30,9 @@ DEFAULT_MODEL_PROFILE = ModelProfile(name="default")
 GEMMA_4_26B_PROFILE = ModelProfile(
     name="gemma-4-26B-A4B-it-heretic-4bit",
     weak_instruction_following=True,
-    context_chars=12_000,
+    context_chars=100_000,
+    planner_max_tokens=1024,
+    topology_max_tokens=512,
     max_tool_iters=4,
     max_actions_per_phase=3,
     max_searches=1,

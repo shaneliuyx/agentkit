@@ -5,6 +5,9 @@ def test_gemma_profile_uses_weak_model_limits() -> None:
     profile = resolve_model_profile("models/gemma-4-26B-A4B-it-heretic-4bit")
 
     assert profile.weak_instruction_following is True
+    assert profile.context_chars == 100_000
+    assert profile.planner_max_tokens == 1024
+    assert profile.topology_max_tokens == 512
     assert profile.max_tool_iters == 4
     assert profile.max_searches == 1
     assert profile.max_successful_fetches == 2
