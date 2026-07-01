@@ -635,6 +635,17 @@ Objective: implement the research report generator improvement plan and validate
    - `pytest backend/tests/test_section_workspace.py backend/tests/test_section_ownership.py backend/tests/test_runner.py::test_active_template_tracks_added_sections_without_removing_original backend/tests/test_runner.py::test_section_writeback_assembles_artifact_from_section_files backend/tests/test_runner.py::test_section_writeback_prefers_active_report_title backend/tests/test_runner.py::test_section_reducer_demotes_missing_anchor_no_conflict_marker backend/tests/test_runner.py::test_section_assignment_queue_fetches_all_files_despite_agent_cap backend/tests/test_report_quality.py backend/tests/test_genericity_audit.py backend/tests/test_report_profiles.py backend/tests/test_rubric_profile_api.py backend/tests/test_client_max_tokens.py backend/tests/test_model_profiles.py -q` → 90 passed.
    - `npm run build` in `frontend/` → passed.
    - Remaining dirty files were not staged: `.gitignore`, deleted design/handoff docs, `backend/pyproject.toml`, mixed `backend/tests/test_m8_m9_helpers.py`, local `.agents/.claude/.codex`, `DESIGN-v2.md`, and `skills-lock.json`.
+116. Recorded unified scoring-standard decision:
+   - User agreed that introducing `scoring_template` and `scoring_matrix` requires a unified scoring standard.
+   - Plan updated so score profiles share one 12-category vocabulary but can vary weights/applicability by report profile.
+   - Core weighted score uses frozen run-start `scoring_template` and `scoring_matrix`; dynamic hub/reducer sections update `active_outline` for publish/export and can contribute bonus/supporting quality, but do not rewrite core weights mid-run.
+   - This keeps drift comparisons stable while still allowing task-specific template evolution.
+117. Fixed publish-gate pass-after-writeback drift and reran E2E:
+   - Found session `s_07f06ab4ce3f` emitted `publish-ready: pass`, but rerunning the deterministic gate on saved `artifact.md` failed missing request terms. Root cause: publish revision was evaluated before section-workspace writeback, and the post-writeback saved text was not rechecked.
+   - Fixed `runner.py` so accepted publish revisions are re-evaluated after `_write_artifact_through_sections()` before emitting final `publish-ready`.
+   - Reran comparable normal Gemma E2E as `s_2dafb96d6fb6` with rubric `general`, tools enabled, `auto_improve=false`, `max_agents=3`, `max_tasks_per_agent=5`.
+   - Storage note: because backend was started from repo root, this run is under `tmp/studio-workspaces/s_2dafb96d6fb6`, not `backend/tmp/studio-workspaces`.
+   - Results: publish gate passed on stream and on saved artifact; one task-specific H1; 8 H2 sections matching `active_outline.json`; 0 duplicate H2 extras; 0 duplicate long-sentence extras; 0 placeholders; 19 unique URLs; References present; 8 section files; assignment queue empty; `agent_io.jsonl` present.
 
 ## Current Next Steps
 

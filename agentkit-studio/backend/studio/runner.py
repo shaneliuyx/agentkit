@@ -2070,6 +2070,12 @@ class Runner:
                                         )
                                         result_output = _scored_text
                                         _update_active_template_from_artifact(session, _scored_text)
+                                        _publish = evaluate_publish_readiness(
+                                            _original_requirement,
+                                            _scored_text,
+                                            verified_urls=_verified_urls or None,
+                                            required_sections=_active_template(session),
+                                        )
                                 except Exception:  # noqa: BLE001
                                     pass
                 _pg = GateEvent(

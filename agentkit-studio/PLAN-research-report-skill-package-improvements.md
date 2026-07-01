@@ -135,32 +135,70 @@ Goal: keep Studio's deterministic scorer but present package-aligned categories 
 Implementation:
 
 1. Keep `rubric_score()` as the machine optimization signal.
-2. Add `rubric_scorecard_100()` that projects current deterministic parts plus publish gate data into the package's 12 categories:
+2. Add a unified 100-point scorecard standard with profile-specific applicability.
+   - Use one common category vocabulary across profiles:
+     1. Scope and research framing (8)
+     2. ToC completeness (7)
+     3. Source quality (12)
+     4. Citation integrity (12)
+     5. Evidence synthesis (12)
+     6. Analytical depth (10)
+     7. Practical usefulness (10)
+     8. Code quality / examples (8)
+     9. Diagrams and tables (6)
+     10. Readability and formatting (6)
+     11. Reflection and limitations (5)
+     12. Governance and safety (4)
+   - Each report profile owns a `ScoreProfile`: category weights,
+     applicability, required evidence signals, and the section concepts used for
+     category checks. For example, `deep_technical` may keep code/diagram
+     weights active, while `market`, `policy`, and `literature_review` can
+     reduce or reallocate those categories without changing source code.
+   - On run start, snapshot both `scoring_template` and `scoring_matrix` from
+     the selected report profile. This frozen baseline is the core scoring
+     target for the whole run.
+   - Dynamic hub/reducer section additions update `active_outline` for publish
+     readiness and export, but do not rewrite the frozen core scoring weights
+     mid-run. Dynamic sections can contribute as bonus/supporting evidence under
+     synthesis, readability, usefulness, or governance, but they cannot dilute or
+     replace required baseline categories.
+   - Score ToC completeness against `scoring_template`, not the mutable
+     `active_outline`. Publish gate still checks `active_outline` so accepted
+     dynamic sections cannot disappear from the final report.
+3. Add `rubric_scorecard_100()` that projects current deterministic parts plus publish gate data into the frozen score profile:
    - Scope/framing: intake metadata present and final answer addresses requirement.
-   - ToC completeness: `sections_present`.
+   - ToC completeness: `sections_present` over `scoring_template`.
    - Source quality: evidence reliability/source type mix.
    - Citation integrity: verified URL ratio and uncited claims.
-   - Evidence synthesis: current `analysis` signal.
-   - Analytical depth: analysis signal plus report length/section coverage.
-   - Practical usefulness: presence of recommendations/implementation/checklists.
-   - Code quality: code lint/execution status, initially unknown unless code blocks exist.
-   - Diagrams/tables: markdown table count and mermaid/code fence validity.
+   - Evidence synthesis: current `analysis` signal plus evidence grouping.
+   - Analytical depth: tradeoffs, implications, decision criteria, alternatives.
+   - Practical usefulness: recommendations, implementation steps, examples, checklists.
+   - Code quality: code lint/execution status when applicable to the profile.
+   - Diagrams/tables: markdown table count and mermaid/code fence validity when applicable.
    - Readability: structure, paragraph length heuristics, no reducer preamble.
    - Reflection/limitations: section presence and uncertainty language.
-   - Governance/safety: gates, budget, human-review flag.
+   - Governance/safety: gates, budget, human-review flag, privacy/security/cost controls.
 
 Tradeoff: replace `_WEIGHTS` with the 12 package weights vs add a projection layer.
 
 - Replacing `_WEIGHTS` gives conceptual alignment but risks destabilizing the hill-climb metric already calibrated in tests.
 - A projection layer gives user-facing package compatibility while preserving the optimized internal signal.
+- Dynamically adjusting weights from the active ToC would reward template drift
+  and let the model dilute hard categories by adding easier sections. Freezing
+  the score profile at run start keeps drift comparisons meaningful.
 
-Chosen: projection layer. Use `rubric_score()` for epoch keep/discard; use `rubric_scorecard_100()` for publish/readiness reporting.
+Chosen: projection layer with frozen score profiles. Use `rubric_score()` for
+epoch keep/discard; use `rubric_scorecard_100()` for publish/readiness reporting.
 
 Acceptance tests:
 
 - Existing `test_rubric.py` keeps passing.
 - A good fixture maps above 80/90 depending on hard fails.
 - A thin fixture maps below 70 or is blocked by missing evidence.
+- Selecting different report profiles produces different frozen
+  `scoring_matrix` applicability while keeping the same category vocabulary.
+- Adding a dynamic section changes `active_outline` and publish checks, but does
+  not change the frozen core `scoring_template` or category weights.
 
 ## Workstream D: Intake, Research Brief, And Generic Report Profile
 
@@ -1716,18 +1754,37 @@ Gap:
 - The downloaded package and enhanced report ask for a user-facing 100-point scorecard with categories like practical usefulness, code quality, diagrams/tables, reflection, governance, and readability.
 - Replacing the internal rubric would destabilize calibrated hill-climb behavior.
 
-Decision: keep `rubric_score` for optimization; add a 100-point projection for reporting.
+Decision: keep `rubric_score` for optimization; add a frozen profile-based
+100-point projection for reporting.
 
 Actionable steps:
 
-1. Add `rubric_scorecard_100(text, evidence, publish_gate, lint, metrics, required_sections)`.
-2. Keep existing `_WEIGHTS` and tests unchanged.
-3. Add the enhanced technical-report template as a preset, not the default.
-4. Add frontend display for scorecard categories.
+1. Add `ScoreProfile` definitions keyed by report profile.
+   - Each `ScoreProfile` uses the same 12 category names and total 100-point
+     scale, but can set category applicability/weights by profile.
+   - Store the user's provided scoring matrix as the default deep technical /
+     implementation-report profile.
+   - Add lighter score profiles for `general`, `market`, `policy`,
+     `literature_review`, `competitive`, and `product` so irrelevant categories
+     such as code or diagrams do not unfairly penalize non-technical reports.
+2. At run start, snapshot `scoring_template` and `scoring_matrix` from the
+   selected profile into session/run state.
+   - `scoring_template` is the frozen original template used for weighted ToC
+     coverage and drift comparison.
+   - `active_outline` remains mutable for hub/reducer section creation and
+     publish readiness.
+3. Add `rubric_scorecard_100(text, evidence, publish_gate, lint, metrics, scoring_template, scoring_matrix)`.
+4. Keep existing `_WEIGHTS` and tests unchanged for internal optimization.
+5. Add the enhanced technical-report template and score profile as presets, not the default.
+6. Add frontend display for scorecard categories and profile applicability.
 
 Rationale:
 
 - Current deterministic metric is a known working control signal. The 100-point rubric should be a presentation/readiness layer, not a replacement for the optimizer.
+- Freezing `scoring_template` and `scoring_matrix` at run start prevents the
+  model from improving its score by changing the template mid-run. Dynamic
+  sections are still valuable, but they should affect publish readiness and
+  optional bonus/supporting quality signals, not core category weights.
 
 ### 6. Artifact Lint, Editorial Cleanup, And Report Structure
 
