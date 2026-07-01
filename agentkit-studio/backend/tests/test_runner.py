@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Callable
 
 from agentkit.types import LLMClient
+from studio.models import LoopConfig
 from studio.events import StudioEvent
 from studio.runner import Runner
 from studio.session import SessionRegistry
@@ -57,6 +58,205 @@ def test_done_writes_result_file(
     saved = Path(done.result_path)
     assert saved.is_file()
     assert saved.read_text(encoding="utf-8") == done.result
+
+
+def test_normal_run_writes_agent_io_log(
+    fake_client_factory: Callable[..., LLMClient], tmp_path
+) -> None:
+    events: list[StudioEvent] = []
+    session = _make_session()
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=fake_client_factory,
+        embedder=None,
+        workspace_root=tmp_path,
+    )
+    runner.run("1. compare redis and postgres 2. write a recommendation")
+
+    log = tmp_path / session.session_id / "agent_io.jsonl"
+    assert log.is_file()
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert any('"step": "s1"' in line for line in lines)
+    assert any('"step": "run-summary"' in line for line in lines)
+    assert (tmp_path / session.session_id / "io" / "s1.in.md").is_file()
+    s2_input = (tmp_path / session.session_id / "io" / "s2.in.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Context from prior steps:" in s2_input
+    assert "[s1]" in s2_input
+
+
+def test_loop_workers_receive_section_assignments_and_weakness_guidance(
+    fake_client_factory: Callable[..., LLMClient], tmp_path
+) -> None:
+    events: list[StudioEvent] = []
+    session = _make_session()
+    session.loop_config = LoopConfig(max_tasks_per_agent=1, max_agents=5)
+    session.rubric_config = {
+        "weights": None,
+        "template": ["Executive Summary", "Limitations"],
+    }
+    session.weaknesses = [
+        "[## Executive Summary] missing cited takeaway",
+        "[document] missing source grounding",
+    ]
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=fake_client_factory,
+        embedder=None,
+        workspace_root=tmp_path,
+    )
+
+    runner.run("gather evidence for a short report")
+
+    spoke_input = (tmp_path / session.session_id / "io" / "s1.spoke0.in.md").read_text(
+        encoding="utf-8"
+    )
+    assert "ASSIGNED SECTIONS:" in spoke_input
+    assert "## Executive Summary" in spoke_input
+    assert "missing cited takeaway" in spoke_input
+    assert "missing source grounding" in spoke_input
+    assert "create and populate" in spoke_input
+    assert "the strongest case for it" not in spoke_input
+    assert "## (intro)" not in spoke_input
+
+
+def test_section_assignment_queue_fetches_all_files_despite_agent_cap(
+    fake_client_factory: Callable[..., LLMClient], tmp_path
+) -> None:
+    events: list[StudioEvent] = []
+    session = _make_session()
+    session.loop_config = LoopConfig(max_tasks_per_agent=5, max_agents=1)
+    session.rubric_config = {
+        "weights": None,
+        "template": ["Executive Summary", "References"],
+    }
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=fake_client_factory,
+        embedder=None,
+        workspace_root=tmp_path,
+    )
+
+    runner.run("gather evidence for a short report")
+
+    io_dir = tmp_path / session.session_id / "io"
+    first = (io_dir / "s1.spoke0.in.md").read_text(encoding="utf-8")
+    second = (io_dir / "s1.spoke1.in.md").read_text(encoding="utf-8")
+    assert "ASSIGNMENT QUEUE FETCH:" in first
+    assert "## Executive Summary" in first
+    assert "## References" not in first
+    assert "ASSIGNMENT QUEUE FETCH:" in second
+    assert "## References" in second
+    assert "## Executive Summary" not in second
+    queue = tmp_path / session.session_id / "sections" / "assignment_queue.json"
+    assert queue.read_text(encoding="utf-8").strip() == "[]"
+
+
+def test_active_template_tracks_added_sections_without_removing_original() -> None:
+    from studio.runner import (
+        _active_report_title,
+        _active_template,
+        _update_active_template_from_artifact,
+    )
+
+    session = _make_session()
+    session.rubric_config = {
+        "weights": None,
+        "template": ["Executive Summary", "References"],
+    }
+    artifact = "# Catalog Control for Agent Skills\n\n## Executive Summary\nDone.\n\n## New Risk Analysis\nAdded.\n"
+
+    active = _update_active_template_from_artifact(session, artifact)
+
+    assert active == ["Executive Summary", "References", "New Risk Analysis"]
+    assert _active_template(session) == active
+    assert _active_report_title(session) == "Catalog Control for Agent Skills"
+
+
+def test_section_writeback_assembles_artifact_from_section_files(tmp_path) -> None:
+    from studio.runner import (
+        _update_active_template_from_artifact,
+        _write_artifact_through_sections,
+    )
+
+    session = _make_session()
+    session.rubric_config = {
+        "weights": None,
+        "template": ["Executive Summary", "References"],
+    }
+    artifact = (
+        "# Report\n\n"
+        "## Executive Summary\nSpecific summary.\n\n"
+        "## New Section\nNew sourced content.\n"
+    )
+
+    assembled = _write_artifact_through_sections(
+        session,
+        tmp_path,
+        artifact,
+        "Write a research report about catalog management for local and remote agent loops.",
+    )
+    active = _update_active_template_from_artifact(session, assembled)
+
+    root = tmp_path / session.session_id
+    assert (root / "artifact.md").read_text(encoding="utf-8") == assembled
+    assert (root / "sections" / "001-executive-summary.md").is_file()
+    assert (root / "sections" / "002-references.md").is_file()
+    assert (root / "sections" / "003-new-section.md").is_file()
+    assert assembled.startswith("# Catalog management for local and remote agent loops\n\n")
+    assert "## New Section" in assembled
+    assert active == ["Executive Summary", "References", "New Section"]
+
+
+def test_section_writeback_prefers_active_report_title(tmp_path) -> None:
+    from studio.runner import _write_artifact_through_sections
+
+    session = _make_session()
+    session.rubric_config = {
+        "weights": None,
+        "template": ["Executive Summary"],
+        "active_title": "Managed Catalogs for Agent Skills",
+    }
+    artifact = "# Research Report\n\n## Executive Summary\nSpecific summary.\n"
+
+    assembled = _write_artifact_through_sections(
+        session,
+        tmp_path,
+        artifact,
+        "Write a research report about a different topic.",
+    )
+
+    assert assembled.startswith("# Managed Catalogs for Agent Skills\n\n")
+
+
+def test_llm_template_run_bootstraps_artifact_for_reducer(
+    fake_client_factory: Callable[..., LLMClient], tmp_path
+) -> None:
+    events: list[StudioEvent] = []
+    session = _make_session(mode="llm")
+    session.rubric_config = {
+        "weights": None,
+        "template": ["Executive Summary", "Source References"],
+    }
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=fake_client_factory,
+        embedder=None,
+        workspace_root=tmp_path,
+    )
+
+    runner.run("write a sourced report")
+
+    artifact = tmp_path / session.session_id / "artifact.md"
+    assert artifact.is_file()
+    text = artifact.read_text(encoding="utf-8")
+    assert "## Executive Summary" in text
+    assert "## Source References" in text
 
 
 def test_event_order(fake_client_factory: Callable[..., LLMClient]) -> None:
@@ -226,8 +426,131 @@ def test_section_reducer_emits_patches_no_full_regen() -> None:
     p = captured["prompt"]
     assert "Do NOT re-emit" in p                           # patch contract, not full regen
     assert "PATCHES" in p
+    assert "PATCH CONTENT CONTRACT" in p
+    assert "content MUST NOT contain '#'" in p
+    assert "output an empty JSON list" in p
     assert "## Intro" in p and "missing citation" in p     # artifact + weakness checklist
     assert "worker found source X" in p                    # worker drafts included
+
+
+def test_section_reducer_drops_full_document_llm_patch() -> None:
+    """A malformed reducer PATCHES block that echoes a whole document is rejected before
+    reduce_patches can stack duplicate headings or skeleton placeholders."""
+    from agentkit.types import ChatResult
+    from studio.runner import _make_section_reducer
+
+    class _BadPatch:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(
+                text='PATCHES:\n```json\n'
+                     '[{"op":"insert_after","anchor":"## Executive Summary",'
+                     '"content":"\\n\\n# Bad Echo\\n\\n## Executive Summary\\n'
+                     '_(pending - needs sourced content)_\\n'
+                     'Bad echoed prose (https://bad.example)."}]\n```',
+                total_tokens=4,
+            )
+
+    seed = "# Report\n\n## Executive Summary\nseed text"
+    text, _ = _make_section_reducer(_BadPatch(), seed, [])(["worker draft without findings"])
+
+    assert text == seed
+    assert "# Bad Echo" not in text
+    assert "pending - needs sourced content" not in text
+
+
+def test_section_reducer_block_separates_llm_patch_content() -> None:
+    """Valid LLM patches must not glue prose onto the heading line; otherwise the
+    next writeback sees a different section identity and rejects the improvement."""
+    from agentkit.types import ChatResult
+    from studio.runner import _make_section_reducer
+
+    class _TightPatch:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(
+                text='PATCHES:\n```json\n'
+                     '[{"op":"insert_after","anchor":"## Executive Summary",'
+                     '"content":"Agent skills need governance (https://x.example)."}]\n```',
+                total_tokens=4,
+            )
+
+    seed = "# Report\n\n## Executive Summary\n_(pending - needs sourced content)_"
+    text, _ = _make_section_reducer(_TightPatch(), seed, [])(["worker draft"])
+
+    assert "## Executive Summary\n\nAgent skills need governance" in text
+    assert "## Executive SummaryAgent" not in text
+
+
+def test_section_reducer_drops_duplicate_llm_source_in_target_section() -> None:
+    """Reducer LLM patches must not keep adding the same source to the same section."""
+    from agentkit.types import ChatResult
+    from studio.runner import _make_section_reducer
+
+    class _DuplicateSourcePatch:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(
+                text='PATCHES:\n```json\n'
+                     '[{"op":"insert_after","anchor":"## Key Findings",'
+                     '"content":"Repeated source claim (https://x.example/a)."}]\n```',
+                total_tokens=4,
+            )
+
+    seed = "# Report\n\n## Key Findings\nExisting claim (https://x.example/a).\n"
+    text, _ = _make_section_reducer(_DuplicateSourcePatch(), seed, [])(["worker draft"])
+
+    assert "Existing claim (https://x.example/a)." in text
+    assert "Repeated source claim" not in text
+
+
+def test_section_reducer_allows_same_llm_source_in_different_section() -> None:
+    """A source can still support different sections; the duplicate guard is section-local."""
+    from agentkit.types import ChatResult
+    from studio.runner import _make_section_reducer
+
+    class _CrossSectionPatch:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(
+                text='PATCHES:\n```json\n'
+                     '[{"op":"insert_after","anchor":"## Evidence and Analysis",'
+                     '"content":"Evidence detail (https://x.example/a)."}]\n```',
+                total_tokens=4,
+            )
+
+    seed = (
+        "# Report\n\n"
+        "## Key Findings\nExisting claim (https://x.example/a).\n\n"
+        "## Evidence and Analysis\n_(pending - needs sourced content)_"
+    )
+    text, _ = _make_section_reducer(_CrossSectionPatch(), seed, [])(["worker draft"])
+
+    assert "Evidence detail (https://x.example/a)" in text
+
+
+def test_section_reducer_uses_floor_when_llm_patch_is_invalid() -> None:
+    """Invalid LLM patches do not make the phase passive: grounded worker findings still
+    become scoped deterministic patches."""
+    from agentkit.types import ChatResult
+    from studio.runner import _make_section_reducer
+
+    class _BadPatch:
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(
+                text='PATCHES:\n```json\n'
+                     '[{"op":"append","anchor":null,'
+                     '"content":"# Echo\\n\\n## Findings\\n_(pending - needs sourced content)_"}]\n```',
+                total_tokens=4,
+            )
+
+    seed = "# Report\n\n## Findings\n_(pending - needs sourced content)_"
+    draft = (
+        "RESEARCH_FINDING:\nARTICLE_TITLE: Grounded\n"
+        "URL: https://grounded.example/report\nPATCH_TARGET: ## Findings\n"
+        "WHY: Reducers need scoped evidence patches.\n"
+    )
+    text, _ = _make_section_reducer(_BadPatch(), seed, [])([draft])
+
+    assert "# Echo" not in text
+    assert "grounded.example/report" in text
+    assert "Reducers need scoped evidence patches" in text
 
 
 def test_section_reducer_deterministic_floor_from_findings() -> None:
@@ -293,6 +616,7 @@ def test_section_reducer_demotes_missing_anchor_no_conflict_marker() -> None:
     try:
         text, _ = _make_section_reducer(_Empty(), seed, [])([draft])
         assert "conflict" not in text.lower()        # no conflict marker leaked
+        assert "## Nonexistent Section" in text       # missing PATCH_TARGET becomes a section
         assert "real.example" in text                # finding appended cleanly
         assert "## Intro\nbody" in text              # seed intact
     finally:
@@ -612,14 +936,19 @@ def test_today_note_injects_current_date() -> None:
 
 def test_executor_prompt_frames_research_not_planning() -> None:
     """STAR spokes must be EXECUTORS (fetch + emit findings), not planning hubs —
-    the planner framing was the score ceiling (§11.10)."""
+    the planner framing was the score ceiling (§11.10). The spoke is goal-bounded:
+    it may use the task goal for search relevance, but still executes only its
+    assignment + weaknesses."""
     from studio.runner import _build_executor_prompt
     p = _build_executor_prompt("find popular articles", "# Doc\n## Sources\nx",
                                "- [## Sources] missing url")
     assert "RESEARCH EXECUTOR" in p
     assert "TASK_LIST" in p and "ASSIGNED" in p          # explicitly FORBIDDEN
     assert "RESEARCH_FINDING" in p and "URL:" in p       # the execute output format
-    assert "find popular articles" in p and "missing url" in p
+    assert "missing url" in p                            # its weakness assignment survives
+    assert "find popular articles" in p                  # needed for relevant search queries
+    assert "TASK GOAL" in p and "assigned focus" in p
+    assert "weaknesses are '(none)'" in p
     assert "planning hub" not in p                       # the bug framing is gone
 
 
@@ -697,10 +1026,14 @@ def test_miner_marks_cached_urls_verified() -> None:
     assert "not fabricated" in cap["p"].lower()
 
 
-def test_hill_climb_forces_star_topology(fake_client_factory, tmp_path) -> None:
-    """auto_improve on → every phase forced to STAR (DESIGN §11.4), overriding
-    auto-derived topology. 'compare ...' would normally classify to MESH; under
-    hill-climb it must become STAR so the section-aware reducer runs."""
+def test_hill_climb_honors_selected_topology_no_force_star(
+    fake_client_factory, tmp_path
+) -> None:
+    """E1 (PLAN §4b): the force-STAR override is DELETED. Every topology now satisfies the
+    assemble+verify reducer contract (STAR/MAP/MESH fold drafts; SINGLE identity-fold;
+    PIPELINE terminal-capture), so the selector's verdict is HONORED under hill-climb instead
+    of overridden. 'compare ...' → MESH stays MESH; 'write a recommendation' → SINGLE stays
+    SINGLE — neither is forced to STAR."""
     events: list[StudioEvent] = []
     session = _make_session()
     session.hill_climb_config = {"auto_improve": True}
@@ -711,7 +1044,12 @@ def test_hill_climb_forces_star_topology(fake_client_factory, tmp_path) -> None:
     runner.run("1. compare redis and postgres 2. write a recommendation")
     topo = [e for e in events if e.EVENT_TYPE == "topology"][0]
     tops = {s["topology"] for s in topo.steps}
-    assert tops == {"star"}, tops
+    # Selection honored: MESH and SINGLE both survive — no blanket force-STAR.
+    assert "mesh" in tops, tops
+    assert "single" in tops, tops
+    # E2: every phase carries a rationale (no coercion language any more).
+    assert all("rationale" in s for s in topo.steps), topo.steps
+    assert not any("coerced" in s.get("rationale", "") for s in topo.steps), topo.steps
 
 
 def test_no_hill_climb_keeps_auto_topology(fake_client_factory) -> None:
@@ -972,6 +1310,102 @@ def test_gemma_report_request_keeps_llm_epic_planning_by_default(fake_client_fac
         "lint-publish",
     ]
     assert plan_event.steps
+
+
+def test_gemma_planning_and_topology_selection_are_capped() -> None:
+    from agentkit.types import ChatResult
+
+    class CapturingClient:
+        def __init__(self) -> None:
+            self.max_tokens: list[int | None] = []
+            self.n_calls = 0
+            self.total_tokens = 0
+
+        def chat(self, messages, tools=None, max_tokens=None):
+            self.max_tokens.append(max_tokens)
+            self.n_calls += 1
+            self.total_tokens += 1
+            content = str(messages[-1].get("content", ""))
+            if "EPIC_PLAN:" in content:
+                return ChatResult(
+                    text=(
+                        'EPIC_PLAN:\n```json\n{"epics":[{"id":"epic-1",'
+                        '"title":"Gather evidence","description":"gather cited sources",'
+                        '"topology":"star","depends_on":[],"branches":[]}]}'
+                        "\n```"
+                    ),
+                    total_tokens=1,
+                )
+            return ChatResult(
+                text=(
+                    '{"topology":"star","rationale":"independent evidence gathering",'
+                    '"questions_fired":["Q3"]}'
+                ),
+                total_tokens=1,
+            )
+
+    cap = CapturingClient()
+    events: list[StudioEvent] = []
+    session = _make_session(mode="llm")
+    session.llm_info = {
+        "label": "gemma",
+        "model": "gemma-4-26B-A4B-it-heretic-4bit",
+    }
+    runner = Runner(session, events.append, client_factory=lambda _u: cap, embedder=None)
+    runner.run("Write a research report about battery recycling policy.")
+
+    assert 1024 in cap.max_tokens
+    assert 512 in cap.max_tokens
+    topo = [e for e in events if e.EVENT_TYPE == "topology"][0]
+    assert topo.steps[0]["rationale"] == "independent evidence gathering"
+
+
+def test_runner_maps_state_level_selector_topology_to_runtime_shape() -> None:
+    from agentkit.types import ChatResult
+
+    class DurableSelectorClient:
+        def __init__(self) -> None:
+            self.n_calls = 0
+            self.total_tokens = 0
+
+        def chat(self, messages, tools=None, max_tokens=None):
+            self.n_calls += 1
+            self.total_tokens += 1
+            content = str(messages[-1].get("content", ""))
+            if "EPIC_PLAN:" in content:
+                return ChatResult(
+                    text=(
+                        'EPIC_PLAN:\n```json\n{"epics":[{"id":"epic-1",'
+                        '"title":"Recoverable workflow","description":"recover after restart",'
+                        '"depends_on":[],"branches":[]}]}'
+                        "\n```"
+                    ),
+                    total_tokens=1,
+                )
+            return ChatResult(
+                text=(
+                    '{"topology":"durable_board",'
+                    '"rationale":"needs restart recovery and persisted work state",'
+                    '"questions_fired":["Q4","Q8"]}'
+                ),
+                total_tokens=1,
+            )
+
+    events: list[StudioEvent] = []
+    session = _make_session(mode="llm")
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=lambda _u: DurableSelectorClient(),
+        embedder=None,
+    )
+    runner.run("Design a recoverable research workflow")
+
+    topo = [e for e in events if e.EVENT_TYPE == "topology"][0]
+    assert topo.steps[0]["topology"] == "single"
+    assert "durable_board" in topo.steps[0]["rationale"]
+    assert "execute as single" in topo.steps[0]["rationale"]
+    assert "restart recovery" in topo.steps[0]["rationale"]
 
 
 def test_publish_gate_emits_failure_for_report_without_sources(fake_client_factory) -> None:

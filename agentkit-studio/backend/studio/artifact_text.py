@@ -16,6 +16,73 @@ if TYPE_CHECKING:
     from agentkit.types import LLMClient
 
 
+_TITLE_PLACEHOLDER_RE = _re.compile(
+    r"(?i)(?:\b(?:report|deliverable)\s+title\b|\btitle\s*[-—]\s*generated\b|"
+    r"generated from (?:the )?findings|generated below)"
+)
+_GENERIC_REPORT_TITLE_RE = _re.compile(
+    r"(?i)^(?:research\s+report|technical\s+report|final\s+report|report|deliverable)$"
+)
+_TITLE_PREFIX_RE = _re.compile(
+    r"(?is)^\s*(?:write|create|generate|prepare|draft|produce)\s+"
+    r"(?:a|an|the)?\s*(?:concise|detailed|comprehensive|technical|research|generic|report|"
+    r"analysis|study|white\s+paper|brief|overview|\s)+\s+"
+    r"(?:about|on|regarding|covering|for)\s+"
+)
+_TITLE_STOP_RE = _re.compile(
+    r"(?is)\b(?:include|use|cover|provide|with|and include|also include)\b.*$"
+)
+_TITLE_CONTEXT_RE = _re.compile(r"(?i)\s+(?:in|within)\s+.{18,}$")
+
+
+def _is_placeholder_title(title: str) -> bool:
+    cleaned = _re.sub(r"[_()\-—]+", " ", title or "").strip()
+    return (
+        not cleaned
+        or bool(_TITLE_PLACEHOLDER_RE.search(cleaned))
+        or bool(_GENERIC_REPORT_TITLE_RE.fullmatch(cleaned))
+    )
+
+
+def _derive_title_from_requirement(requirement: str) -> str:
+    """Return a task-derived report title without encoding any domain."""
+    source = (requirement or "").strip()
+    first_sentence = _re.split(r"(?<=[.!?])\s+", source, maxsplit=1)[0]
+    topic = _TITLE_PREFIX_RE.sub("", first_sentence).strip()
+    topic = _TITLE_STOP_RE.sub("", topic).strip(" .:;-")
+    topic = _TITLE_CONTEXT_RE.sub("", topic).strip(" .:;-")
+    if not topic:
+        topic = first_sentence.strip(" .:;-") or "Research Report"
+    topic = _re.sub(r"\s+", " ", topic)
+    words = topic.split()
+    if len(words) > 14:
+        topic = " ".join(words[:14])
+    return topic[:1].upper() + topic[1:]
+
+
+def resolve_report_title(text: str, requirement: str, preferred_title: str = "") -> str:
+    """Resolve placeholder or missing H1 titles from the task requirement.
+
+    The skeleton intentionally starts with a placeholder title so the report can
+    stay generic while the actual run fills in task-specific content. This helper
+    keeps model-authored titles, replaces unresolved placeholders, and prepends a
+    derived title when a report has sections but no H1.
+    """
+    body = text or ""
+    if not body.strip():
+        return body
+    preferred = (preferred_title or "").strip()
+    title = preferred if preferred and not _is_placeholder_title(preferred) else _derive_title_from_requirement(requirement)
+    h1 = _re.search(r"(?m)^#\s+(.+?)\s*$", body)
+    if h1:
+        if _is_placeholder_title(h1.group(1)):
+            return _re.sub(r"(?m)^#\s+.+?\s*$\n*", f"# {title}\n\n", body, count=1)
+        return body
+    if _re.search(r"(?m)^##\s+", body):
+        return f"# {title}\n\n{body.lstrip()}"
+    return body
+
+
 def _synthesize_analysis(
     text: str, client: "LLMClient | None", requirement: str
 ) -> tuple[str, bool]:
@@ -31,18 +98,80 @@ def _synthesize_analysis(
     src = text or ""
     if not src.strip() or client is None:
         return src, False
+    # §4d moving-window rule: a model TRUNCATES a long echo (verified 68 KB → 36 KB),
+    # so the length guard below then REJECTS the truncated rewrite and synthesis SILENTLY
+    # NO-OPS at scale. Below the window threshold the whole-doc echo is safe and is kept
+    # verbatim (preserves the small-doc unit tests). Above it, synthesize section by
+    # section: each call sees ONE section + the doc's heading list (cross-section context,
+    # §5 caveat) so comparison still works, and reassembly is deterministic.
+    if len(src) <= _SYNTH_WINDOW:
+        return _synthesize_block(src, client, requirement, context="")
+    return _synthesize_windowed(src, client, requirement)
+
+
+#: Whole-doc synthesis is only safe up to this size; beyond it the model truncates a
+#: long echo, so synthesis switches to section-windowed (§4d).
+_SYNTH_WINDOW = 8_000
+
+
+#: Default rewrite directive — adds an analysis/synthesis layer (PLAN item 1A).
+_DIRECTIVE_ANALYSIS = (
+    "You are a research analyst. The DRAFT below is well-sourced and cited but reads as "
+    "stitched-together quotations with little original analysis.\n\n"
+    "Rewrite it to ADD a synthesis/analysis layer: explain what the findings MEAN together, "
+    "COMPARE and CONTRAST the sources, and surface implications, patterns, and trade-offs in "
+    "your own words.\n\n"
+)
+#: Readability/instructor-tone directive — the FINAL refine pass the user asked for. Chosen by
+#: an A/B/C/D eval on a real seed section with the gemma model: this "instructor" style won the
+#: readability judge, and the explicit "CITATIONS ARE SACRED" reinforcement lifted citation
+#: retention from 3/4 to 4/4 (the eval's decisive metric — the user requires citations intact).
+_DIRECTIVE_READABILITY = (
+    "You are an expert INSTRUCTOR writing for an educated but non-specialist reader. The DRAFT "
+    "below is accurate and well-cited but reads like a REPETITIVE LIST of stitched quotations — "
+    "one 'This defines… / This provides… : \"quote\" (citation)' sentence after another, often "
+    "restating the same point several times.\n\n"
+    "REWRITE it into flowing, natural teaching prose that SYNTHESIZES the sources, not lists them:\n"
+    "- SUMMARIZE and MERGE: collapse repeated or overlapping points into ONE clear explanation. "
+    "The result will be SHORTER than the draft — that is correct and wanted.\n"
+    "- DELETE the scaffolding ('This defines', 'This provides', 'This establishes', 'This "
+    "validates', 'This clarifies', etc.). Never start a sentence that way.\n"
+    "- Explain each idea in plain language with a warm, explanatory tone (a brief analogy or 'in "
+    "other words…' where it helps) and connect ideas with smooth transitions.\n"
+    "- ANALYZE and REFLECT in your own words: what the sources mean TOGETHER, how they agree or "
+    "differ, why it matters, the trade-off or takeaway — not just what each one says.\n"
+    "- Quote sparingly; prefer paraphrase. You MAY support one synthesized sentence with several "
+    "citations.\n\n"
+    "CITATIONS ARE SACRED: every URL that appears in the draft (inside a [text](url) link or bare) "
+    "MUST still appear somewhere in your rewrite, attached to a relevant claim — you may regroup "
+    "them, but never DROP one. Before finishing, silently check that no URL was lost.\n\n"
+)
+
+
+def _synthesize_block(
+    block: str, client: "LLMClient", requirement: str, *, context: str,
+    directive: str | None = None, min_ratio: float = 0.9,
+) -> tuple[str, bool]:
+    """Rewrite ONE block (whole small doc, or one section of a large one) per ``directive``
+    (default: add an analysis layer; pass ``_DIRECTIVE_READABILITY`` for the instructor-tone
+    refine).
+
+    Same anti-regression contract as the caller: keep every URL, never come back materially
+    shorter. ``context`` is an optional cross-section summary (the doc's heading list) so a
+    per-section call can still compare across the report. Returns ``(text, changed)``."""
+    src = block or ""
+    if not src.strip():
+        return src, False
     urls_before = set(_re.findall(r"https?://\S+", src))
+    _ctx = f"DOCUMENT SECTIONS (for cross-section comparison):\n{context}\n\n" if context else ""
     prompt = (
-        "You are a research analyst. The DRAFT report below is well-sourced and cited but "
-        "reads as stitched-together quotations with little original analysis.\n\n"
-        "Rewrite it to ADD a synthesis/analysis layer: explain what the findings MEAN "
-        "together, COMPARE and CONTRAST the sources, and surface implications, patterns, and "
-        "trade-offs in your own words.\n\n"
-        "HARD RULES (a violation makes the rewrite worthless):\n"
-        "- Keep EVERY URL and citation exactly as it appears — never drop or alter one.\n"
+        (directive or _DIRECTIVE_ANALYSIS)
+        + "HARD RULES (a violation makes the rewrite worthless):\n"
+        "- Keep EVERY URL and citation exactly as it appears — never drop, move, or alter one.\n"
         "- Do not remove any sourced fact, quote, or section heading.\n"
-        "- The result must be at least as long as the draft (you are ADDING analysis).\n"
-        "- Output ONLY the improved report, with no preamble or commentary.\n\n"
+        "- The result must be at least as long as the draft.\n"
+        "- Output ONLY the improved text, with no preamble or commentary.\n\n"
+        f"{_ctx}"
         f"TASK: {requirement[:400]}\n\n"
         f"DRAFT:\n{src}"
     )
@@ -54,10 +183,313 @@ def _synthesize_analysis(
     if not out:
         return src, False
     urls_after = set(_re.findall(r"https?://\S+", out))
-    # Reject regressions: a dropped citation, or a materially shorter document.
-    if not urls_before <= urls_after or len(out) < int(0.9 * len(src)):
+    # Reject regressions: a dropped citation (always), or shrinking below ``min_ratio`` of the
+    # block. Analysis ADDS (ratio 0.9); the readability/summarize pass CONDENSES repeated quotes
+    # (ratio ~0.4) — so it may come back shorter, but every URL must survive.
+    if not urls_before <= urls_after or len(out) < int(min_ratio * len(src)):
         return src, False
     return out, True
+
+
+def _synthesize_windowed(
+    src: str, client: "LLMClient", requirement: str, *, directive: str | None = None,
+    min_ratio: float = 0.9,
+) -> tuple[str, bool]:
+    """Section-windowed rewrite for a large doc (§4d): rewrite each section with the small-input
+    call per ``directive``, then reassemble deterministically. A section that fails its own
+    anti-regression guard is kept verbatim, so the whole pass is monotone — it can only improve,
+    never lose content (or citations)."""
+    from agentkit.artifacts.sections import split_sections
+    sections = split_sections(src)
+    if len(sections) < 2:
+        # One section but over the window: still safer to try the single block than to echo
+        # nothing. The block guard rejects a truncated result, so worst case = unchanged.
+        return _synthesize_block(src, client, requirement, context="", directive=directive,
+                                 min_ratio=min_ratio)
+    headings = "\n".join(f"- {h}" for h, _b in sections)
+    out_parts: list[str] = []
+    any_changed = False
+    for heading, body in sections:
+        whole = f"{heading}\n{body}" if heading else body
+        new, changed = _synthesize_block(
+            whole, client, requirement, context=headings, directive=directive,
+            min_ratio=min_ratio,
+        )
+        any_changed = any_changed or changed
+        out_parts.append(new if changed else whole)
+    if not any_changed:
+        return src, False
+    rebuilt = "\n".join(out_parts)
+    # §4d dedup-on-reassembly: windows that share a cross-section summary can restate the
+    # same comparison sentence in two sections. Drop a paragraph that is a verbatim (lexical)
+    # duplicate of one already emitted — but NEVER drop a paragraph carrying a URL (citations
+    # must survive). Cheap lexical stage; the semantic (cosine) stage is the reducer's job
+    # where an embedder is wired.
+    rebuilt = _dedup_paragraphs(rebuilt)
+    # Final whole-doc guard: never return something that dropped a URL or shrank overall.
+    if not set(_re.findall(r"https?://\S+", src)) <= set(_re.findall(r"https?://\S+", rebuilt)):
+        return src, False
+    if len(rebuilt) < int(min(min_ratio, 0.80) * len(src)):
+        return src, False
+    return rebuilt, True
+
+
+def _refine_readability(
+    text: str, client: "LLMClient | None", requirement: str
+) -> tuple[str, bool]:
+    """FINAL instructor-tone readability pass (user request). Rewrites the report into clear,
+    natural teaching prose — explaining complex theory in plain language with more analysis and
+    reflection — PARAGRAPH BY PARAGRAPH, while keeping every citation. Same §4d windowing and
+    anti-regression contract as ``_synthesize_analysis`` (small doc → one block; large doc →
+    per-section, each rewrite rejected if it drops a URL or shrinks). Returns ``(text, changed)``.
+    The prompt style + the 'CITATIONS ARE SACRED' reinforcement were chosen by a gemma A/B eval
+    (4/4 citation retention; best readability)."""
+    src = text or ""
+    if not src.strip() or client is None:
+        return src, False
+    # PER TOP-LEVEL SECTION (not per sub-section/paragraph): feed each whole "## " section — its
+    # sub-sections included — to the model as ONE block, so it can SYNTHESIZE and MERGE the
+    # repetitive same-source sentences within the section (the quote-wall). Splitting into smaller
+    # sub-blocks made each URL-dense block fail the citation guard and stay verbatim. Summarizing
+    # outputs SHORTER text, so a large section is NOT an echo and does not truncate (§4d's
+    # truncation risk is echo-back, not condense). min_ratio 0.4: accept down to 40% as long as
+    # every URL survives (the citation guard is unconditional). Reassemble deterministically.
+    sections = _split_top_level(src)
+    if len(sections) < 2:
+        return _synthesize_block(src, client, requirement, context="",
+                                 directive=_DIRECTIVE_READABILITY, min_ratio=0.4)
+    headings = "\n".join(
+        f"- {s.splitlines()[0]}" for s in sections if s.strip().startswith("#")
+    )
+    out_parts: list[str] = []
+    any_changed = False
+    for sec in sections:
+        new, changed = _synthesize_block(
+            sec, client, requirement, context=headings,
+            directive=_DIRECTIVE_READABILITY, min_ratio=0.4,
+        )
+        any_changed = any_changed or changed
+        out_parts.append(new if changed else sec)
+    if not any_changed:
+        return src, False
+    rebuilt = _dedup_paragraphs("\n\n".join(out_parts))
+    if not set(_re.findall(r"https?://\S+", src)) <= set(_re.findall(r"https?://\S+", rebuilt)):
+        return src, False
+    return rebuilt, True
+
+
+def _split_top_level(text: str) -> list[str]:
+    """Split a document into TOP-LEVEL (``## ``) sections, each chunk carrying its own
+    sub-sections (``### …``) whole. Any preamble before the first ``## `` is its own chunk.
+    Used by the readability pass so a section is rewritten as ONE coherent unit, not fragmented."""
+    parts = _re.split(r"(?m)^(## .+)$", text or "")
+    out: list[str] = []
+    if parts[0].strip():
+        out.append(parts[0].rstrip())
+    for h, b in zip(parts[1::2], parts[2::2]):
+        out.append(f"{h}\n{b}".rstrip())
+    return out
+
+
+def _norm_para(p: str) -> str:
+    """Normalized key for lexical paragraph dedup: lowercased, whitespace-collapsed."""
+    return _re.sub(r"\s+", " ", p).strip().lower()
+
+
+def _dedup_paragraphs(text: str) -> str:
+    """Drop verbatim-duplicate paragraphs (§4d lexical dedup), preserving order and any
+    paragraph that carries a URL (citations never deduped away). Headings are never dropped."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for para in (text or "").split("\n\n"):
+        key = _norm_para(para)
+        is_heading = para.lstrip().startswith("#")
+        has_url = "http://" in para or "https://" in para
+        if key and key in seen and not is_heading and not has_url:
+            continue
+        if key and not has_url:
+            seen.add(key)
+        out.append(para)
+    return "\n\n".join(out)
+
+
+def _dedup_long_sentences(text: str) -> str:
+    """Drop repeated long boilerplate sentences without losing unique citations."""
+    seen: set[str] = set()
+    seen_urls: set[str] = set()
+
+    def repl(match: _re.Match[str]) -> str:
+        sentence = match.group(0)
+        key_text = _re.sub(r"(?m)^#{1,6}\s+.*$", "", sentence)
+        key = _re.sub(r"\s+", " ", key_text).strip().lower()
+        urls = set(_re.findall(r"https?://[^\s)>\]\"']+", sentence))
+        if len(key) >= 120 and key in seen and urls <= seen_urls:
+            headings = "\n".join(
+                line for line in sentence.splitlines()
+                if _re.match(r"^#{1,6}\s+", line.strip())
+            )
+            return headings + ("\n" if headings else "")
+        if key:
+            seen.add(key)
+            seen_urls.update(urls)
+        return sentence
+
+    return _re.sub(r"(?s)(.*?[.!?])(?=(?:\s+(?:[A-Z#]|\Z)|\Z))", repl, text or "")
+
+
+#: A 2-6 ``#`` heading marker glued mid-line after a non-newline, non-``#`` char — e.g.
+#: ``## Design Architecture### Implementation`` (two headings on one line). Single ``#`` is
+#: excluded so code comments (``x = 1  # c``) are never split.
+_GLUED_HEADING_RE = _re.compile(r"(?<=[^\n#])(#{2,6}\s)")
+
+
+def _split_glued_headings(text: str) -> str:
+    """Put a glued mid-line heading marker onto its own block (fixes the 'wrong format'):
+    ``## A### B`` → ``## A\\n\\n### B``. Leaves a heading already on its own line, a code
+    ``# comment`` (single ``#``), and a heading glued to plain prose (no marker) untouched."""
+    return _GLUED_HEADING_RE.sub(r"\n\n\1", text or "")
+
+
+def normalize_artifact(text: str) -> str:
+    """Deterministic markdown hygiene for the assembled artifact (PLAN N1 + format repair):
+    un-glue mid-line headings, THEN collapse duplicate sections to one (richest body).
+    Order matters — un-gluing first lets dedupe see the real, separated headings. Idempotent
+    and a no-op on an already-clean document, so it is safe to run after every phase."""
+    return _dedup_long_sentences(dedupe_sections(_split_glued_headings(text)))
+
+
+_PENDING_PLACEHOLDER_RE = _re.compile(
+    r"(?im)^\s*_\((?:pending|to be completed)\s*[-—][^)]*\)_\s*$"
+)
+
+
+def strip_satisfied_placeholders(text: str) -> str:
+    """Remove template placeholder lines from sections that now contain real content.
+
+    Additive reducers insert findings after a section heading, leaving the original
+    ``_(pending - needs sourced content)_`` line below the new prose. That marker is
+    useful in an empty skeleton but becomes a false quality failure once content exists.
+    """
+    from agentkit.artifacts.sections import split_sections
+
+    sections = split_sections(text or "")
+    if not sections:
+        return text
+    out: list[str] = []
+    changed = False
+    for _heading, body in sections:
+        body_text = body or ""
+        stripped_body = _PENDING_PLACEHOLDER_RE.sub("", body_text).strip()
+        content_only = "\n".join(stripped_body.splitlines()[1:]).strip()
+        if content_only and stripped_body != body_text.strip():
+            changed = True
+            out.append(stripped_body)
+        else:
+            out.append(body_text.rstrip())
+    if not changed:
+        return text
+    return "\n\n".join(out).rstrip() + "\n"
+
+
+def _heading_key(h: str) -> str:
+    """Normalized identity of a heading for duplicate detection: drop the leading ``#``,
+    a leading enumerator (``2.`` / ``3)``), lowercase, collapse whitespace. So
+    ``## 2. Design Architecture`` and ``## Design Architecture`` are the SAME section."""
+    s = _re.sub(r"^#+\s*", "", h)
+    s = _re.sub(r"^\d+[.)]\s*", "", s)
+    return _re.sub(r"\s+", " ", s).strip().lower()
+
+
+def dedupe_sections(text: str) -> str:
+    """Collapse DUPLICATE headings to ONE (PLAN N1 — reconcile to one outline).
+
+    A heading that appears more than once — the echo-accumulation failure where gemma spokes
+    re-emit the whole document and the grow-only writeback stacks copies, so the eight template
+    sections each end up present 8-10× — is collapsed to a single instance carrying the RICHEST
+    (longest) body seen for that heading; the rest are dropped. Order is first-appearance.
+    Preamble before the first heading is preserved. Returns *text* unchanged when no heading
+    repeats, so it is a safe no-op on a clean document."""
+    if not text or "```" in text:
+        # fenced code can contain '#'-comment lines; mask them so they are not mistaken for
+        # headings (N4), then operate on the masked split but rebuild from ORIGINAL slices.
+        from studio.rubric import mask_fenced_code
+        masked = mask_fenced_code(text)
+    else:
+        masked = text
+    # split on headings in the masked view, but index into the ORIGINAL text so bodies keep
+    # their fenced code verbatim.
+    parts = _re.split(r"(?m)^(#{1,6}\s+.+)$", masked)
+    if len(parts) < 4:
+        return text  # 0 or 1 heading → nothing to dedupe
+    # reconstruct (heading, body) pairs over the ORIGINAL text using the same split positions
+    o_parts = _re.split(r"(?m)^(#{1,6}\s+.+)$", text)
+    pre = o_parts[0]
+    pairs = list(zip(o_parts[1::2], o_parts[2::2]))
+    counts: dict[str, int] = {}
+    for h, _b in pairs:
+        counts[_heading_key(h)] = counts.get(_heading_key(h), 0) + 1
+    if all(c == 1 for c in counts.values()):
+        return text  # no duplicates → no-op
+    # richest body per key
+    richest: dict[str, tuple[str, str]] = {}
+    for h, b in pairs:
+        k = _heading_key(h)
+        if k not in richest or len((b or "").strip()) > len((richest[k][1] or "").strip()):
+            richest[k] = (h, b)
+    seen: set[str] = set()
+    out = [pre.rstrip()] if pre.strip() else []
+    for h, _b in pairs:
+        k = _heading_key(h)
+        if k in seen:
+            continue
+        seen.add(k)
+        rh, rb = richest[k]
+        out.append(f"{rh}\n{rb}".rstrip())
+    return ("\n\n".join(out)).rstrip() + "\n"
+
+
+def reconcile_outline(text: str, template: list[str]) -> str:
+    """N1 reconcile: collapse a DOUBLED outline to one (PLAN N1).
+
+    ``_merge_missing_sections`` PREVENTS new doubling; this repairs a doc that ALREADY carries
+    two parallel skeletons — e.g. the agent's own headings (`## 2. Design Architecture`,
+    `## 4. Example Code`) PLUS an appended template block (`## Background and Scope`,
+    `## Key Findings`, …) whose bodies are empty placeholders. Strategy: when a template
+    section appears as an EMPTY/placeholder heading AND the same concept is already covered by
+    a non-empty heading elsewhere, DROP the empty duplicate. Order-preserving; never removes a
+    section that has real content. Returns *text* unchanged when no reconciliation applies."""
+    if not template:
+        return text
+    # First normalize: un-glue mid-line headings, then collapse exact-duplicate headings (the
+    # echo-accumulation bug), then drop empty template duplicates below. The heavy lifter for a
+    # seed that stacked the whole template 8-10× with glued headings.
+    text = normalize_artifact(text)
+    from agentkit.artifacts.sections import split_sections
+    from studio.rubric import _content_tokens
+    sections = split_sections(text or "")
+    if len(sections) < 2:
+        return text
+    # concept tokens of every section that HAS content
+    populated_tokens: set[str] = set()
+    for h, b in sections:
+        if (b or "").strip() and "_(to be completed)_" not in b and "_(pending" not in b.lower():
+            populated_tokens |= _content_tokens(h)
+    tmpl_lower = {s.lower() for s in template}
+    drop_idx: set[int] = set()
+    for i, (h, b) in enumerate(sections):
+        body_empty = not (b or "").strip() or "_(to be completed)_" in b or "_(pending" in b.lower()
+        is_tmpl = h.strip().lower() in tmpl_lower or any(
+            t in h.lower() for t in tmpl_lower
+        )
+        # an EMPTY template-named heading whose concept is already populated elsewhere
+        if body_empty and is_tmpl and (_content_tokens(h) & populated_tokens):
+            drop_idx.add(i)
+    if not drop_idx:
+        return text
+    kept = "\n".join(
+        f"{h}\n{b}".rstrip() for i, (h, b) in enumerate(sections) if i not in drop_idx
+    )
+    return kept.rstrip() + "\n"
 
 
 #: A fenced ```mermaid block, captured whole for block-level repair + deterministic splice.
@@ -158,12 +590,40 @@ def _merge_missing_sections(text: str, sections: list[str]) -> str:
     """
     if not sections:
         return text
-    from studio.rubric import sections_present
+    from studio.rubric import (
+        _HEADING_TEXT_RE,
+        _content_tokens,
+        mask_fenced_code,
+        sections_present,
+    )
     present = {s.lower() for s in sections_present(text, sections)}
     missing = [s for s in sections if s.lower() not in present]
     if not missing:
         return text
-    add = "\n\n".join(f"## {s}\n\n_(to be completed)_" for s in missing)
+    # N1 — Frankenstein guard. `sections_present` only matches a template name against
+    # the doc's HEADINGS. When the agent organized the SAME concepts under different
+    # names ("Design Architecture", "Example Code" instead of Background / Evidence),
+    # the template names don't match any heading, so all of them were appended — the
+    # served doc then carried TWO parallel skeletons. So additionally treat a template
+    # section as covered when its concept tokens already appear in the doc BODY, and
+    # never bolt the template onto a doc that already has its OWN rich outline.
+    masked = mask_fenced_code(text)
+    n_headings = len(_HEADING_TEXT_RE.findall(masked))
+    body_tokens = _content_tokens(masked)            # singular-normalized word set
+    still_missing = [
+        s for s in missing
+        if not ((_toks := _content_tokens(s)) and _toks <= body_tokens)
+    ]
+    if not still_missing:
+        return text
+    # The doc already has a full outline of its own (>= as many real headings as the
+    # template) and most template sections are concept-covered in the body → respect
+    # the agent's structure; appending now is what creates the doubled skeleton.
+    if n_headings >= len(sections) and (
+        len(still_missing) < len(missing) or len(still_missing) <= max(1, len(sections) // 4)
+    ):
+        return text
+    add = "\n\n".join(f"## {s}\n\n_(to be completed)_" for s in still_missing)
     return text.rstrip() + "\n\n" + add + "\n"
 
 
@@ -186,6 +646,10 @@ def _detect_gaps(artifact_text: str) -> list[tuple[str, str]]:
     empty/placeholder sections are.
     """
     gaps: list[tuple[str, str]] = []
+    from studio.rubric import mask_fenced_code
+    # N4: a `# comment` inside a ```python fence is not a section heading. Split on
+    # the masked text so in-code lines never start a (phantom, always-"empty") section.
+    artifact_text = mask_fenced_code(artifact_text)
     parts = _re.split(r'(?m)^(#{1,6}\s+.+)$', artifact_text)
     # parts = [pre, heading1, body1, heading2, body2, ...]
     it = iter(parts[1:])

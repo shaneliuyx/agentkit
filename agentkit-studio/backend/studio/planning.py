@@ -15,7 +15,17 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from agentkit.planner.core import Plan, PlanStep, plan
-from agentkit.topology.core import MAP, MESH, PIPELINE, SINGLE, STAR
+from agentkit.topology.core import (
+    DURABLE_BOARD,
+    GATEWAY,
+    MAP,
+    MESH,
+    PIPELINE,
+    SINGLE,
+    STAR,
+    TREE,
+    TopologyChoice,
+)
 
 from studio.events import GraphEvent
 from studio.findings import _parse_patches_from_output
@@ -71,6 +81,7 @@ def _plan_from_epics(
         return plan(requirement)
 
     epic_ids = {str(e.get("id")) for e in epics if e.get("id")}
+    _VALID_TOPO = {SINGLE, PIPELINE, STAR, MAP, MESH}
     steps = tuple(
         PlanStep(
             id=str(e["id"]),
@@ -80,7 +91,15 @@ def _plan_from_epics(
                 str(d) for d in e.get("depends_on", ())
                 if str(d) in epic_ids and str(d) != str(e["id"])
             ),
-            topology=STAR,
+            # E4: honor the planner's per-epic TOPOLOGY INTENT when it names a valid
+            # topology; else leave it None so the task-driven selector
+            # (assign_topologies_with_choices) fills it. The runner reconciles an explicit
+            # intent against the selector's verdict.
+            topology=(
+                str(e.get("topology")).strip().lower()
+                if str(e.get("topology")).strip().lower() in _VALID_TOPO
+                else None
+            ),
         )
         for e in epics
         if e.get("id")
@@ -91,6 +110,91 @@ def _plan_from_epics(
         return Plan(task=requirement, steps=steps)
     except Exception:  # noqa: BLE001 — bad DAG → deterministic fallback
         return plan(requirement)
+
+
+_LLM_TOPOLOGIES = {SINGLE, STAR, MAP, MESH, PIPELINE, GATEWAY, DURABLE_BOARD, TREE}
+
+
+def _parse_topology_choice(text: str) -> dict[str, Any]:
+    """Parse the LLM topology selector's first JSON object."""
+    dec = _json.JSONDecoder()
+    for i, ch in enumerate(text or ""):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = dec.raw_decode(text[i:])
+        except _json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return {}
+
+
+def _build_topology_choice_prompt(step: PlanStep) -> str:
+    intent = (step.topology or "").strip().lower()
+    intent_line = f"Planner topology intent: {intent}\n" if intent else ""
+    return (
+        "You select the coordination topology for one agent phase.\n"
+        "Choose the topology yourself. Use the principles below as guidance, not as "
+        "a hardcoded checklist.\n\n"
+        "Topology options:\n"
+        "- single: one agent can do the work; task is small, fuzzy, or strongly ordered.\n"
+        "- star: independent subtasks can run in parallel, then a reducer combines them.\n"
+        "- map: repeat the same operation over each item in an upstream list.\n"
+        "- mesh: peers should challenge, critique, compare, debate, or reconcile alternatives.\n"
+        "- pipeline: ordered stages where each stage consumes the previous stage's output.\n"
+        "- gateway: route among different entry points, identities, tools, or permissions before work starts.\n"
+        "- durable_board: work needs restart recovery, cross-session state, queueing, or human-in-loop durability.\n"
+        "- tree: hierarchical manager-to-leaf decomposition is needed.\n\n"
+        "Decision principles from the Studio design:\n"
+        "1. Prefer single until there is a real coordination reason.\n"
+        "2. Routing/permissions are gateway-level concerns before worker topology.\n"
+        "3. Restart, cross-session, queue, or human-in-loop needs durable_board.\n"
+        "4. Debate/critique/comparison needs mesh.\n"
+        "5. Independent parallel work needs star; per-item repeated work needs map.\n"
+        "6. Ordered stage-by-stage work needs pipeline.\n"
+        "7. Hierarchical decomposition with manager/leaves needs tree.\n\n"
+        "Return ONLY JSON with this shape:\n"
+        '{"topology":"star","rationale":"why this topology fits this phase",'
+        '"questions_fired":["independent-parallel"]}\n\n'
+        f"{intent_line}"
+        f"Phase id: {step.id}\n"
+        f"Phase description:\n{step.description}\n"
+    )
+
+
+def select_topologies_by_llm(plan_obj: Plan, client) -> tuple[Plan, dict[str, TopologyChoice]]:
+    """Ask the LLM to choose topology+rationale per phase.
+
+    Code only validates and falls back on unusable output; the selection rationale
+    comes from the model-facing design principles.
+    """
+    new_steps: list[PlanStep] = []
+    choices: dict[str, TopologyChoice] = {}
+    for step in plan_obj.steps:
+        prompt = _build_topology_choice_prompt(step)
+        try:
+            resp = client.chat([{"role": "user", "content": prompt}])
+            data = _parse_topology_choice(getattr(resp, "text", "") or "")
+        except Exception:  # noqa: BLE001
+            data = {}
+        raw_top = str(data.get("topology") or "").strip().lower()
+        if raw_top not in _LLM_TOPOLOGIES:
+            raw_top = (step.topology or SINGLE)
+        rationale = str(data.get("rationale") or "LLM topology selection").strip()
+        questions = data.get("questions_fired") or ()
+        if not isinstance(questions, (list, tuple)):
+            questions = ()
+        choice = TopologyChoice(
+            topology=raw_top,
+            trigger="llm",
+            concurrency=1,
+            rationale=rationale,
+            questions_fired=tuple(str(q) for q in questions),
+        )
+        choices[step.id] = choice
+        new_steps.append(replace(step, topology=raw_top))
+    return replace(plan_obj, steps=tuple(new_steps)), choices
 
 
 def _dedupe_plan_steps(plan_obj: Plan) -> Plan:
@@ -174,11 +278,19 @@ def _parse_assigned(text: str) -> dict[str, list[str]]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {
-        str(agent): [str(s) for s in sections]
-        for agent, sections in data.items()
-        if isinstance(sections, list)
-    }
+    # Two shapes (G4): legacy ``{agent: [sections]}`` and the new
+    # ``{agent: {"sections": [...], "create": [...]}}`` where ``create`` names sections the
+    # agent must CREATE (not yet in the doc). Both flatten to the agent's full section list;
+    # a create job is just a section the reducer's coverage check (G3) verifies got populated.
+    out: dict[str, list[str]] = {}
+    for agent, val in data.items():
+        if isinstance(val, list):
+            out[str(agent)] = [str(s) for s in val]
+        elif isinstance(val, dict):
+            secs = [str(s) for s in val.get("sections", []) if isinstance(val.get("sections"), list)]
+            crea = [str(s) for s in val.get("create", []) if isinstance(val.get("create"), list)]
+            out[str(agent)] = secs + crea
+    return out
 
 
 def _dedupe_assignment(
@@ -207,6 +319,175 @@ def _dedupe_assignment(
             kept.append(s)
         clean[agent] = kept
     return clean, overlaps
+
+
+def verify_assignment_coverage(
+    assigned: dict[str, list[str]], doc_after: str
+) -> list[str]:
+    """G3: which hub-assigned sections were NOT addressed in the assembled doc.
+
+    Closes the loop the user asked for: the hub assigns bounded jobs BY SECTION; after the
+    reducer assembles, deterministically verify each assigned section is actually present and
+    populated. A section that is ABSENT or still an empty placeholder was not delivered — it
+    becomes a next-epoch weakness (returned as ``[<section>] …`` strings, the same shape the
+    miner emits, so the existing handoff routes it back to the owning section's agent).
+
+    Concept-matched to the assembled headings (``_content_tokens``) so a slightly-renamed
+    section still resolves. Returns [] on a clean, fully-covered assignment."""
+    sections: list[str] = []
+    for _agent, secs in (assigned or {}).items():
+        for s in secs:
+            if s and s not in sections:
+                sections.append(s)
+    if not sections:
+        return []
+    from agentkit.artifacts.sections import split_sections
+    from studio.rubric import _content_tokens, mask_fenced_code
+    after = split_sections(mask_fenced_code(doc_after or ""))
+
+    def _find(name: str) -> tuple[str, str] | None:
+        want = _content_tokens(name)
+        for h, b in after:
+            if name.lower() in h.lower() or (want and want & _content_tokens(h)):
+                return h, b
+        return None
+
+    unmet: list[str] = []
+    for name in sections:
+        hit = _find(name)
+        if hit is None:
+            unmet.append(f"[{name}] assigned this phase but absent from the assembled document")
+            continue
+        _h, body = hit
+        bl = (body or "").strip().lower()
+        if not bl or "_(to be completed)_" in bl or "_(pending" in bl:
+            unmet.append(f"[{name}] assigned this phase but still empty/placeholder (not addressed)")
+    return unmet
+
+
+def build_section_worker_foci(
+    sections: list[str] | tuple[str, ...],
+    weaknesses: list[str] | tuple[str, ...],
+    *,
+    max_sections_per_agent: int = 1,
+    section_files: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Build explicit section-scoped worker assignments for fan-out phases.
+
+    Each focus is a small contract: these exact sections are the worker's scope,
+    relevant weaknesses are guidance, and absent/pending sections are create jobs.
+    """
+    clean_sections = [_normalize_section_heading(s) for s in sections if str(s).strip()]
+    if not clean_sections:
+        return ()
+    group_size = max(1, int(max_sections_per_agent or 1))
+    groups = [
+        clean_sections[i:i + group_size]
+        for i in range(0, len(clean_sections), group_size)
+    ]
+    return tuple(_section_focus_text(g, weaknesses, section_files or {}) for g in groups)
+
+
+def build_section_assignment_queue(
+    sections: list[str] | tuple[str, ...],
+    weaknesses: list[str] | tuple[str, ...],
+    *,
+    section_files: dict[str, str] | None = None,
+    agent_slots: int | None = None,
+) -> tuple[str, ...]:
+    """Build one-file worker foci for the section assignment queue."""
+    rows = build_section_assignment_rows(
+        sections,
+        weaknesses,
+        section_files=section_files,
+        agent_slots=agent_slots,
+    )
+    return tuple(row["assignment"] for row in rows)
+
+
+def build_section_assignment_rows(
+    sections: list[str] | tuple[str, ...],
+    weaknesses: list[str] | tuple[str, ...] = (),
+    *,
+    section_files: dict[str, str] | None = None,
+    agent_slots: int | None = None,
+) -> tuple[dict[str, str], ...]:
+    """Build atomic queue rows: one agent slot, one section, one file."""
+    clean_sections = [_normalize_section_heading(s) for s in sections if str(s).strip()]
+    if not clean_sections:
+        return ()
+    slots = max(1, int(agent_slots or len(clean_sections)))
+    files = section_files or {}
+    rows: list[dict[str, str]] = []
+    for i, section in enumerate(clean_sections):
+        agent_id = f"agent-{(i % slots) + 1:03d}"
+        rows.append(
+            {
+                "agent_id": agent_id,
+                "section": section,
+                "file": files.get(section.removeprefix("## ").strip(), "(section file pending)"),
+                "status": "queued",
+                "assignment": _section_focus_text(
+                    [section],
+                    weaknesses,
+                    files,
+                    agent_id=agent_id,
+                ),
+            }
+        )
+    return tuple(rows)
+
+
+def _normalize_section_heading(section: str) -> str:
+    sec = str(section).strip()
+    if sec.startswith("#"):
+        return sec
+    return f"## {sec}"
+
+
+def _section_focus_text(
+    sections: list[str],
+    weaknesses: list[str] | tuple[str, ...],
+    section_files: dict[str, str],
+    agent_id: str | None = None,
+) -> str:
+    from studio.rubric import _content_tokens
+
+    owned_tokens = set()
+    for sec in sections:
+        owned_tokens |= _content_tokens(sec)
+    relevant: list[str] = []
+    for weakness in weaknesses or ():
+        w = str(weakness).strip()
+        if not w:
+            continue
+        wl = w.lower()
+        if "[document]" in wl or (owned_tokens and owned_tokens & _content_tokens(w)):
+            relevant.append(w)
+    section_lines = "\n".join(f"- {s}" for s in sections)
+    file_lines = "\n".join(
+        f"- {s} -> {section_files.get(s.removeprefix('## ').strip(), '(section file pending)')}"
+        for s in sections
+    )
+    weakness_lines = "\n".join(f"- {w}" for w in relevant) if relevant else "- (none)"
+    return (
+        (f"AGENT ID: {agent_id}\n\n" if agent_id else "")
+        + "ASSIGNMENT QUEUE FETCH:\n"
+        "- This worker call may fetch exactly one queued section file in normal runtime.\n"
+        "- Process the current assigned file target only, then return section-local findings/patches.\n\n"
+        "ASSIGNED SECTIONS:\n"
+        f"{section_lines}\n\n"
+        "ASSIGNED SECTION FILES:\n"
+        f"{file_lines}\n\n"
+        "TASK GUIDANCE:\n"
+        "- Work only on the assigned sections above.\n"
+        "- If an assigned section is absent or still pending, create and populate it.\n"
+        "- Keep each section's updates in its matching section file; do not combine multiple assigned sections into one file.\n"
+        "- Use PATCH_TARGET values that exactly match one assigned heading.\n"
+        "- Do not patch or write content for sections assigned to other agents.\n\n"
+        "WEAKNESSES TO FIX IN THIS SCOPE:\n"
+        f"{weakness_lines}"
+    )
 
 
 def _phase_search_failed(outputs: list[str]) -> bool:

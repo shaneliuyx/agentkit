@@ -1893,9 +1893,62 @@ Actionable steps:
 7. Add final publish-ready gate before serving/exporting.
 8. Add a regression fixture based on the bad artifact.
 
+9. Add section-file artifact ownership for report generation.
+   - Keep `artifact.md` as the assembled report, not the worker edit target.
+   - Split the current report into ordered section files under a workspace
+     directory such as `sections/001-executive-summary.md`.
+   - The hub receives the full assembled artifact, current section inventory,
+     template/profile guidance, and weaknesses. It may assign existing sections
+     or create new section files when the report needs structure not present in
+     the initial template.
+   - Treat the template as a live active outline. The initial profile/template is
+     only the starting outline. When the hub or reducer accepts a structural
+     change such as adding, renaming, reordering, or removing a section, update
+     the run's active template/outline metadata in the same transaction as the
+     section-file update.
+   - Treat the report H1/title as part of that live template state, not as a
+     static skeleton placeholder. The hub should propose the task-specific title
+     from the requirement and evidence; the reducer accepts or improves it; the
+     accepted H1 is written back to the active template before the next hub or
+     worker prompt is built. If a later agent legitimately improves the title,
+     that title change must also update the active template so future assignments
+     see the same report identity.
+   - Workers receive only assigned section file(s), plus bounded local context.
+     They must return section-local findings/patches and must not emit a full
+     report.
+   - The reducer receives the full assembled artifact plus every edited section
+     file. It merges section-local edits, resolves overlap and consistency,
+     verifies hub assignment coverage, writes the accepted section files, and
+     deterministically reassembles `artifact.md` in section order.
+   - The next hub always receives the newly assembled whole artifact so it can
+     reason about the full picture before making the next split.
+   - Assignment coverage, publish checks, scoring, and export use the active
+     outline, not the original template, so intentional structure changes are not
+     treated as drift. Unexpected headings that are not present in the active
+     outline and were not accepted by the hub/reducer remain drift failures.
+   - Final readability/revision must run section-windowed and write back to
+     section files before reassembly; whole-document LLM output must not directly
+     replace `artifact.md`.
+
+Rationale for section files:
+
+- Section assignment alone does not prevent duplication when a later reducer,
+  single phase, readability pass, or publish revision can re-emit and overwrite a
+  whole document. Per-section files make duplicate worker-owned headings
+  structurally impossible while still allowing hub/reducer to add new sections.
+- This is more flexible than enforcing the original template at the end. The
+  initial template is guidance, not a hard schema: the hub/reducer may add,
+  rename, or reorder sections when the task requires it, but those changes become
+  explicit section-file and active-outline operations instead of accidental
+  full-document drift.
+- It matches the design-doc role split: hub is goal-aware and assigns; workers
+  edit bounded sections; reducer sees the full picture, consolidates edits, and
+  passes a whole assembled artifact to the next hub.
+
 Rationale:
 
 - Weak local models are useful when the task is decomposed into small typed transformations. They are unreliable when asked to handle long mixed-context prompts and emit full polished documents. The fix is architectural: constrain action count, constrain context, constrain output schema, assemble deterministically, and block bad final reports.
+- Section files are the preferred assembly architecture because they prevent accidental full-outline duplication without blocking legitimate hub/reducer section changes.
 
 ### 12. Generic Report Profiles
 
@@ -1928,27 +1981,174 @@ Rationale:
 
 Before starting implementation, create a small adapter checklist for the shared-library reuse requirements above. Each new Studio module should state which existing shared primitive it wraps or why no primitive applies.
 
-1. Generic `ResearchConfig`/report-profile routing so the generator is not hardcoded to technical or agent-framework reports.
-2. Weak-model profile, action caps, moving-window reducer inputs, and report-quality lints using the bad artifact as a regression fixture.
-3. Publish gate with hard-fail decisions so bad reports are marked not publish-ready.
-4. Evidence matrix data model and markdown rendering.
-5. Validation-first observations/checkpoints/stop report.
-6. Deterministic research report assembler and JSONL finding parser for weak-model mode.
-7. Catalog repository/normalizer for local + remote loops.
-8. Local research-report loop overlay for `/loops` and `/session/{id}/seed`.
-9. Catalog management read UI for loops/skills/sources.
-10. Loop CRUD/import/export and remote source refresh.
-11. Domain skill listing/registration for `research-report-agent`.
-12. Skill CRUD/import/export.
-13. 100-point scorecard projection.
-14. Full enhanced report bundle export.
-15. Run metrics and stop-condition dashboard.
-16. Human review decision/checklist.
-17. Expanded artifact lint for diagrams/tables/code.
-18. Source-type and corroboration refinements.
-19. Generic template presets and editorial cleanup gates.
+1. Section-file artifact ownership and active-outline persistence.
+2. Generic `ResearchConfig`/report-profile routing so the generator is not hardcoded to technical or agent-framework reports.
+3. Weak-model profile, action caps, moving-window reducer inputs, and report-quality lints using the bad artifact as a regression fixture.
+4. Publish gate with hard-fail decisions so bad reports are marked not publish-ready.
+5. Evidence matrix data model and markdown rendering.
+6. Validation-first observations/checkpoints/stop report.
+7. Deterministic research report assembler and JSONL finding parser for weak-model mode.
+8. Catalog repository/normalizer for local + remote loops.
+9. Local research-report loop overlay for `/loops` and `/session/{id}/seed`.
+10. Catalog management read UI for loops/skills/sources.
+11. Loop CRUD/import/export and remote source refresh.
+12. Domain skill listing/registration for `research-report-agent`.
+13. Skill CRUD/import/export.
+14. 100-point scorecard projection.
+15. Full enhanced report bundle export.
+16. Run metrics and stop-condition dashboard.
+17. Human review decision/checklist.
+18. Expanded artifact lint for diagrams/tables/code.
+19. Source-type and corroboration refinements.
+20. Generic template presets and editorial cleanup gates.
 
 This order first protects genericity, then blocks the current user-visible weak-model failure. Once profile routing exists and the pipeline can reject malformed reports while keeping weak models in small typed windows, evidence/export/catalog/UI work can build on a stable quality spine.
+
+## Build Start Plan: Section Files And Active Outline
+
+Goal: make section ownership a filesystem contract before adding broader catalog/export work.
+
+### Slice 1: Section Workspace Primitives
+
+Files:
+
+- Add `backend/studio/section_workspace.py`.
+- Test in `backend/tests/test_section_workspace.py`.
+
+Implement:
+
+1. `slugify_section(title) -> str`.
+2. `split_artifact_to_sections(text, initial_outline) -> (outline, files)` using existing `agentkit.artifacts.sections.split_sections`.
+3. `write_section_workspace(root, artifact_text, initial_outline)`:
+   - writes `sections/active_outline.json`;
+   - writes ordered section markdown files;
+   - keeps `artifact.md` as assembled output only.
+4. `assemble_artifact_from_sections(root) -> str`:
+   - reads `active_outline.json`;
+   - uses the active report title stored in outline/template metadata;
+   - concatenates section files in order;
+   - writes/returns `artifact.md`.
+
+Acceptance:
+
+- Splitting then assembling preserves one top-level outline and does not duplicate headings.
+- A new section title in the artifact is appended to `active_outline.json`.
+- A placeholder or generic H1 is replaced by a task-specific title derived from
+  the hub/reducer output or, as fallback, the requirement.
+- A specific accepted H1 is preserved and written back to active template state.
+- A section listed in the initial outline but not present in the artifact remains in `active_outline.json` with an empty placeholder file.
+- No LLM call is involved.
+
+### Slice 2: Runner Uses Section Files For Assignment Context
+
+Files:
+
+- Edit `backend/studio/runner.py`.
+- Extend existing runner tests; do not add UI yet.
+
+Implement:
+
+1. When `artifact.md` is bootstrapped or accepted, sync the section workspace.
+2. Build worker foci from `active_outline.json` and active title metadata
+   instead of scanning `artifact.md` plus static template.
+3. Worker prompts reference assigned section file paths and forbid full-document output.
+   - Maintain a section assignment queue derived from the active outline.
+   - Default runtime assignment is one queue item, one section file, per worker
+     call; keep spawning one-file worker foci until every active section file is
+     assigned.
+   - Persist queue rows with `agent_id`, `section`, `file`, and `status`.
+     Delete a row only after the worker call for that row completes.
+   - Persist the full worker assignment text in each queue row so an agent can
+     fetch one row and receive the complete scope, file target, guidance, and
+     weaknesses for that section.
+   - Use worker concurrency as the throttle. Do not let an agent-count cap
+     truncate the section queue and leave later files unfetched.
+   - This is safer than multi-section worker ownership for weak models because
+     it prevents an agent from merging several section updates into one file.
+   - Keep multi-section focus handling as a compatibility fallback only: if a
+     worker is ever assigned multiple sections, include every corresponding
+     section file, allow updates to all of them, and forbid combined-file output.
+4. Keep the current reducer as the merge mechanism, but make its target sections come from active outline.
+5. Include the current active H1 in hub/reducer/worker prompt context. It should
+   be editable only through accepted structural writeback, not through ad hoc
+   full-document replacement.
+
+Acceptance:
+
+- Existing section-assignment tests still pass.
+- A generated/new section updates active outline and is assigned in later phases.
+- Missing original outline sections still remain assignable until reducer/hub explicitly removes them.
+- Normal worker assignment produces one file target per worker focus until all
+  active section files are covered.
+- A section queue longer than the concurrent worker cap is not truncated; all
+  active section files still receive one-file worker foci.
+- Assignment queue rows remain queued until their worker calls complete; failed
+  dispatch must not delete unfinished rows.
+- Each persisted queue row contains the complete worker assignment text, and the
+  runtime worker focus is derived from that same row.
+- Multi-section fallback assignment includes multiple section files and the
+  worker contract allows edits to every assigned file while forbidding
+  combined-file output.
+- Hub/reducer title changes are visible in the next prompt and in the assembled
+  `artifact.md`.
+
+### Slice 3: Reducer Owns Section Merge And Reassembly
+
+Files:
+
+- Edit `backend/studio/findings.py`, `backend/studio/runner.py`, `backend/studio/section_workspace.py`.
+
+Implement:
+
+1. Reducer receives full assembled artifact plus assigned section files.
+2. Reducer applies accepted output through the section workspace first, then
+   reassembles `artifact.md`; direct artifact replacement is not the reducer
+   writeback path.
+3. Reducer may add a new section only by appending an explicit `##` heading
+   plus section content, which then becomes an active-outline entry and section
+   file during section-workspace assembly.
+4. After reducer merge, call `assemble_artifact_from_sections()`.
+5. Assemble merged reports strictly from `active_outline.json` order: existing
+   active-outline sections first, newly accepted sections appended in encounter
+   order. Reducer output order must not reshuffle the final report.
+6. Extract the accepted H1 during reducer writeback. Reject duplicate H1s,
+   preserve one task-specific report title, and write that title back to active
+   template metadata before reassembly.
+
+Acceptance:
+
+- Duplicate whole-document headings cannot be introduced by worker output.
+- Reducer can add content under an updated active-outline title.
+- A missing `PATCH_TARGET` that names a new `##` section creates that explicit
+  section instead of appending orphan content.
+- Reducer writeback creates/updates section files before `artifact.md` is served
+  to the next phase.
+- Merged `artifact.md` section order follows active outline order even when the
+  reducer output arrives out of order.
+- Merged `artifact.md` has exactly one task-specific H1. Extra H1s are demoted
+  or rejected by publish readiness, and generic placeholders such as
+  `Research Report` are not accepted as final titles.
+- Publish readiness uses active outline and fails if an active section is missing/placeholder.
+
+### Slice 4: E2E Drift Validation
+
+Run the same rubric-configured normal Gemma task used for the last comparisons.
+
+Compare against:
+
+- `s_e4df76cf9882`: duplicate long-sentence extras 32.
+- `s_40c4382877d0`: duplicate heading extras 43.
+- `s_5c9736ef5aa1`: 7 H2 sections because `References` heading was lost.
+
+Success requires:
+
+- no duplicate H2 headings;
+- exactly one task-specific H1, with the accepted H1 stored in active template
+  state for the next phase;
+- duplicate long-sentence extras remain lower than the failed baseline;
+- every active-outline section is present or publish gate fails;
+- no drift in `agent_io.jsonl` creation;
+- no production-code genericity audit issues.
 
 ## Concrete File Map
 

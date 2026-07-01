@@ -180,6 +180,14 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], emb
             "placeholder line for grounded prose).\n"
             "  - anchor MUST be text that already exists in the CURRENT ARTIFACT.\n"
             "  - content ADDS grounded prose and keeps every source URL.\n\n"
+            "PATCH CONTENT CONTRACT:\n"
+            "  - content is one short paragraph or sentence, not a markdown section.\n"
+            "  - content MUST include at least one http(s) source URL copied from a worker.\n"
+            "  - content MUST NOT contain '#', '##', a report title, a full document, "
+            "a template placeholder, or an empty-section marker.\n"
+            "  - If a worker did not provide a real URL for a claim, emit no patch for "
+            "that claim.\n"
+            "  - If you cannot satisfy this contract, output an empty JSON list: [].\n\n"
             "RULES — violating these REGRESSES the deliverable:\n"
             "  - Additive only: a patch may ADD substance, never delete or shorten "
             "existing sourced content.\n"
@@ -196,7 +204,9 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], emb
         )
         res = client.chat([{"role": "user", "content": prompt}])
         tokens = int(getattr(res, "total_tokens", 0) or 0)
-        llm_patches = _parse_patches_from_output(res.text or "")
+        llm_patches = _sanitize_llm_patches(
+            art_block, _parse_patches_from_output(res.text or "")
+        )
         # Deterministic floor: convert the workers' own RESEARCH_FINDING blocks to
         # additive patches. Guarantees grounded progress when the model emits no
         # usable PATCHES, and folds in any finding it skipped. The reduce_patches
@@ -212,20 +222,35 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], emb
             findings += _parse_findings(d)
         # F1: collapse near-duplicate findings (STRUM merge) BEFORE they become patches, so
         # the additive merge stops dumping ~26 repetitive citations as an unordered block.
-        from agentkit.artifacts.dedup import dedupe_findings
+        from agentkit.artifacts.dedup import consolidate_findings, dedupe_findings
+        from studio.task_runs import _normalize_url
         findings, n_dedup = dedupe_findings(findings, embedder)
+        # F6 (reducer-side dedup): against-doc — drop a finding whose URL is ALREADY cited
+        # in the artifact (re-citing the same source is the bulk of the quote-wall).
+        _cited = {_normalize_url(u) for u in _re.findall(r'https?://\S+', art_block)}
+        _n_doc = len(findings)
+        findings = [f for f in findings if _normalize_url(f.url) not in _cited]
+        n_doc_dup = _n_doc - len(findings)
+        # F6: same-URL merge + scaffolding strip + per-section density cap. Thins the wall
+        # at its source so _findings_to_patches emits ~1 woven sentence per real source.
+        findings, _cstats = consolidate_findings(findings, norm_url=_normalize_url)
         floor_patches = _findings_to_patches(findings)
         patches = llm_patches + floor_patches
         if not patches:
             _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
-                 f"llm={len(llm_patches)} floor=0 dedup={n_dedup} → NO PATCHES (no findings survived)")
+                 f"llm={len(llm_patches)} floor=0 dedup={n_dedup} doc_dup={n_doc_dup} "
+                 f"url_merged={_cstats['url_merged']} capped={_cstats['capped']} → NO PATCHES")
             return art_block, tokens  # nothing to add → unchanged (no truncation)
         # Resolve anchors before merging: a finding's PATCH_TARGET that is not a real
         # heading in the doc would otherwise become a '<!-- conflict -->' marker that
         # pollutes the artifact (the throughput fix surfaced 13 such markers in one
-        # phase). Demote any insert_after with a missing anchor to a clean append.
+        # phase). Demote deterministic finding patches with a missing anchor to a clean
+        # append. LLM patches were already validated above; if their anchor was missing,
+        # they were dropped instead of being allowed to invent document structure.
         for p in patches:
             if getattr(p, "op", "") == "insert_after" and p.anchor and p.anchor not in art_block:
+                if str(p.anchor).lstrip().startswith("##"):
+                    p.content = f"\n\n{str(p.anchor).strip()}{p.content}"
                 p.op, p.anchor = "append", None
         from agentkit.artifacts.patcher import reduce_patches
         rr = reduce_patches(art_block, [patches])
@@ -233,11 +258,64 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], emb
         merged = _apply_ranking(rr.text, findings)
         _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
              f"llm={len(llm_patches)} floor={len(floor_patches)} dedup={n_dedup} "
+             f"doc_dup={n_doc_dup} url_merged={_cstats['url_merged']} capped={_cstats['capped']} "
              f"applied_delta={len(rr.text) - len(art_block)} conflicts={len(rr.conflicts)} "
              f"ranked_delta={len(merged) - len(rr.text)}")
         return merged.strip(), tokens
 
     return reduce
+
+
+def _sanitize_llm_patches(artifact_text: str, patches: list) -> list:
+    """Keep only scoped, sourced reducer patches before structural merge.
+
+    The active failure mode is a weak reducer returning a whole document or skeleton
+    fragment inside a JSON patch. Waiting for writeback to reject it is too late:
+    the merge step may already stack duplicate sections. This validator enforces the
+    reducer contract mechanically and keeps the generic behavior topic-neutral.
+    """
+    from agentkit.artifacts.sections import split_sections
+    from studio.task_runs import _normalize_url
+
+    headings = set(_re.findall(r"(?m)^#{1,6}\s+.+$", artifact_text or ""))
+    section_urls = {
+        heading: {
+            _normalize_url(u.rstrip(".,);]"))
+            for u in _re.findall(r"https?://\S+", body)
+        }
+        for heading, body in split_sections(artifact_text or "")
+    }
+    seen_by_anchor: dict[str, set[str]] = {}
+    out: list = []
+    for p in patches or []:
+        op = getattr(p, "op", "")
+        anchor = getattr(p, "anchor", None)
+        content = getattr(p, "content", "") or ""
+        if op not in {"insert_after", "replace"}:
+            continue
+        if not anchor or anchor not in (artifact_text or ""):
+            continue
+        if op == "insert_after" and headings and anchor not in headings:
+            continue
+        if not content.strip() or len(content) > 2500:
+            continue
+        urls = {
+            _normalize_url(u.rstrip(".,);]"))
+            for u in _re.findall(r"https?://\S+", content)
+        }
+        if not urls:
+            continue
+        target_seen = set(section_urls.get(anchor, set())) | seen_by_anchor.setdefault(anchor, set())
+        if urls & target_seen:
+            continue
+        if _re.search(r"(?m)^#{1,6}\s+", content):
+            continue
+        if _re.search(r"(?i)_\((?:pending|to be completed)\s*[-—][^)]*\)_", content):
+            continue
+        p.content = "\n\n" + content.strip() + "\n"
+        out.append(p)
+        seen_by_anchor[anchor].update(urls)
+    return out
 
 
 def _parse_findings(text: str) -> list:

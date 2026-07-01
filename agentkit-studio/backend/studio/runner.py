@@ -29,7 +29,16 @@ from typing import Any, Callable
 
 from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
 from agentkit.planner.core import Plan, PlanStep, plan
-from agentkit.topology.core import MAP, MESH, PIPELINE, SINGLE, STAR
+from agentkit.topology.core import (
+    DURABLE_BOARD,
+    GATEWAY,
+    MAP,
+    MESH,
+    PIPELINE,
+    SINGLE,
+    STAR,
+    TREE,
+)
 from agentkit.topology.dynamic import assign_topologies, run_plan
 from agentkit.types import LLMClient
 
@@ -62,11 +71,19 @@ from studio.panels.router import build_router_event
 from studio.panels.security import run_gate_event
 from studio.panels.selfimprove import SelfImproveTracker
 from studio.panels.verify import build_verify_event
+from studio.client import MaxTokensClient
 from studio.model_profiles import resolve_model_profile
 from studio.session import RunSnapshot, Session
+from studio.section_workspace import (
+    active_outline_titles,
+    clear_completed_assignments,
+    section_file_map,
+    write_assignment_queue,
+    write_section_workspace,
+)
 from studio.shared_bridge import TokenAccounting, UsageReport
 from studio.tools import ToolAugmentedClient, web_toolkit_available
-from studio.workspace import Workspace
+from studio.workspace import Workspace, workspace_root
 
 # ---------------------------------------------------------------------------
 # Re-exports — stateless helpers extracted into focused modules (SRP).
@@ -104,6 +121,11 @@ from studio.planning import (  # noqa: E402,F401
     _plan_from_epics,
     _render_graph,
     _with_upstream,
+    build_section_assignment_rows,
+    build_section_assignment_queue,
+    build_section_worker_foci,
+    select_topologies_by_llm,
+    verify_assignment_coverage,
 )
 from studio.artifact_text import (  # noqa: E402,F401
     _detect_gaps,
@@ -111,14 +133,97 @@ from studio.artifact_text import (  # noqa: E402,F401
     _gap_sections,
     _merge_missing_sections,
     _repair_lints,
+    _refine_readability,
     _strip_preamble,
     _synthesize_analysis,
     _unresolved_block,
+    dedupe_sections,
+    normalize_artifact,
+    reconcile_outline,
+    resolve_report_title,
+    strip_satisfied_placeholders,
 )
 
 
 #: Emit sink: the runner calls this for every event; app.py wires it to a queue.
 Emit = Callable[[StudioEvent], None]
+
+
+def _section_title(section: str) -> str:
+    return _re.sub(r"^#{1,6}\s*", "", str(section or "")).strip()
+
+
+def _active_template(session: Session) -> list[str]:
+    rc = getattr(session, "rubric_config", None) or {}
+    return list(rc.get("active_template") or rc.get("template") or [])
+
+
+def _active_report_title(session: Session) -> str:
+    rc = getattr(session, "rubric_config", None) or {}
+    return str(rc.get("active_title") or rc.get("title") or "").strip()
+
+
+def _report_title_from_artifact(artifact_text: str) -> str:
+    import re as _re2
+    match = _re2.search(r"(?m)^#\s+(.+?)\s*$", artifact_text or "")
+    if not match:
+        return ""
+    title = match.group(1).strip()
+    return "" if title.lower() in {"research report", "technical report", "final report", "report", "deliverable"} else title
+
+
+def _update_active_template_from_artifact(session: Session, artifact_text: str) -> list[str]:
+    """Track accepted outline additions without treating missing headings as removals."""
+    rc = getattr(session, "rubric_config", None)
+    if rc is None:
+        return []
+    title = _report_title_from_artifact(artifact_text)
+    if title and "title" not in title.lower():
+        rc["active_title"] = title
+    outline = [str(s) for s in (rc.get("active_template") or rc.get("template") or [])]
+    seen = {_section_title(s).lower() for s in outline if str(s).strip()}
+    try:
+        from agentkit.artifacts.sections import split_sections
+        for heading, _body in split_sections(artifact_text or ""):
+            if not heading.lstrip().startswith("## "):
+                continue
+            title = _section_title(heading)
+            key = title.lower()
+            if title and key not in seen:
+                outline.append(title)
+                seen.add(key)
+    except Exception:  # noqa: BLE001 — outline tracking must never break generation
+        return outline
+    rc["active_template"] = outline
+    session.rubric_config = rc
+    return outline
+
+
+def _sync_section_workspace(session: Session, workspace_root_path: Path, artifact_text: str) -> None:
+    """Best-effort sync from assembled artifact to section files."""
+    try:
+        write_section_workspace(
+            Path(workspace_root_path) / session.session_id,
+            artifact_text,
+            _active_template(session),
+        )
+    except Exception:  # noqa: BLE001 — section files must not break the current artifact path
+        pass
+
+
+def _write_artifact_through_sections(
+    session: Session,
+    workspace_root_path: Path,
+    artifact_text: str,
+    requirement: str = "",
+) -> str:
+    """Write section files first, then assemble ``artifact.md``."""
+    root = Path(workspace_root_path) / session.session_id
+    artifact_text = resolve_report_title(
+        artifact_text, requirement, preferred_title=_active_report_title(session)
+    )
+    write_section_workspace(root, artifact_text, _active_template(session))
+    return (root / "artifact.md").read_text(encoding="utf-8")
 
 
 def _dbg(msg: str) -> None:
@@ -136,6 +241,15 @@ def _dbg(msg: str) -> None:
             fh.write(msg + "\n")
     except OSError:
         pass
+
+
+def _build_template_skeleton(sections: list[str] | tuple[str, ...]) -> str:
+    body = "".join(
+        f"## {str(section).strip().lstrip('#').strip()}\n_(pending - needs sourced content)_\n\n"
+        for section in sections
+        if str(section).strip()
+    )
+    return "# _(deliverable title - generated from the findings below)_\n\n" + body.rstrip() + "\n"
 
 
 class Runner:
@@ -358,12 +472,16 @@ class Runner:
         # force report headings onto non-research tasks and compromise generation.
         _plan_requirement = _base_requirement
         _rc = getattr(session, "rubric_config", None) or {}
-        _template = _rc.get("template")
+        _template = _rc.get("active_template") or _rc.get("template")
         if _template:
             _sections = "\n".join(f"- {s}" for s in _template)
+            _title = str(_rc.get("active_title") or "").strip()
+            _title_line = f"\nUse this current H1 report title unless you improve it: {_title}" if _title else ""
             _tpl_suffix = (
                 "\n\nStructure the deliverable with these sections (use them as "
-                "top-level headings, in order):\n" + _sections
+                "top-level headings, in order):"
+                + _title_line
+                + "\n" + _sections
             )
             requirement = requirement + _tpl_suffix
             _plan_requirement = _plan_requirement + _tpl_suffix
@@ -399,6 +517,13 @@ class Runner:
 
         # build the usage-capturing client (injected factory in tests)
         base_client = self._build_client()
+        _model_id = str(
+            (session.llm_info or {}).get("model")
+            or (session.llm_spec or {}).get("model")
+            or ""
+        )
+        _model_profile = resolve_model_profile(_model_id)
+        _planner_client = MaxTokensClient(base_client, _model_profile.planner_max_tokens)
         # Wrap in a web_search tool loop when tools are enabled (run_plan stays
         # unchanged — it sees a plain LLMClient that happens to run a tool loop).
         # When a prior artifact was seeded, also offer read_artifact/patch_artifact
@@ -430,7 +555,7 @@ class Runner:
         elif use_llm:
             # Planner runs on base_client (no tool loop — planning needs no web).
             plan_obj = _plan_from_epics(
-                _plan_requirement, base_client, weaknesses_block=_weaknesses_block
+                _plan_requirement, _planner_client, weaknesses_block=_weaknesses_block
             )
         else:
             plan_obj = plan(_plan_requirement)
@@ -471,27 +596,63 @@ class Runner:
 
         # assign topologies (auto; llm path only when mode=='llm' AND client given).
         # use_llm already computed above for the epic-planning branch.
-        plan_obj = assign_topologies(
-            plan_obj, mode="auto", client=client, llm=use_llm
-        )
-        # Hill-climb REQUIRES STAR on every phase (DESIGN §11.4): only STAR's
-        # reducer does the section-aware merge/refine/review of each worker's
-        # per-section output against that section's weakness list, producing the
-        # section-keyed {document, weaknesses} handoff that the next phase (and
-        # next epoch) accumulates. MESH/PIPELINE/SINGLE have no such reducer, so
-        # auto-derived topology would silently break the improvement loop. The
-        # breadth cap (run_plan max_agents) keeps the forced STAR from exploding.
-        if _hc_cfg.get("auto_improve"):
+        # E2/E1 (PLAN §4b §4c): derive each phase's topology AND keep the full
+        # TopologyChoice so we can log WHY it was chosen. In LLM mode the model
+        # chooses topology+rationale directly from the design principles; the
+        # deterministic classifier remains the non-LLM fallback.
+        from agentkit.topology.dynamic import assign_topologies_with_choices
+        _topology_client = MaxTokensClient(base_client, _model_profile.topology_max_tokens)
+        if use_llm:
+            plan_obj, _topo_choices = select_topologies_by_llm(plan_obj, _topology_client)
+        else:
+            plan_obj, _topo_choices = assign_topologies_with_choices(plan_obj)
+        _execution_topology = {
+            GATEWAY: SINGLE,
+            DURABLE_BOARD: SINGLE,
+            TREE: STAR,
+        }
+        _selector_runtime_map = {
+            s.id: s.topology
+            for s in plan_obj.steps
+            if s.topology and s.topology in _execution_topology
+        }
+        if _selector_runtime_map:
             plan_obj = replace(
                 plan_obj,
-                steps=tuple(replace(s, topology=STAR) for s in plan_obj.steps),
+                steps=tuple(
+                    replace(s, topology=_execution_topology[str(s.topology)])
+                    if s.id in _selector_runtime_map
+                    else s
+                    for s in plan_obj.steps
+                ),
             )
+        # E1 (PLAN §4b): the force-STAR override is DELETED. Every topology now satisfies the
+        # assemble+verify reducer contract — STAR/MAP/MESH fold worker drafts through the
+        # section reducer, and SINGLE (identity-fold) / PIPELINE (terminal-stage capture) route
+        # their single output through the SAME reducer (dynamic.py). So the section-aware
+        # additive merge runs under EVERY topology, and the already-computed, principled
+        # selection is honored under hill-climb instead of discarded. The injected reducer is
+        # additive-only (+ the accept_rewrite writeback guard), so a capture-only phase that
+        # folds nothing preserves the artifact — honoring selection never regresses it.
         topology_map = {s.id: (s.topology or SINGLE) for s in plan_obj.steps}
-        self._emit(
-            TopologyEvent(
-                steps=[{"id": sid, "topology": topo} for sid, topo in topology_map.items()]
-            )
-        )
+        # E2: surface the rationale per phase so every phase logs WHY its topology was chosen
+        # — auditable, not a silent verdict.
+        _topo_steps: list[dict[str, Any]] = []
+        for sid, topo in topology_map.items():
+            _ch = _topo_choices.get(sid)
+            _entry: dict[str, Any] = {"id": sid, "topology": topo}
+            if _ch is not None:
+                _entry["questions_fired"] = list(_ch.questions_fired)
+            if sid in _selector_runtime_map:
+                _entry["rationale"] = (
+                    f"selector proposed state/routing topology "
+                    f"{_selector_runtime_map[sid]} → execute as {topo}. "
+                    f"{_ch.rationale if _ch else ''}".strip()
+                )
+            elif _ch is not None:
+                _entry["rationale"] = _ch.rationale
+            _topo_steps.append(_entry)
+        self._emit(TopologyEvent(steps=_topo_steps))
 
         # derived render graph
         self._emit(_render_graph(plan_obj))
@@ -525,18 +686,20 @@ class Runner:
         outputs: dict[str, str] = {}
         _reducer_gaps: list[str] = []   # §11.4 last-phase gaps → next-run weaknesses
 
-        # §14.1: create == improve. When improving but NO prior doc exists yet,
-        # bootstrap a skeleton (headings + placeholders from the goal, no search) so
-        # the phase loop fills it ADDITIVELY — the same pipeline as improving an
-        # existing doc, instead of asking one LLM to author the whole report.
-        if (_hc_cfg.get("auto_improve") and not _artifact_copied
-                and _eff_ws2 is not None and use_llm):
-            _skel = _build_skeleton(plan_obj.task or requirement, base_client,
-                                    embedder=self._embedder)
-            if _skel:
+        _tmpl_sections = _active_template(session)
+        # §14.1: create == improve. When no prior doc exists yet but the session
+        # declares a deliverable section template, bootstrap a generic skeleton so
+        # the phase loop fills it additively through the same section reducer used
+        # for seeded improvement runs.
+        if not _artifact_copied and use_llm and _tmpl_sections:
+            _eff_ws2 = _eff_ws2 or self._workspace_root or workspace_root()
+            if _eff_ws2 is not None:
+                _skel = _build_template_skeleton(_tmpl_sections)
                 _skel_file = _eff_ws2 / session.session_id / "artifact.md"
                 _skel_file.parent.mkdir(parents=True, exist_ok=True)
                 _skel_file.write_text(_skel)
+                _update_active_template_from_artifact(session, _skel)
+                _sync_section_workspace(session, _eff_ws2, _skel)
                 _artifact_copied = True       # additive pipeline now has a base
                 _seed_len = len(_skel)        # may grow from here, never shrink below
 
@@ -550,16 +713,21 @@ class Runner:
         # (sections_present) avoids re-adding a renamed-but-present section. Covers
         # both paths — on cold start the skeleton already has every section, so the
         # missing set is empty and this is a no-op. Only when a template is configured.
-        _tmpl_sections = (getattr(session, "rubric_config", None) or {}).get("template")
         if _artifact_copied and _tmpl_sections and _eff_ws2 is not None:
             _art_f = _eff_ws2 / session.session_id / "artifact.md"
             try:
                 _cur = _art_f.read_text()
-                _merged = _merge_missing_sections(_cur, _tmpl_sections)
+                # N1: first RECONCILE any doubled outline a prior epoch left (drop empty
+                # template duplicates whose concept is already populated), THEN add only the
+                # genuinely-missing template sections. Order matters — reconcile before merge.
+                _recon = reconcile_outline(_cur, _tmpl_sections)
+                _merged = _merge_missing_sections(_recon, _tmpl_sections)
                 if _merged != _cur:
                     _art_f.write_text(_merged)
+                    _update_active_template_from_artifact(session, _merged)
+                    _sync_section_workspace(session, _eff_ws2, _merged)
                     _seed_len = len(_merged)
-                    _dbg("seeded missing template section(s)")
+                    _dbg(f"reconciled+seeded template sections ({len(_cur)}→{len(_merged)})")
             except Exception:  # noqa: BLE001 — structure-merge is best-effort
                 pass
         #: Gate outcomes collected across phases — the Loop Doctor's safe_actions
@@ -908,7 +1076,14 @@ class Runner:
             # without the original goal, and for PIPELINE stages (previously STAR)
             # where the hub description never contained the full task text.
             topo = step.topology or SINGLE
-            if plan_obj.task and plan_obj.task not in desc:
+            # PLAN P2 (goal-blind workers): a reducer-backed fan-out phase runs goal-BLIND
+            # executor spokes — the executor prompt below carries the bounded ASSIGNMENT
+            # (this phase's description) + weaknesses, NOT the global goal. So the global
+            # TASK is NOT prepended for them (goal-knowledge follows the role: hub/reducer
+            # stay goal-aware, workers do not). Goal-aware / non-executor phases (terse
+            # downstream SINGLE/PIPELINE, or runs without loop_config) still get the task.
+            _worker_phase = (_lc is not None and topo in (STAR, MAP, MESH))
+            if plan_obj.task and plan_obj.task not in desc and not _worker_phase:
                 desc = f"TASK: {plan_obj.task}\n\n{desc}"
             # On the final step, if there is upstream content, prefix with an
             # explicit instruction to output the artifact rather than asking for
@@ -948,40 +1123,26 @@ class Runner:
                             )
                     except Exception:  # noqa: BLE001 — repair clause is best-effort
                         pass
-                    _art_ctx = (
-                        f"CURRENT ARTIFACT (from prior run — base to improve):\n"
-                        f"--- BEGIN ARTIFACT ---\n{_seed_text}\n--- END ARTIFACT ---\n\n"
-                        if _seed_text else ""
-                    )
+                    # G2 (PLAN §4/§4d): DETERMINISTIC SECTION ASSEMBLY — the reducer does NOT
+                    # LLM-merge the whole document. The old prompt injected the full seed
+                    # (`_art_ctx`) and demanded "output the CURRENT ARTIFACT with additions,
+                    # length >= input" — a whole-doc ECHO that a model truncates on a large doc
+                    # (verified 68 KB → 36 KB). Removed. Assembly is now mechanical: workers
+                    # emit RESEARCH_FINDING blocks → the section reducer / post-loop
+                    # `reduce_patches` fold them into the on-disk artifact section by section,
+                    # in document order. The LLM never re-emits the document, so truncation is
+                    # impossible. (`_seed_text` stays only for the seed-lint repair clause.)
                     desc = (
-                        f"You are the reducer in a multi-worker research pipeline.\n"
-                        f"You are an ADDITIVE MERGER, never a rewriter (DESIGN §11.3).\n\n"
-                        f"Workers searched the web and produced RESEARCH_FINDING blocks above "
-                        f"(each has ARTICLE_TITLE / URL / POPULARITY / PATCH_TARGET fields).\n\n"
-                        f"ABSOLUTE RULES — violating these REGRESSES the deliverable:\n"
-                        f"  - PRESERVE every existing section of the CURRENT ARTIFACT VERBATIM.\n"
-                        f"    Do NOT summarize, shorten, condense, re-word, or remove anything.\n"
-                        f"  - You may ONLY ADD content that comes from a worker's RESEARCH_FINDING\n"
-                        f"    (with its URL). No finding for a section → leave that section exactly\n"
-                        f"    as-is.\n"
-                        f"  - CITE ONLY a URL that appears verbatim in a worker RESEARCH_FINDING\n"
-                        f"    above. NEVER invent, guess, or alter a URL. If a claim has no such\n"
-                        f"    URL, state it WITHOUT a citation — a fabricated link is worse than\n"
-                        f"    none (it is detected and penalised).\n"
-                        f"{_repair_clause}"
-                        f"  - If workers found NOTHING (no RESEARCH_FINDING blocks above) AND there\n"
-                        f"    is no repair exception above, output the CURRENT ARTIFACT completely\n"
-                        f"    unchanged. Never write a 'blocker' or 'search unavailable' report —\n"
-                        f"    that is failure-narration, not content.\n\n"
-                        f"How to apply each RESEARCH_FINDING:\n"
-                        f"  1. Find PATCH_TARGET in the artifact.\n"
-                        f"  2. URL missing inline → add it next to the citation.\n"
-                        f"  3. POPULARITY missing → add it in parentheses.\n"
-                        f"  4. New article → add a summary paragraph + a References entry with the URL.\n\n"
-                        f"Output: the CURRENT ARTIFACT with additions applied — every original\n"
-                        f"section intact, output length STRICTLY >= the input length (a shorter\n"
-                        f"output is rejected and the prior good doc is kept).\n\n"
-                        f"{_art_ctx}"
+                        f"You are a research EXECUTOR improving an existing deliverable.\n"
+                        f"The current artifact lives on disk; a DETERMINISTIC reducer assembles it\n"
+                        f"from your findings — you NEVER re-emit or echo the whole document (echoing\n"
+                        f"a long document truncates it and REGRESSES the deliverable).\n\n"
+                        f"Emit ONLY RESEARCH_FINDING blocks for the gaps/weaknesses in your\n"
+                        f"assignment — each with a real URL you actually fetched, an exact\n"
+                        f"PATCH_TARGET section heading, and a verbatim QUOTE. Found nothing for a\n"
+                        f"gap → emit nothing for it (no narration, no 'search unavailable').\n"
+                        f"CITE ONLY a URL you fetched; never invent or alter one.\n"
+                        f"{_repair_clause}\n"
                         f"Workflow instruction: {desc}"
                     )
                 else:
@@ -1000,12 +1161,14 @@ class Runner:
 
             # M9: inject hub CoT prompt when loop_config active and phase fans out.
             # The step description becomes the hub's system prompt inside run_plan.
-            # STAR/MAP ONLY — by design: these are the section-partition fan-outs
-            # the hub plans an ASSIGNED block for. MESH (debate) and PIPELINE
-            # (ordered stages) have no section partition, so they skip the hub
-            # CoT (no sizing/assignment features). Their breadth is still bounded
-            # — run_plan's max_agents caps _facets/PIPELINE stages regardless.
-            if _lc is not None and topo in (STAR, MAP):
+            # Reducer-backed fan-outs (STAR/MAP/MESH) — these now ALL route their worker
+            # drafts through the section-aware reducer (§4b), so every spoke gets the
+            # research-EXECUTOR framing and emits RESEARCH_FINDING blocks the reducer folds
+            # in. PIPELINE (ordered stages) has no fan-in reducer and is coerced→STAR under
+            # hill-climb, so it never reaches here. Breadth stays bounded by run_plan's
+            # max_agents (caps _facets regardless of topology). Same condition as the
+            # P2 TASK-injection gate above — reuse the one named flag so they can't drift.
+            if _lc is not None and _worker_phase:
                 _hub_art_text = ""
                 if _eff_ws2 is not None:
                     _hub_art_file = _eff_ws2 / session.session_id / "artifact.md"
@@ -1046,6 +1209,54 @@ class Runner:
                 _max_workers = compute_n_agents(_n_remaining, _sizing_cfg)
                 _max_agents = _sizing_cfg.max_agents
 
+            if _lc is not None and _worker_phase:
+                _sections_for_workers: list[str] = []
+                _section_files_for_workers: dict[str, str] = {}
+                _assignment_root: Path | None = (
+                    (_eff_ws2 or self._workspace_root or workspace_root()) / session.session_id
+                )
+                if _eff_ws2 is not None:
+                    _session_root = _eff_ws2 / session.session_id
+                    _sections_for_workers = active_outline_titles(_session_root)
+                    _section_files_for_workers = section_file_map(_session_root)
+                    _hub_art_file = _session_root / "artifact.md"
+                    if not _sections_for_workers and _hub_art_file.exists():
+                        try:
+                            from agentkit.artifacts.sections import split_sections
+                            _sections_for_workers = [
+                                h for h, _b in split_sections(_hub_art_file.read_text())
+                                if h.lstrip().startswith("## ")
+                            ]
+                        except OSError:
+                            _sections_for_workers = []
+                _tmpl_for_workers = _active_template(session)
+                if _tmpl_for_workers:
+                    from studio.rubric import _content_tokens
+                    _seen_section_tokens = [
+                        _content_tokens(s) for s in _sections_for_workers
+                    ]
+                    for _tmpl_section in _tmpl_for_workers:
+                        _want = _content_tokens(str(_tmpl_section))
+                        if not any(_want and _want & _seen for _seen in _seen_section_tokens):
+                            _sections_for_workers.append(str(_tmpl_section))
+                # Section-file assignment is a queue: one worker call fetches one
+                # section file. The queue length controls total foci so active
+                # files are not silently dropped by the max_agents breadth cap;
+                # _max_workers remains the concurrency throttle.
+                _queue_rows = build_section_assignment_rows(
+                    _sections_for_workers,
+                    getattr(session, "weaknesses", []) or [],
+                    section_files=_section_files_for_workers,
+                    agent_slots=_max_workers,
+                )
+                if _assignment_root is not None:
+                    write_assignment_queue(_assignment_root, _queue_rows)
+                _worker_foci = tuple(row["assignment"] for row in _queue_rows)
+                if _worker_foci:
+                    _max_agents = max(_max_agents or 0, len(_worker_foci))
+                    sub_step = replace(sub_step, worker_foci=_worker_foci)
+                    sub_plan = replace(sub_plan, steps=(sub_step,))
+
             # Collision guard (DESIGN §3.1): mark this phase in-flight before it
             # runs so remaining() excludes it; mark_done() clears it after. Keeps
             # the same task from appearing as "remaining" while it is executing.
@@ -1062,7 +1273,7 @@ class Runner:
                     _cur_art = _strip_preamble(
                         (_eff_ws2 / session.session_id / "artifact.md").read_text()
                     )
-                except OSError:
+                except Exception:  # noqa: BLE001 — section writeback must not crash the run
                     pass
                 _reducer = _make_section_reducer(
                     client, _cur_art, getattr(session, "weaknesses", []) or [],
@@ -1083,6 +1294,10 @@ class Runner:
                 break
 
             sr = result.runs[0]
+            if _lc is not None and _worker_phase and "_assignment_root" in locals():
+                _worker_done = max(0, len(sr.agent_io) - 1)
+                if _assignment_root is not None and _worker_done:
+                    clear_completed_assignments(_assignment_root, _worker_done)
             outputs[step.id] = sr.output
             final_output = sr.output
 
@@ -1104,6 +1319,17 @@ class Runner:
             # agent, and deterministically reassign (first-claim-wins). Surface
             # the result as a gate check so violations are visible, not silent.
             _assigned = _parse_assigned(sr.output)
+            # G3/G4 wiring: the goal-blind executor path emits no ASSIGNED block, so without a
+            # hub the reduce-time coverage check (verify_assignment_coverage) would never run.
+            # When no LLM assignment arrived, synthesize a DETERMINISTIC hub assignment from the
+            # rubric template — the agreed deliverable spec IS the assignment: every required
+            # section is an assigned improve/create job. The reducer then verifies each was
+            # actually delivered (present + populated); an unmet one becomes a next-epoch
+            # weakness (a missing section = an unmet "create" job, closing the G4 loop).
+            if not _assigned:
+                _tmpl_cov = _active_template(session)
+                if _tmpl_cov:
+                    _assigned = {"deliverable": list(_tmpl_cov)}
             if _assigned:
                 _clean, _overlaps = _dedupe_assignment(_assigned)
                 if _overlaps:
@@ -1139,6 +1365,7 @@ class Runner:
             # across phases AND epochs, never regresses (a thin/failed reduce keeps
             # the prior good doc).
             _clean_out = _strip_preamble(sr.output)  # never persist reducer commentary
+            _candidate_out = strip_satisfied_placeholders(normalize_artifact(_clean_out))
             # F2: per-section ratchet. The old whole-doc grow-only rule (len >= _seed_len)
             # rejected ANY shrink, blocking dedup/replace/repair. accept_rewrite allows a
             # rewrite (even shorter) as long as no section that had CONTENT is deleted or
@@ -1148,21 +1375,76 @@ class Runner:
             if _art_path is not None:
                 try:
                     _old_art = _art_path.read_text()
-                except OSError:
+                except Exception:  # noqa: BLE001 — format hygiene must not crash the run
                     pass
             from agentkit.artifacts.sections import accept_rewrite
             if (_artifact_copied and _art_path is not None
-                    and len(_clean_out.strip()) > 0
-                    and accept_rewrite(_old_art, _clean_out)):
+                    and len(_candidate_out.strip()) > 0
+                    and accept_rewrite(_old_art, _candidate_out)):
                 try:
-                    _art_path.write_text(_clean_out)
-                    _dbg(f"writeback ACCEPT step={step.id} {len(_old_art)}→{len(_clean_out)}")
-                    _seed_len = len(_clean_out)   # track current length for the next phase
+                    _candidate_out = _write_artifact_through_sections(
+                        session, _eff_ws2, _candidate_out, requirement
+                    )
+                    _update_active_template_from_artifact(session, _candidate_out)
+                    _dbg(f"writeback ACCEPT step={step.id} {len(_old_art)}→{len(_candidate_out)}")
+                    _seed_len = len(_candidate_out)   # track current length for the next phase
                 except OSError:
                     pass
             elif _artifact_copied and _art_path is not None:
-                _dbg(f"writeback REJECT step={step.id} clean_len={len(_clean_out)} "
+                _dbg(f"writeback REJECT step={step.id} clean_len={len(_candidate_out)} "
                      f"(accept_rewrite: a sourced section was deleted/gutted)")
+
+            # Per-phase format hygiene (PLAN N1 + glued-heading 'wrong format' fix): normalize
+            # the PERSISTED artifact in place after each writeback — un-glue mid-line headings
+            # (## A### B → two blocks) and collapse duplicate sections (richest body kept) — so
+            # the INTERMEDIATE artifact stays well-formed, not only the final one. Independent of
+            # accept_rewrite: it ONLY cleans, never grows, so the next phase reads a clean base.
+            # No-op on an already-clean document.
+            if _art_path is not None:
+                try:
+                    _cur_norm = _art_path.read_text()
+                    _normed = strip_satisfied_placeholders(normalize_artifact(_cur_norm))
+                    if _normed != _cur_norm:
+                        _normed = _write_artifact_through_sections(
+                            session, _eff_ws2, _normed, requirement
+                        )
+                        _update_active_template_from_artifact(session, _normed)
+                        _seed_len = len(_normed)
+                        _dbg(f"normalize step={step.id} {len(_cur_norm)}→{len(_normed)}")
+                except OSError:
+                    pass
+
+            # G3 (PLAN §4 P1): reduce-time assignment verification. The hub assigned bounded
+            # jobs BY SECTION (_assigned); after the reducer assembled, deterministically
+            # check each assigned section is present + populated in the artifact. An unmet
+            # assignment (absent / still placeholder) becomes a next-epoch weakness — closing
+            # the hub-assigns → reducer-verifies loop — and is surfaced as a gate check.
+            if _assigned and _art_path is not None:
+                _doc_after = ""
+                try:
+                    _doc_after = _art_path.read_text()
+                except OSError:
+                    pass
+                _unmet = verify_assignment_coverage(_assigned, _doc_after)
+                if _unmet:
+                    _reducer_gaps.extend(_unmet)
+                    _ag = GateEvent(
+                        name="assignment-coverage",
+                        outcome="warn",
+                        detail=(
+                            f"{len(_unmet)} assigned section(s) not addressed this phase: "
+                            f"{', '.join(u.split(']')[0].lstrip('[') for u in _unmet[:6])}"
+                            f"{'…' if len(_unmet) > 6 else ''}. Carried to next epoch as weaknesses."
+                        ),
+                    )
+                else:
+                    _ag = GateEvent(
+                        name="assignment-coverage",
+                        outcome="pass",
+                        detail="Every hub-assigned section is present and populated.",
+                    )
+                gate_events.append(_ag)
+                self._emit(_ag)
 
             # Reconcile tokens run_plan counted that on_usage did not capture.
             # A StudioChatClient fires on_usage per call (with the in/out split);
@@ -1191,19 +1473,77 @@ class Runner:
             # fastest way to SEE goal/intent stacking, an upstream fold, a recalled
             # refusal, or a worker that dumped raw findings instead of patching. Lives
             # next to artifact.md in the workspace. Best-effort; never breaks the run.
-            if _eff_ws2 is not None:
+            _io_ws_root = _eff_ws2 or self._workspace_root or workspace_root()
+            if _io_ws_root is not None:
                 try:
                     import json as _json
-                    _io_path = _eff_ws2 / session.session_id / "agent_io.jsonl"
-                    with _io_path.open("a", encoding="utf-8") as _iof:
-                        _iof.write(_json.dumps({
-                            "step": step.id,
-                            "topology": topo,
-                            "input": desc,
-                            "output": sr.output,
-                            "n_agents": sr.n_agents,
+                    # §4c: the structured I/O log IS the role contract made observable.
+                    # Artifacts live on disk; records carry only PATHS + small structured
+                    # fields (the old record INLINED the full prompt + output → a 144 KB
+                    # record on a 68 KB doc). Bodies → io/<step>.{in,out}.md. We emit the
+                    # PLAN §4c per-ROLE schemas at step granularity: a goal-aware HUB record
+                    # (assignments by section), a goal-blind AGENT record (executor artifacts),
+                    # and a goal-aware REDUCER record (handoff). The reducer's run-level
+                    # new_weaknesses/score are filled in the run-summary record at run end
+                    # (scoring happens once post-loop). True PER-SPOKE agent records need
+                    # run_plan to surface per-agent I/O — sequenced with the fan-out work.
+                    _io_dir = _io_ws_root / session.session_id / "io"
+                    _io_dir.mkdir(parents=True, exist_ok=True)
+                    _in_p = _io_dir / f"{step.id}.in.md"
+                    _out_p = _io_dir / f"{step.id}.out.md"
+                    _in_p.write_text(sub_step.description, encoding="utf-8")
+                    _out_p.write_text(sr.output, encoding="utf-8")
+                    _recs: list[dict[str, Any]] = []
+                    # HUB — goal-aware planner: section assignments (when the hub emitted them).
+                    if _assigned:
+                        _recs.append({
+                            "role": "hub", "step": step.id, "topology": topo,
+                            "input": {"requirement": (plan_obj.task or "")[:200],
+                                      "target_doc": str(_art_path)},
+                            "output": {"assignments": [
+                                {"agent_id": _ag, "job": {"sections": _secs}}
+                                for _ag, _secs in _assigned.items()
+                            ]},
                             "tokens": sr.tokens,
-                        }) + "\n")
+                        })
+                    # AGENT — goal-blind executor: TRUE PER-SPOKE records from the
+                    # StepRun.agent_io trail run_plan now surfaces (§4c per-agent records).
+                    # Each spoke's prompt+output go to disk; the record carries paths +
+                    # agent_id (the unit the reducer verifies). Falls back to one phase-level
+                    # record when no per-spoke trail exists (CLI / no fan-out).
+                    _spoke_io = getattr(sr, "agent_io", ()) or ()
+                    if _spoke_io:
+                        for _si, _rio in enumerate(_spoke_io):
+                            _sp_in = _io_dir / f"{step.id}.spoke{_si}.in.md"
+                            _sp_out = _io_dir / f"{step.id}.spoke{_si}.out.md"
+                            _sp_in.write_text(str(_rio.get("prompt", "")), encoding="utf-8")
+                            _sp_out.write_text(str(_rio.get("output", "")), encoding="utf-8")
+                            _recs.append({
+                                "role": _rio.get("role", "agent"), "step": step.id,
+                                "topology": topo, "agent_id": f"{step.id}:spoke{_si}",
+                                "input": {"requirement": str(_sp_in), "target_doc": str(_art_path)},
+                                "output": {"artifacts": [str(_sp_out)]},
+                                "tokens": int(_rio.get("tokens", 0) or 0),
+                            })
+                    else:
+                        _recs.append({
+                            "role": "agent", "step": step.id, "topology": topo,
+                            "input": {"requirement": str(_in_p), "target_doc": str(_art_path)},
+                            "output": {"artifacts": [str(_out_p)]},
+                            "n_agents": sr.n_agents, "tokens": sr.tokens,
+                        })
+                    # REDUCER — goal-aware consolidator: the handoff artifact (run-level
+                    # new_weaknesses/score arrive in the run-summary record at run end).
+                    _recs.append({
+                        "role": "reducer", "step": step.id, "topology": topo,
+                        "output": {"new_weaknesses": [], "score": None,
+                                   "handoff_artifacts": [str(_art_path)]},
+                        "tokens": sr.tokens,
+                    })
+                    _io_path = _io_ws_root / session.session_id / "agent_io.jsonl"
+                    with _io_path.open("a", encoding="utf-8") as _iof:
+                        for _r in _recs:
+                            _iof.write(_json.dumps(_r) + "\n")
                 except Exception:  # noqa: BLE001 — diagnostics must never break the run
                     pass
 
@@ -1254,13 +1594,15 @@ class Runner:
                 from agentkit.artifacts.patcher import reduce_patches, write_artifact
                 _art_file = _eff_ws2 / session.session_id / "artifact.md"
                 _cur_text = _art_file.read_text() if _art_file.exists() else ""
-                # Phase 2 (DESIGN §2.2 Step 5): a full-document editorial refine pass
-                # over the structurally-merged text. Only with a real LLM (mode=='llm');
-                # offline/canned backends would corrupt the artifact, so refine is None.
-                # The closure guards output length so a short/confused response cannot
-                # clobber a clean merge (mirrors the >5000-char guard above).
+                # Phase 2 (DESIGN §2.2 Step 5): an editorial refine pass over the merged text.
+                # G2/§4d: this is a whole-doc ECHO (the model is fed the merged doc and asked
+                # to re-emit it), which TRUNCATES a large document — banned at scale. So it is
+                # gated to SMALL docs only (<= _G2_REFINE_MAX); a large doc keeps the
+                # deterministic structural merge, and the SEPARATE windowed _synthesize_analysis
+                # pass (run post-loop) adds cross-section analysis without echoing the whole doc.
+                _G2_REFINE_MAX = 8_000
                 _refine_fn = None
-                if use_llm:
+                if use_llm and len(_cur_text) <= _G2_REFINE_MAX:
                     _refine_goal = plan_obj.task or requirement
                     _refine_path = str(_art_file)
 
@@ -1369,6 +1711,27 @@ class Runner:
                         _scored_text = _file_text
             except Exception:  # noqa: BLE001 - a read failure must not break recording
                 pass
+            # N1 / anti-accumulation (verified live): collapse DUPLICATE section headings in the
+            # FINAL artifact before it is scored, served, and carried forward as the next seed.
+            # A gemma spoke that echoes the whole document, stacked by the grow-only writeback,
+            # repeats every template section 8-10×; dedupe keeps the richest body per heading.
+            # Done here (the finalization boundary, no accept_rewrite guard) so a clean,
+            # single-outline document is what the user sees AND what the next epoch seeds from —
+            # the lineage cannot re-inherit the bloat. No-op on an already-clean document.
+            try:
+                _deduped = normalize_artifact(_scored_text or "")
+                if _deduped != _scored_text:
+                    _scored_text = _deduped
+                    result_output = normalize_artifact(result_output or "")
+                    if _art_file.exists():
+                        _scored_text = _write_artifact_through_sections(
+                            session, _effective_ws_root, _scored_text, _original_requirement
+                        )
+                        result_output = _scored_text
+                        _update_active_template_from_artifact(session, _scored_text)
+                    _dbg(f"normalize_artifact: un-glued + deduped → {len(_scored_text)} chars")
+            except Exception:  # noqa: BLE001 — dedupe is best-effort; never break recording
+                pass
             # Scoring and weakness mining must use the RAW client (base_client), not the
             # ToolAugmentedClient. When the scorer has web_search available, it calls it
             # to verify citations — fabricated or paywalled articles score 0.0 even when
@@ -1389,14 +1752,19 @@ class Runner:
                         )
             except Exception:  # noqa: BLE001
                 pass
-            # PLAN item 1A: synthesis/analysis pass. The additive reducer cannot rewrite
-            # (anti-regression §14.6), so its output is grounded-but-pasted. This adds an
-            # analysis layer (interpretation + cross-source comparison) without dropping any
-            # citation. Runs once per pass on the raw judge client (no tools/fetch), only on
-            # a substantial, citation-bearing research doc; rejected if it loses a URL.
-            if use_llm and _scored_text and len(_scored_text) > 800 and "http" in _scored_text:
+            # FINAL instructor-tone readability refine (user request) — supersedes the plain
+            # analysis pass (PLAN item 1A): its directive already weaves in analysis + reflection,
+            # AND rewrites the report into clear teaching prose that explains complex theory in
+            # plain language, every citation intact. §4d-windowed (per-section), on the raw judge
+            # client (no tools/fetch); each section rejected if it drops a URL or shrinks. Runs
+            # only on the FINAL epoch — it is the polish step — to bound the per-section LLM cost.
+            _is_last_epoch = (self._epoch == 0) or (
+                self._epoch >= int(_hc_cfg.get("max_epochs", 5) or 5)
+            )
+            if (use_llm and _is_last_epoch and _scored_text
+                    and len(_scored_text) > 800 and "http" in _scored_text):
                 try:
-                    _syn, _changed = _synthesize_analysis(
+                    _syn, _changed = _refine_readability(
                         _scored_text, base_client, _original_requirement
                     )
                     if _changed:
@@ -1440,7 +1808,11 @@ class Runner:
                         result_output = _rep
                         try:
                             if _art_file.exists():
-                                _art_file.write_text(_scored_text)
+                                _scored_text = _write_artifact_through_sections(
+                                    session, _effective_ws_root, _scored_text, _original_requirement
+                                )
+                                result_output = _scored_text
+                                _update_active_template_from_artifact(session, _scored_text)
                         except Exception:  # noqa: BLE001 — write-back is best-effort
                             pass
                 except Exception as _rexc:  # noqa: BLE001 — repair must never break recording
@@ -1456,7 +1828,11 @@ class Runner:
                     result_output = neutralize_unverified_urls(result_output, _verified_urls)
                     try:
                         if _art_file.exists():
-                            _art_file.write_text(_scored_text)
+                            _scored_text = _write_artifact_through_sections(
+                                session, _effective_ws_root, _scored_text, _original_requirement
+                            )
+                            result_output = _scored_text
+                            _update_active_template_from_artifact(session, _scored_text)
                     except Exception:  # noqa: BLE001 — write-back is best-effort
                         pass
             except Exception:  # noqa: BLE001
@@ -1507,7 +1883,7 @@ class Runner:
             # weakness for a section the concept-aware FULL-TEXT check confirms is present, so
             # a complete report is not penalised for a blind spot. Only when a rubric template
             # is configured (else there is no authoritative section list).
-            _tmpl = (getattr(session, "rubric_config", None) or {}).get("template")
+            _tmpl = _active_template(session)
             if _tmpl and _weaknesses:
                 from studio.rubric import sections_present
                 _present = {s.lower() for s in sections_present(_scored_text, _tmpl)}
@@ -1519,77 +1895,14 @@ class Runner:
                             and any(_s in _w.lower() for _s in _present)
                         )
                     ]
-            # Deterministic report publish gate: catches outputs that are structurally clean
-            # but fail the user's report contract (for example no citations or topic drift).
-            # It does not replace LLM planning; it only surfaces a final readiness verdict and
-            # feeds failures into the existing weakness/adjusted-score path.
-            try:
-                from studio.report_quality import (
-                    build_publish_revision_prompt,
-                    build_revision_evidence_text,
-                    evaluate_publish_readiness,
-                )
-                _publish = evaluate_publish_readiness(
-                    _original_requirement,
-                    _scored_text or result_output or "",
-                    verified_urls=_verified_urls or None,
-                )
-                if use_llm and _publish.issues:
-                    _evidence_text = build_revision_evidence_text(outputs)
-                    if _evidence_text:
-                        _rev_prompt = build_publish_revision_prompt(
-                            _original_requirement,
-                            _scored_text or result_output or "",
-                            _publish.issues,
-                            _evidence_text,
-                        )
-                        _rev = base_client.chat([{"role": "user", "content": _rev_prompt}])
-                        _rev_text = _strip_preamble(getattr(_rev, "text", "") or "").strip()
-                        if _rev_text:
-                            _rev_verified = _verified_urls
-                            try:
-                                import json as _json3
-                                import os as _os3
-                                from studio.task_runs import verified_urls_in_cache as _vuc3
-                                if _os3.path.exists(".web_cache.json"):
-                                    with open(".web_cache.json") as _cf3:
-                                        _rev_verified = _vuc3(_json3.load(_cf3), _rev_text)
-                            except Exception:  # noqa: BLE001
-                                pass
-                            _rev_publish = evaluate_publish_readiness(
-                                _original_requirement,
-                                _rev_text,
-                                verified_urls=_rev_verified or None,
-                            )
-                            _rg = GateEvent(
-                                name="publish-revision",
-                                outcome=_rev_publish.outcome,
-                                detail=_rev_publish.detail,
-                                sandboxed=True,
-                            )
-                            self._emit(_rg)
-                            if _rev_publish.publish_ready:
-                                _scored_text = _rev_text
-                                result_output = _rev_text
-                                _verified_urls = _rev_verified
-                                _publish = _rev_publish
-                                try:
-                                    if _art_file.exists():
-                                        _art_file.write_text(_scored_text)
-                                except Exception:  # noqa: BLE001
-                                    pass
-                _pg = GateEvent(
-                    name="publish-ready",
-                    outcome=_publish.outcome,
-                    detail=_publish.detail,
-                    sandboxed=True,
-                )
-                self._emit(_pg)
-                if _publish.issues:
-                    _seen_w = set(_weaknesses)
-                    _weaknesses = [w for w in _publish.issues if w not in _seen_w] + _weaknesses
-            except Exception:  # noqa: BLE001 — publish gate must never break recording
-                pass
+            # PLAN N2/N3: refute miner hallucinations of MISSING/TRUNCATED content that is
+            # actually PRESENT (example code, conclusion, summary, clean section ends) —
+            # deterministic, template-independent, so it also fires when no rubric template
+            # is configured. A phantom weakness otherwise depresses adjusted_score and seeds
+            # a fix for nothing.
+            if _weaknesses:
+                from studio.task_runs import refute_false_weaknesses
+                _weaknesses = refute_false_weaknesses(_weaknesses, _scored_text or "")
             # Semantic dedup: the moving-window miner can surface the SAME issue under two
             # section prefixes (e.g. the popularity-ranking gap as both [## Source Selection]
             # and [## Key Findings]). Exact-string dedup misses these re-phrasings, so they
@@ -1639,11 +1952,14 @@ class Runner:
                     _prefer = make_rubric_preference(
                         _verified_urls or None,
                         weights=_rc.get("weights"),
-                        required_sections=_rc.get("template"),
+                        required_sections=_active_template(session),
                     )
                 try:
                     if not accept_epoch(_scored_text, _seed_text, _prefer):
-                        _art_file.write_text(_seed_text)   # revert carry-forward seed
+                        _seed_text = _write_artifact_through_sections(
+                            session, _effective_ws_root, _seed_text, _original_requirement
+                        )
+                        _update_active_template_from_artifact(session, _seed_text)
                         result_output = _seed_text
                         _scored_text = _seed_text
                         _dbg("epoch gate: reverted to prior (new not preferred)")
@@ -1651,6 +1967,123 @@ class Runner:
                         _dbg("epoch gate: kept new epoch (preferred over prior)")
                 except Exception:  # noqa: BLE001 — gate must never crash the run
                     pass
+            # POST-GATE FINALIZATION (fixes the reported served-broken-mermaid + quote-wall):
+            # the normalize / repair / readability passes above run BEFORE the keep-discard gate,
+            # so a REVERT to the raw seed THROWS THEM AWAY and serves an unrepaired, unrefined
+            # document. Re-apply them to whatever the gate kept, so the SERVED + RECORDED artifact
+            # is ALWAYS normalized (no dup/glued headings), mermaid-repaired, and — on the final
+            # epoch — rewritten into instructor-readable prose. normalize/repair are idempotent;
+            # readability is bounded by its URL + min_ratio guards (never drops a citation).
+            try:
+                _fin = normalize_artifact(_scored_text or "")
+                _fin, _ = _repair_lints(_fin, base_client, _original_requirement)
+                # §5.4b: the GROUNDED FULL (normalized + repaired, pre-readability) is the
+                # archive — preserve it to result.md before readability shrinks it. artifact.md
+                # then holds the readable+deduped version, which is the SEED for the next turn
+                # and the scored artifact (any cleanup must land on the seed or it is wasted).
+                _grounded_full = _fin
+                if (use_llm and _is_last_epoch and _fin
+                        and len(_fin) > 800 and "http" in _fin):
+                    _rr, _rc = _refine_readability(_fin, base_client, _original_requirement)
+                    if _rc:
+                        _fin = strip_satisfied_placeholders(normalize_artifact(_rr))
+                if _art_file.exists() and _grounded_full and _grounded_full != _fin:
+                    (_art_file.parent / "result.md").write_text(_grounded_full)
+                    _dbg(f"archived grounded-full → result.md ({len(_grounded_full)} chars)")
+                if _fin and _fin != (_scored_text or ""):
+                    _scored_text = _fin
+                    result_output = _fin
+                    if _art_file.exists():
+                        _fin = _write_artifact_through_sections(
+                            session, _effective_ws_root, _fin, _original_requirement
+                        )
+                        _update_active_template_from_artifact(session, _fin)
+                        _scored_text = _fin
+                        result_output = _fin
+                    _dbg(f"post-gate finalize → {len(_fin)} chars")
+            except Exception:  # noqa: BLE001 — finalization must never crash recording
+                pass
+            # Deterministic report publish gate: catches outputs that are structurally clean
+            # but fail the user's report contract (for example no citations or topic drift).
+            # It does not replace LLM planning; it only surfaces a final readiness verdict and
+            # feeds failures into the existing weakness/adjusted-score path.
+            try:
+                from studio.report_quality import (
+                    build_publish_revision_prompt,
+                    build_revision_evidence_text,
+                    evaluate_publish_readiness,
+                )
+                _publish = evaluate_publish_readiness(
+                    _original_requirement,
+                    _scored_text or result_output or "",
+                    verified_urls=_verified_urls or None,
+                    required_sections=_active_template(session),
+                )
+                if use_llm and _publish.issues:
+                    _evidence_text = build_revision_evidence_text(outputs)
+                    if _evidence_text:
+                        _rev_prompt = build_publish_revision_prompt(
+                            _original_requirement,
+                            _scored_text or result_output or "",
+                            _publish.issues,
+                            _evidence_text,
+                        )
+                        _rev = base_client.chat([{"role": "user", "content": _rev_prompt}])
+                        _rev_text = strip_satisfied_placeholders(
+                            normalize_artifact(
+                                _strip_preamble(getattr(_rev, "text", "") or "").strip()
+                            )
+                        )
+                        if _rev_text:
+                            _rev_verified = _verified_urls
+                            try:
+                                import json as _json3
+                                import os as _os3
+                                from studio.task_runs import verified_urls_in_cache as _vuc3
+                                if _os3.path.exists(".web_cache.json"):
+                                    with open(".web_cache.json") as _cf3:
+                                        _rev_verified = _vuc3(_json3.load(_cf3), _rev_text)
+                            except Exception:  # noqa: BLE001
+                                pass
+                            _rev_publish = evaluate_publish_readiness(
+                                _original_requirement,
+                                _rev_text,
+                                verified_urls=_rev_verified or None,
+                                required_sections=_active_template(session),
+                            )
+                            _rg = GateEvent(
+                                name="publish-revision",
+                                outcome=_rev_publish.outcome,
+                                detail=_rev_publish.detail,
+                                sandboxed=True,
+                            )
+                            self._emit(_rg)
+                            if _rev_publish.publish_ready:
+                                _scored_text = _rev_text
+                                result_output = _rev_text
+                                _verified_urls = _rev_verified
+                                _publish = _rev_publish
+                                try:
+                                    if _art_file.exists():
+                                        _scored_text = _write_artifact_through_sections(
+                                            session, _effective_ws_root, _scored_text, _original_requirement
+                                        )
+                                        result_output = _scored_text
+                                        _update_active_template_from_artifact(session, _scored_text)
+                                except Exception:  # noqa: BLE001
+                                    pass
+                _pg = GateEvent(
+                    name="publish-ready",
+                    outcome=_publish.outcome,
+                    detail=_publish.detail,
+                    sandboxed=True,
+                )
+                self._emit(_pg)
+                if _publish.issues:
+                    _seen_w = set(_weaknesses)
+                    _weaknesses = [w for w in _publish.issues if w not in _seen_w] + _weaknesses
+            except Exception:  # noqa: BLE001 — publish gate must never break recording
+                pass
             # Recorded score = deterministic RUBRIC over the FINAL (post-gate) artifact —
             # the metric that actually tracks quality (DESIGN §14.2). Computed from the clean
             # _scored_text BEFORE the weakness annotation is appended, so the score is not
@@ -1661,7 +2094,7 @@ class Runner:
                 _scored_text or result_output or "",
                 verified_urls=_verified_urls or None,
                 weights=_rcfg.get("weights"),
-                required_sections=_rcfg.get("template"),
+                required_sections=_active_template(session),
             )
             # §14.7: the structural rubric measures QUANTITY (sections, URLs, words) and
             # saturates at 1.0 while real defects remain — it scored 1.0 on a report with a
@@ -1690,6 +2123,23 @@ class Runner:
                     config=_hc_cfg or {},
                 )
             )
+            # §4c: run-level REDUCER summary record — the goal-aware consolidator's final
+            # output (mined new_weaknesses + recorded score + the handoff artifact path).
+            # The per-phase reducer records carry the handoff; scoring/mining happen once
+            # post-loop, so this is where new_weaknesses/score land.
+            try:
+                import json as _json4c
+                _io4c = _effective_ws_root / session.session_id / "agent_io.jsonl"
+                if _io4c.parent.exists():
+                    with _io4c.open("a", encoding="utf-8") as _f4c:
+                        _f4c.write(_json4c.dumps({
+                            "role": "reducer", "step": "run-summary",
+                            "output": {"new_weaknesses": _weaknesses, "score": _score,
+                                       "handoff_artifacts": [_art_path]},
+                            "tokens": 0,
+                        }) + "\n")
+            except Exception:  # noqa: BLE001 — diagnostics must never break recording
+                pass
             # Template reuse: save a decent report's heading SKELETON so the next
             # semantically-similar research can seed its first document from it (best-effort;
             # dedups identical skeletons; needs an embedder to be searchable).

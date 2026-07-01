@@ -118,11 +118,39 @@ def _missing_terms(requirement: str, text: str) -> list[str]:
     return []
 
 
+def _duplicate_headings(text: str) -> list[str]:
+    seen: dict[str, str] = {}
+    duplicates: list[str] = []
+    for heading in re.findall(r"(?m)^##\s+(.+)$", text or ""):
+        key = re.sub(r"\s+", " ", heading).strip().lower()
+        if key in seen and seen[key] not in duplicates:
+            duplicates.append(seen[key])
+        else:
+            seen[key] = heading.strip()
+    return duplicates
+
+
+def _extra_report_titles(text: str) -> list[str]:
+    titles = [h.strip() for h in re.findall(r"(?m)^#\s+(.+)$", text or "")]
+    return titles[1:]
+
+
+def _unresolved_report_title(text: str) -> bool:
+    first = re.search(r"(?m)^#\s+(.+)$", text or "")
+    if not first:
+        return False
+    title = re.sub(r"[_()\-—]+", " ", first.group(1)).strip().lower()
+    if title in {"research report", "technical report", "final report", "report", "deliverable"}:
+        return True
+    return "title" in title and ("generated" in title or "report" in title or "deliverable" in title)
+
+
 def evaluate_publish_readiness(
     requirement: str,
     text: str,
     *,
     verified_urls: list[str] | None = None,
+    required_sections: list[str] | tuple[str, ...] | None = None,
 ) -> PublishGateResult:
     """Return deterministic publish readiness for report-like outputs.
 
@@ -147,6 +175,33 @@ def evaluate_publish_readiness(
     words = re.findall(r"\w+", body)
     if len(words) < 120:
         issues.append("[publish-gate] Final output is too short to be a complete research report.")
+
+    if re.search(r"(?i)_\((?:pending|to be completed)\s*[-—][^)]*\)_", body):
+        issues.append("[publish-gate] Final output still contains unfinished section placeholders.")
+
+    if _unresolved_report_title(body):
+        issues.append("[publish-gate] Final output still contains an unresolved placeholder report title.")
+
+    if required_sections:
+        from studio.rubric import sections_present
+        present = {s.lower() for s in sections_present(body, required_sections)}
+        missing = [s for s in required_sections if str(s).lower() not in present]
+        if missing:
+            shown = ", ".join(str(s) for s in missing[:5])
+            suffix = "..." if len(missing) > 5 else ""
+            issues.append(f"[publish-gate] Final output misses active outline sections: {shown}{suffix}.")
+
+    duplicate_headings = _duplicate_headings(body)
+    if duplicate_headings:
+        shown = ", ".join(duplicate_headings[:5])
+        suffix = "..." if len(duplicate_headings) > 5 else ""
+        issues.append(f"[publish-gate] Final output repeats section headings: {shown}{suffix}.")
+
+    extra_titles = _extra_report_titles(body)
+    if extra_titles:
+        shown = ", ".join(extra_titles[:5])
+        suffix = "..." if len(extra_titles) > 5 else ""
+        issues.append(f"[publish-gate] Final output contains extra report titles: {shown}{suffix}.")
 
     missing = _missing_terms(requirement, body)
     if missing:

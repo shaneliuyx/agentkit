@@ -64,6 +64,129 @@ preserving governance and rollback paths.
     assert result.publish_ready is True
 
 
+def test_duplicate_report_sections_fail_publish_gate() -> None:
+    requirement = "Write a research report about catalog management. Use citations."
+    text = """
+## Executive Summary
+
+Catalog management needs citations and governance (https://example.com/a).
+
+## Key Findings
+
+The catalog needs versioning, validation, and audit trails (https://example.com/a).
+
+## Executive Summary
+
+This duplicate section indicates the report outline drifted during generation.
+"""
+
+    result = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/a"],
+    )
+
+    assert result.publish_ready is False
+    assert any("repeats section headings" in issue for issue in result.issues)
+
+
+def test_extra_report_titles_fail_publish_gate() -> None:
+    requirement = "Write a research report about catalog management. Use citations."
+    text = """
+# Catalog Management Report
+
+## Executive Summary
+
+Catalog management needs citations and governance (https://example.com/a).
+
+## References
+
+- https://example.com/a
+
+# Duplicate Model Title
+"""
+
+    result = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/a"],
+    )
+
+    assert result.publish_ready is False
+    assert any("extra report titles" in issue for issue in result.issues)
+
+
+def test_placeholder_report_title_fails_publish_gate() -> None:
+    requirement = "Write a research report about catalog management. Use citations."
+    text = """
+# _(report title - generated from the findings below)_
+
+## Executive Summary
+
+Catalog management needs citations and governance (https://example.com/a).
+
+## References
+
+- https://example.com/a
+"""
+
+    result = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/a"],
+    )
+
+    assert result.publish_ready is False
+    assert any("placeholder report title" in issue for issue in result.issues)
+
+
+def test_generic_report_title_fails_publish_gate() -> None:
+    requirement = "Write a research report about catalog management. Use citations."
+    text = """
+# Research Report
+
+## Executive Summary
+
+Catalog management needs citations and governance (https://example.com/a).
+
+## References
+
+- https://example.com/a
+"""
+
+    result = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/a"],
+    )
+
+    assert result.publish_ready is False
+    assert any("placeholder report title" in issue for issue in result.issues)
+
+
+def test_missing_active_outline_section_fails_publish_gate() -> None:
+    requirement = "Write a research report about catalog management. Use citations."
+    text = """
+## Executive Summary
+
+Catalog management needs citations and governance (https://example.com/a).
+
+## Key Findings
+
+The catalog needs versioning, validation, and audit trails (https://example.com/a).
+"""
+
+    result = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/a"],
+        required_sections=["Executive Summary", "Key Findings", "References"],
+    )
+
+    assert result.publish_ready is False
+    assert any("misses active outline sections: References" in issue for issue in result.issues)
+
+
 def test_publish_revision_prompt_is_generic_and_evidence_bounded() -> None:
     prompt = build_publish_revision_prompt(
         "Write a research report about battery recycling policy. Use fetched evidence.",
