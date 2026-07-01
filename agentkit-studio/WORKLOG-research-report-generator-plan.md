@@ -613,6 +613,15 @@ Objective: implement the research report generator improvement plan and validate
    - Validation:
      - `pytest backend/tests/test_client_max_tokens.py backend/tests/test_model_profiles.py backend/tests/test_runner.py::test_gemma_planning_and_topology_selection_are_capped -q` → 5 passed.
      - `python -m py_compile backend/studio/client.py backend/studio/model_profiles.py backend/tests/test_client_max_tokens.py backend/tests/test_model_profiles.py` → passed.
+113. Added and committed evaluator cleanup helpers:
+   - Commit message: `Add evaluator cleanup helpers`.
+   - Added `mask_fenced_code()` so markdown heading scans ignore `#` lines inside fenced code.
+   - Added deterministic false-weakness refutation for mined absence/truncation claims when the document demonstrably contains the claimed missing/complete section.
+   - Added shared `consolidate_findings()` to merge same-URL findings, strip repetitive scaffold prefixes, and cap findings per target section.
+   - This closes another clean-checkout dependency because committed runner/findings/tests already call these helpers.
+   - Validation:
+     - `pytest backend/tests/test_section_ownership.py::test_n4_mask_hides_incode_hash_lines backend/tests/test_section_ownership.py::test_n4_sections_present_ignores_incode_heading backend/tests/test_section_ownership.py::test_n4_detect_gaps_skips_code_comments backend/tests/test_section_ownership.py::test_n2_n3_refutes_false_claims_keeps_real_ones backend/tests/test_section_ownership.py::test_n3_section_ends_cleanly backend/tests/test_section_ownership.py::test_consolidate_findings_same_url_merge_keeps_richest backend/tests/test_section_ownership.py::test_consolidate_findings_density_cap_per_target backend/tests/test_rubric.py -q` → 13 passed.
+     - `python -m py_compile backend/studio/rubric.py backend/studio/task_runs.py ../agentkit/artifacts/dedup.py` → passed.
 
 ## Current Next Steps
 

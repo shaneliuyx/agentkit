@@ -32,6 +32,30 @@ _URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
 _HEADING_RE = re.compile(r"(?m)^#{1,4}\s+\S")
 _HEADING_TEXT_RE = re.compile(r"(?m)^#{1,4}\s+(.+)$")
 _BLOCKQUOTE_RE = re.compile(r"(?m)^\s*>\s+\S")
+_FENCE_RE = re.compile(r"^\s*```")
+
+
+def mask_fenced_code(text: str) -> str:
+    """Blank out fenced code regions, preserving line count (PLAN N4).
+
+    Heading scans (``^#{1,6}``) otherwise count a python comment like
+    ``# --- MOCK ---`` inside a ```` ```python ```` block as an H1, polluting the
+    structure signal, ``sections_present``, and gap detection. Replacing each
+    fenced line (fences included) with an empty line keeps every real heading's
+    line position intact while hiding in-code ``#`` lines. An unterminated fence
+    masks to end-of-text (a truncated block has no real headings anyway).
+    """
+    if "```" not in (text or ""):
+        return text or ""
+    out: list[str] = []
+    in_fence = False
+    for ln in (text or "").split("\n"):
+        if _FENCE_RE.match(ln):
+            in_fence = not in_fence
+            out.append("")          # the fence line itself is not a heading
+            continue
+        out.append("" if in_fence else ln)
+    return "\n".join(out)
 
 #: Stopwords dropped when reducing a section name / heading to its content tokens, so
 #: "Evidence and Analysis" → {evidence, analysi}. Keeps the head nouns that carry meaning.
@@ -107,7 +131,11 @@ def score_breakdown(
     summary+conclusion+heading-density.
     """
     t = text or ""
-    tl = t.lower()
+    # N4: hide fenced-code regions from every heading/structure scan so an in-code
+    # `# comment` is not mistaken for a markdown heading. Body-text checks (URLs,
+    # quotes, words, analysis markers) still run over the raw text.
+    tm = mask_fenced_code(t)
+    tml = tm.lower()
     urls = list(dict.fromkeys(_URL_RE.findall(t)))           # distinct, order-preserving
     n_urls = len(urls)
     verified = set(verified_urls or [])
@@ -116,10 +144,10 @@ def score_breakdown(
     else:                                                     # heuristic fallback
         n_verified = min(n_urls, len(re.findall(r"(?i)verif|fetched", t)))
 
-    headings = _HEADING_RE.findall(t)
-    has_summary = bool(re.search(r"(?i)executive summary|abstract", t))
-    has_conclusion = bool(re.search(r"(?im)^#+\s*conclusion", t))
-    has_method = bool(re.search(r"(?i)methodolog|scope|limitation", t))
+    headings = _HEADING_RE.findall(tm)
+    has_summary = bool(re.search(r"(?i)executive summary|abstract", tm))
+    has_conclusion = bool(re.search(r"(?im)^#+\s*conclusion", tm))
+    has_method = bool(re.search(r"(?i)methodolog|scope|limitation", tm))
     quotes = len(_BLOCKQUOTE_RE.findall(t)) + t.count('"') // 2
     words = len(t.split())
     n_analysis = len(_ANALYSIS_MARKERS.findall(t))
@@ -135,7 +163,7 @@ def score_breakdown(
         for _h in _HEADING_TEXT_RE.findall(t):
             heading_toks |= _content_tokens(_h)
         structure = sum(
-            1 for s in req if s.lower() in tl or (_content_tokens(s) & heading_toks)
+            1 for s in req if s.lower() in tml or (_content_tokens(s) & heading_toks)
         ) / len(req)
     else:
         structure = (
@@ -166,9 +194,10 @@ def sections_present(text: str, required_sections: Iterable[str] | None) -> list
     req = [s.strip() for s in (required_sections or []) if s and s.strip()]
     if not req:
         return []
-    tl = (text or "").lower()
+    tm = mask_fenced_code(text or "")           # N4: ignore in-code `#` lines
+    tl = tm.lower()
     heading_toks: set[str] = set()
-    for _h in _HEADING_TEXT_RE.findall(text or ""):
+    for _h in _HEADING_TEXT_RE.findall(tm):
         heading_toks |= _content_tokens(_h)
     return [s for s in req if s.lower() in tl or (_content_tokens(s) & heading_toks)]
 
@@ -263,13 +292,6 @@ DEFAULT_WEIGHTS = dict(_WEIGHTS)
 # Mirrors standard research/technical-report structure (exec summary → background →
 # findings → analysis → methodology → limitations → conclusion → references) and covers
 # every rubric criterion (summary, findings, evidence, sourcing, methodology, conclusion).
-DEFAULT_TEMPLATE = [
-    "Executive Summary",
-    "Background and Scope",
-    "Key Findings",
-    "Evidence and Analysis",
-    "Methodology",
-    "Limitations and Open Questions",
-    "Conclusion and Recommendations",
-    "Source References",
-]
+from studio.report_profiles import GENERIC_RESEARCH_PROFILE
+
+DEFAULT_TEMPLATE = list(GENERIC_RESEARCH_PROFILE.sections)

@@ -157,6 +157,88 @@ def _is_non_weakness(w: str) -> bool:
     return bool(_NON_WEAKNESS_RE.search(s))
 
 
+#: A weakness clause asserting something is ABSENT (vs. merely thin). Used to refute a
+#: "missing X" claim deterministically when the doc demonstrably HAS X (PLAN N2).
+_ABSENCE_RE = re.compile(
+    r"(?i)\b(no|missing|lacks?|lacking|absent|without|omits?|omitted|"
+    r"does not (?:include|have|contain)|doesn'?t (?:include|have|contain)|"
+    r"fails to (?:include|provide))\b"
+)
+#: A weakness clause asserting the text is cut off (PLAN N3 — per-section truncation).
+_TRUNCATION_RE = re.compile(
+    r"(?i)(truncat|cut[- ]?off|cut off|incomplete|ends? abruptly|mid[- ]?sentence|"
+    r"mid[- ]?word|unfinished|trails? off)"
+)
+
+
+def _section_ends_cleanly(
+    doc: str, section_name: str, sections: list | None = None
+) -> bool | None:
+    """Does the named section end at a clean boundary? (PLAN N3.)
+
+    Returns True/False when the section is found, ``None`` when it is not (caller then
+    cannot refute a truncation claim against it). Concept-matched to the doc's headings so
+    a slightly-renamed section still resolves. ``sections`` (pre-split ``[(heading, body)]``
+    over the masked doc) may be passed to avoid re-masking/splitting per call."""
+    from studio.rubric import _content_tokens, mask_fenced_code
+    want = _content_tokens(section_name)
+    if not want:
+        return None
+    if sections is None:
+        from agentkit.artifacts.sections import split_sections
+        sections = split_sections(mask_fenced_code(doc or ""))
+    for heading, body in sections:
+        if section_name.lower() in heading.lower() or (want & _content_tokens(heading)):
+            return _ends_cleanly(f"{heading}\n{body}")
+    return None
+
+
+def refute_false_weaknesses(weaknesses: list[str], doc: str) -> list[str]:
+    """Drop mined weaknesses that claim content is MISSING or TRUNCATED when the artifact
+    demonstrably has it (PLAN N2/N3 — eval reliability).
+
+    The miner re-hallucinates "lack of example code", "no conclusion / ends abruptly",
+    "Executive Summary truncated" on reports that actually contain a code block, a clean
+    Conclusion, and a complete summary. These phantoms depress ``adjusted_score`` and seed
+    phantom fixes. Each claim is checked against a DETERMINISTIC fact about the doc; only a
+    claim the fact CONTRADICTS is dropped — an unrefuted weakness always survives.
+    """
+    if not weaknesses or not (doc or "").strip():
+        return weaknesses
+    from agentkit.artifacts.sections import split_sections
+    from studio.rubric import mask_fenced_code
+    masked = mask_fenced_code(doc)
+    _sections = split_sections(masked)   # split once; reused by every N3 truncation refute
+    # A non-mermaid fenced block in the RAW doc = the report contains example code.
+    has_code = bool(re.search(r"(?m)^\s*```(?!mermaid)\s*\w", doc))
+    has_conclusion = bool(re.search(r"(?im)^#+\s*.*conclusion", masked))
+    has_summary = bool(re.search(r"(?i)executive summary|abstract", masked))
+    doc_clean = _ends_cleanly(doc)
+    kept: list[str] = []
+    for w in weaknesses:
+        body = _norm_weakness(w)            # strip the [## Section] tag, lowercase
+        # N2: an ABSENCE claim ("no/missing X") refuted when the doc demonstrably has X.
+        if _ABSENCE_RE.search(body):
+            if re.search(r"(?i)\b(example )?code|snippet|sample\b", body) and has_code:
+                continue
+            if "conclusion" in body and has_conclusion:
+                continue
+            if re.search(r"(?i)summary|abstract", body) and has_summary:
+                continue
+        # N3: a truncation claim — refute against the named section (if tagged) else the
+        # whole document.
+        if _TRUNCATION_RE.search(body):
+            sec_m = re.match(r"\s*\[([^\]]+)\]", w)
+            if sec_m and sec_m.group(1) not in ("document", ""):
+                sec_clean = _section_ends_cleanly(doc, sec_m.group(1), _sections)
+                if sec_clean is True:
+                    continue
+            elif doc_clean:
+                continue
+        kept.append(w)
+    return kept
+
+
 # Loop-closure check (DESIGN §11.4): a weakness re-recorded in this many DISTINCT
 # prior runs of the same task was injected and never fixed — stop re-injecting it
 # so a persistently-unfixable lesson (data doesn't exist, infra 503) cannot crowd
