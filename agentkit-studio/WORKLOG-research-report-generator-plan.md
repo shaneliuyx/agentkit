@@ -595,12 +595,22 @@ Objective: implement the research report generator improvement plan and validate
    - Commit message: `Stabilize report section ownership`.
    - Included files: `AGENTS.md`, plan/worklog, `artifact_text.py`, `findings.py`, `planning.py`, `report_quality.py`, `runner.py`, new `section_workspace.py`, and focused section/title/report-quality tests.
    - Left unrelated pre-existing dirty files unstaged, including frontend graph/config edits, shared `agentkit` edits, deleted design/handoff docs, and model/profile/task-run changes outside this slice.
+111. Added and committed profile-based report templates:
+   - Commit message: `Add profile-based report templates`.
+   - Added `deep_technical` as a generic profile preset using the enhanced report structure while removing the domain-specific `agent_system_technical` preset before commit.
+   - `/rubric/defaults` now returns built-in template presets, and `/session/{id}/rubric` can select a preset by `report_type` unless an explicit template is provided.
+   - The rubric UI exposes a native select for report profile templates and copies the selected preset sections into the editable template list.
+   - Added focused backend tests in `test_report_profiles.py` and `test_rubric_profile_api.py`.
+   - Validation:
+     - `pytest backend/tests/test_report_profiles.py backend/tests/test_rubric_profile_api.py -q` → 9 passed.
+     - `python -m py_compile backend/studio/report_profiles.py backend/studio/app.py backend/tests/test_rubric_profile_api.py` → passed.
+     - `npm run build` in `frontend/` → passed.
 
 ## Current Next Steps
 
 1. Inspect the remaining dirty files before any future commit; do not stage them blindly.
 2. Backend is currently responding on port `8770`; use real app endpoints such as `/backends` because `/` and `/health` are not defined.
-3. Next implementation slice can build on the now-committed section/title workspace and should continue to compare every completed E2E against previous runs.
+3. Next implementation slice can build on the committed section/title workspace and profile-template selector. Continue to compare every completed E2E against previous runs.
 
 ## Notes For Resume
 

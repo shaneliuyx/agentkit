@@ -12,6 +12,7 @@ from agentkit.topology.core import SINGLE
 ReportType = Literal[
     "general",
     "technical",
+    "deep_technical",
     "market",
     "policy",
     "academic",
@@ -62,6 +63,34 @@ TECHNICAL_REPORT_PROFILE = ReportProfile(
         "Limitations and Open Questions",
         "Reflection and Lessons Learned",
         "Appendix: Code, Diagrams, Glossary, References",
+    ),
+    code_default=True,
+    diagrams_default=True,
+)
+
+DEEP_TECHNICAL_REPORT_PROFILE = ReportProfile(
+    report_type="deep_technical",
+    title="Deep Technical Research Report",
+    sections=(
+        "Executive Summary",
+        "Background and Context",
+        "Research Questions",
+        "Methodology",
+        "Current State / Landscape",
+        "Architecture / Conceptual Model",
+        "Deep Analysis",
+        "Practical Implementation",
+        "Case Study or Scenario Walkthrough",
+        "Quality, Evaluation, and Governance",
+        "Reflection and Lessons Learned",
+        "Risks, Limitations, and Open Questions",
+        "Recommendations and Roadmap",
+        "Conclusion",
+        "Appendix A. Glossary",
+        "Appendix B. Evidence Matrix",
+        "Appendix C. Full Source List",
+        "Appendix D. Code Listings",
+        "Appendix E. Quality Scorecard",
     ),
     code_default=True,
     diagrams_default=True,
@@ -158,6 +187,7 @@ REPORT_PROFILES: dict[str, ReportProfile] = {
     for p in (
         GENERIC_RESEARCH_PROFILE,
         TECHNICAL_REPORT_PROFILE,
+        DEEP_TECHNICAL_REPORT_PROFILE,
         MARKET_RESEARCH_PROFILE,
         POLICY_RESEARCH_PROFILE,
         LITERATURE_REVIEW_PROFILE,
@@ -166,6 +196,21 @@ REPORT_PROFILES: dict[str, ReportProfile] = {
         ACADEMIC_PROFILE,
     )
 }
+
+
+def profile_template_presets() -> list[dict[str, object]]:
+    """Return built-in report profile presets for API/UI consumers."""
+    return [
+        {
+            "report_type": profile.report_type,
+            "title": profile.title,
+            "sections": list(profile.sections),
+            "code_default": profile.code_default,
+            "diagrams_default": profile.diagrams_default,
+            "tables_default": profile.tables_default,
+        }
+        for profile in REPORT_PROFILES.values()
+    ]
 
 
 def resolve_report_profile(report_type: str | None) -> ReportProfile:

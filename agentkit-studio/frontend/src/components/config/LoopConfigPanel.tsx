@@ -16,6 +16,12 @@ interface LoopConfigPanelProps {
   currentTask?: string;
 }
 
+interface TemplatePreset {
+  report_type: string;
+  title: string;
+  sections: string[];
+}
+
 type Tab = "goal" | "scheduler" | "chain" | "hill_climb" | "rubric";
 
 const TAB_IDS: Tab[] = ["goal", "scheduler", "chain", "hill_climb", "rubric"];
@@ -141,6 +147,8 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   // ── Rubric state (criterion weights + deliverable template) ──────────────
   const [rubricWeights, setRubricWeights] = useState<Record<string, number>>({});
   const [rubricTemplate, setRubricTemplate] = useState<string[]>([]);
+  const [rubricReportType, setRubricReportType] = useState("general");
+  const [templatePresets, setTemplatePresets] = useState<TemplatePreset[]>([]);
   const [rubricLoaded, setRubricLoaded] = useState(false);
   const [rubricStatus, setRubricStatus] = useState<string | null>(null);
 
@@ -175,6 +183,8 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
       .then((d) => {
         setRubricWeights(d.weights ?? {});
         setRubricTemplate(d.template ?? []);
+        setRubricReportType(d.report_type ?? "general");
+        setTemplatePresets(d.template_presets ?? []);
         setRubricLoaded(true);
       })
       .catch(() => setRubricStatus("✗ Could not load rubric defaults"));
@@ -737,6 +747,28 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
               </span>
 
               <hr className="lc-divider" />
+              <p className="lc-section-label">Report profile template</p>
+              <div className="lc-field">
+                <select
+                  value={rubricReportType}
+                  onChange={(e) => {
+                    const nextType = e.target.value;
+                    setRubricReportType(nextType);
+                    const preset = templatePresets.find((p) => p.report_type === nextType);
+                    if (preset) setRubricTemplate(preset.sections);
+                  }}
+                >
+                  {templatePresets.length === 0 ? (
+                    <option value="general">Generic Research Report</option>
+                  ) : (
+                    templatePresets.map((preset) => (
+                      <option key={preset.report_type} value={preset.report_type}>
+                        {preset.title}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
               <p className="lc-section-label">Deliverable template (required sections)</p>
               {rubricTemplate.map((section, i) => (
                 <div className="lc-row" key={i}>
@@ -789,6 +821,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                     const cfg: RubricConfig = {
                       weights: rubricWeights,
                       template: rubricTemplate.map((s) => s.trim()).filter(Boolean),
+                      report_type: rubricReportType,
                     };
                     setConfiguredRubric(cfg);
                     setRubricStatus("✓ Rubric saved — will apply on next run");

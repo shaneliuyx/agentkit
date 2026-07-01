@@ -613,29 +613,44 @@ def rubric_defaults() -> dict[str, Any]:
     """Default rubric weights + deliverable template, so the GUI can seed the rubric
     panel with the same values the scorer uses (DESIGN §14.2)."""
     from studio.rubric import DEFAULT_TEMPLATE, DEFAULT_WEIGHTS
+    from studio.report_profiles import profile_template_presets
 
-    return {"weights": DEFAULT_WEIGHTS, "template": DEFAULT_TEMPLATE}
+    return {
+        "weights": DEFAULT_WEIGHTS,
+        "template": DEFAULT_TEMPLATE,
+        "report_type": "general",
+        "template_presets": profile_template_presets(),
+    }
 
 
 @app.post("/session/{session_id}/rubric")
 def set_rubric(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
     """Set the GUI rubric + deliverable template for a session (DESIGN §14.2).
 
-    Body: {"weights": {criterion: float}, "template": [section, ...]}. Both optional;
-    omitted falls back to studio.rubric defaults. The keep/discard gate scores each epoch
-    with this rubric, and the template defines the deliverable's expected sections.
+    Body: {"weights": {criterion: float}, "template": [section, ...],
+    "report_type": "technical"}. Template wins when provided; otherwise report_type
+    selects a built-in profile template.
     """
     session = registry.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
     from studio.rubric import resolve_weights
+    from studio.report_profiles import resolve_report_profile
 
     weights = body.get("weights")
     template = body.get("template")
+    report_type = str(body.get("report_type") or "general")
+    profile = resolve_report_profile(report_type)
+    resolved_template = (
+        [str(s) for s in template]
+        if isinstance(template, list)
+        else list(profile.sections)
+    )
     session.rubric_config = {
         # Normalize now so a bad GUI payload can't break the gate mid-run.
         "weights": resolve_weights(weights if isinstance(weights, dict) else None),
-        "template": [str(s) for s in template] if isinstance(template, list) else None,
+        "template": resolved_template,
+        "report_type": profile.report_type,
     }
     return {"status": "ok", "rubric_config": session.rubric_config}
 
