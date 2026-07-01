@@ -45,6 +45,8 @@ export interface StudioNodeData {
   kind: "phase" | "agent" | "hub" | "reduce" | "stage";
   phaseId: string;
   topology: TopologyKind | null;
+  /** PLAN E2: why this topology was chosen — shown as the topology chip's tooltip. */
+  rationale?: string;
   state: AgentRunState;
   /**
    * Raw agent-call count for this phase (only on the `phase` header node, and only
@@ -274,6 +276,7 @@ function buildPhase(
       kind: "phase",
       phaseId: pid,
       topology: phase.topology,
+      rationale: phase.rationale,
       state,
       nCalls: phase.n_agents,
     },

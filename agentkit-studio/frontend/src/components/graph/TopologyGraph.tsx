@@ -71,7 +71,11 @@ function StudioNodeView({ data }: NodeProps<StudioNodeData>) {
       <span className="topo-node-label">{data.label}</span>
       {data.kind === "phase" ? (
         <span className="topo-node-meta mono">
-          {data.topology ? <span className="topo-node-topo">{data.topology}</span> : null}
+          {data.topology ? (
+            <span className="topo-node-topo" title={data.rationale ?? undefined}>
+              {data.topology}
+            </span>
+          ) : null}
           {data.nCalls != null && data.nCalls > 0 ? (
             <span
               className="topo-node-calls"

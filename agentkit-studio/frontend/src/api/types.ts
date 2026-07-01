@@ -34,6 +34,10 @@ export interface PlanStep {
 export interface TopologyStep {
   id: string;
   topology: TopologyKind;
+  /** PLAN E2: human-readable reason this topology was chosen (selector rule / planner intent). */
+  rationale?: string;
+  /** PLAN E2: which §2.7 decision questions fired (e.g. ["Q3"]). */
+  questions_fired?: string[];
 }
 
 /** A render-graph node as emitted by the backend's derived `graph` frame. */
@@ -400,4 +404,5 @@ export interface SessionResponse {
 export interface RubricConfig {
   weights: Record<string, number>;
   template: string[];
+  report_type?: string;
 }

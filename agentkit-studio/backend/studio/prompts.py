@@ -71,11 +71,24 @@ def _build_planner_cot_prompt(
         "Step 4 — Account for existing deliverable and weaknesses.\n"
         "  If a deliverable exists: branches must address gaps only, not reconstruct.\n"
         "  If no deliverable: Epic 1 branches should establish the initial structure.\n\n"
-        "Step 5 — Emit the plan:\n\n"
+        "Step 5 — Declare each epic's TOPOLOGY INTENT (how its branches coordinate):\n"
+        "  Choose from the same design principles the runtime selector will use:\n"
+        "  - 'single'        : one agent can do the work; task is small, fuzzy, or ordered.\n"
+        "  - 'star'          : independent branches can run in parallel, then reduce.\n"
+        "  - 'map'           : one operation per item over an upstream list ('each'/'every').\n"
+        "  - 'mesh'          : branches must DEBATE / compare / critique alternatives.\n"
+        "  - 'pipeline'      : strictly ordered stages where each consumes the prior one.\n"
+        "  - 'gateway'       : route among identities/tools/permissions before work starts.\n"
+        "  - 'durable_board' : restart recovery, cross-session state, queueing, or human review.\n"
+        "  - 'tree'          : hierarchical manager-to-leaf decomposition.\n"
+        "  This is an INTENT. A later LLM topology selector will make the final choice\n"
+        "  and explain the rationale for each phase.\n\n"
+        "Step 6 — Emit the plan:\n\n"
         "EPIC_PLAN:\n"
         "```json\n"
         '{"epics": [{"id": "epic-1", "title": "...", "description": "...",\n'
-        '  "depends_on": [], "branches": [{"id": "b-1a", "description": "..."}]}]}\n'
+        '  "topology": "star", "depends_on": [],\n'
+        '  "branches": [{"id": "b-1a", "description": "..."}]}]}\n'
         "```\n"
     )
 
@@ -129,7 +142,13 @@ def _build_hub_cot_prompt(
         "    - No section assigned to more than one agent.\n"
         "    - Tell each agent its exact section headings (verbatim from the document)\n"
         "      so its PATCHES anchors are unambiguous.\n"
-        "  Emit TASK_LIST, ASSIGNED, and DONE blocks (JSON).\n\n"
+        "    - NEW-SECTION CREATION (PLAN G4): if the goal/template implies a section that\n"
+        "      is ABSENT from the deliverable, EXPLICITLY assign its CREATION to ONE agent —\n"
+        "      name the new heading verbatim (e.g. \"create ## Limitations\") and mark the\n"
+        "      job type \"create\". That agent creates AND populates it; the reducer verifies\n"
+        "      every assigned create/improve job was actually delivered.\n"
+        "  Emit TASK_LIST, ASSIGNED (each value is {\"sections\": [...], \"create\": [...]}),\n"
+        "  and DONE blocks (JSON).\n\n"
         f"Step 6 — Emit DELIVERABLE_PATH: {artifact_path}\n"
         "  Workers write PATCHES blocks targeting only their assigned sections —\n"
         "  no direct file writes.\n"
@@ -184,13 +203,17 @@ def _build_worker_cot_prompt(
 
 
 def _build_executor_prompt(goal: str, artifact_text: str, weaknesses_block: str) -> str:
-    """STAR-spoke EXECUTOR prompt (§11.10 — the score-ceiling fix).
+    """STAR-spoke EXECUTOR prompt (§11.10 + PLAN P2 — goal-blind worker).
 
     The spokes were given the HUB planning prompt ("you are the planning hub …
     assign work … emit TASK_LIST/ASSIGNED"), so they PLANNED instead of fetching:
     the reducer received analysis, the artifact never gained sourced content, and
     the score stalled. This frames each spoke as a research EXECUTOR — fetch real
     pages and emit RESEARCH_FINDING blocks WITH their URLs — never a planner.
+
+    Research workers are goal-bounded, not goal-blind: they need the task goal to
+    form relevant search queries and judge whether a fetched page belongs in the
+    report, but they still execute only the assigned focus appended by the caller.
     """
     art = (artifact_text or "").strip()
     art_block = (
@@ -200,13 +223,19 @@ def _build_executor_prompt(goal: str, artifact_text: str, weaknesses_block: str)
     return (
         _today_note()
         + "You are a RESEARCH EXECUTOR, not a planner. DO the research NOW — do NOT "
-        "emit TASK_LIST, ASSIGNED, or any plan/assignment.\n\n"
-        f"GOAL: {goal}\n\n"
+        "emit TASK_LIST, ASSIGNED, or any plan/assignment. Execute ONLY your assigned "
+        "task below (do not broaden it).\n\n"
+        f"TASK GOAL (use only for search relevance and WHY; do not rewrite it as a report):\n"
+        f"{(goal or '').strip()}\n\n"
         f"{art_block}"
         f"WEAKNESSES TO FIX (concrete gaps):\n{weaknesses_block or '(none)'}\n\n"
-        "Step 1 — For each weakness in your focus, run web_search THEN web_fetch to "
-        "read the ACTUAL article content (not just the snippet).\n"
-        "Step 2 — Emit one RESEARCH_FINDING per page you fetched, exactly:\n"
+        "Step 1 — Build each search query from TASK GOAL + your assigned focus + the "
+        "target section. Do not search an ambiguous fragment by itself.\n"
+        "Step 2 — If weaknesses are listed, fix those; if weaknesses are '(none)', "
+        "fill pending assigned sections with relevant sourced evidence for the assigned "
+        "focus. Run web_search THEN web_fetch to read the ACTUAL article content "
+        "(not just the snippet).\n"
+        "Step 3 — Emit one RESEARCH_FINDING per page you fetched, exactly:\n"
         "  RESEARCH_FINDING:\n"
         "  ARTICLE_TITLE: <title>\n"
         "  URL: <the EXACT url you fetched — REQUIRED, never omit>\n"

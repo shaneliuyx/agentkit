@@ -62,6 +62,8 @@ export interface PhaseState {
   role: string;
   difficulty: string;
   topology: TopologyKind | null;
+  /** PLAN E2: why this topology was chosen (selector rule or planner intent). */
+  rationale?: string;
   state: "pending" | "running" | "done";
   /** Actual runtime fan-out, from `phase_done.n_agents`; reconciles spoke count. */
   n_agents: number | null;
@@ -281,7 +283,10 @@ export const useRunStore = create<RunState>((set) => ({
         case "topology": {
           let phases = state.phases;
           for (const t of event.payload.steps) {
-            phases = setPhase(phases, t.id, { topology: toTopologyKind(t.topology) });
+            phases = setPhase(phases, t.id, {
+              topology: toTopologyKind(t.topology),
+              rationale: t.rationale,
+            });
           }
           return { phases };
         }

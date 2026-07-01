@@ -622,6 +622,19 @@ Objective: implement the research report generator improvement plan and validate
    - Validation:
      - `pytest backend/tests/test_section_ownership.py::test_n4_mask_hides_incode_hash_lines backend/tests/test_section_ownership.py::test_n4_sections_present_ignores_incode_heading backend/tests/test_section_ownership.py::test_n4_detect_gaps_skips_code_comments backend/tests/test_section_ownership.py::test_n2_n3_refutes_false_claims_keeps_real_ones backend/tests/test_section_ownership.py::test_n3_section_ends_cleanly backend/tests/test_section_ownership.py::test_consolidate_findings_same_url_merge_keeps_richest backend/tests/test_section_ownership.py::test_consolidate_findings_density_cap_per_target backend/tests/test_rubric.py -q` → 13 passed.
      - `python -m py_compile backend/studio/rubric.py backend/studio/task_runs.py ../agentkit/artifacts/dedup.py` → passed.
+114. Added and committed topology rationale surfacing:
+   - Commit message: `Surface topology rationale`.
+   - Added shared `assign_topologies_with_choices()` and `PlanStep.worker_foci` support required by the committed Studio runner/planning path.
+   - Topology events now carry rationale/question metadata through frontend store/layout and show rationale as a topology-chip tooltip.
+   - Planner prompt asks the LLM for topology intent and explains the design-principle options without hardcoding the final topology in production code.
+   - Validation:
+     - `pytest backend/tests/test_section_ownership.py::test_e2_assign_with_choices_returns_rationale backend/tests/test_section_ownership.py::test_e3_assign_with_choices_uses_infer_spec_under_llm backend/tests/test_section_ownership.py::test_worker_foci_include_assigned_sections_weaknesses_and_create_guidance backend/tests/test_runner.py::test_gemma_planning_and_topology_selection_are_capped backend/tests/test_runner.py::test_runner_maps_state_level_selector_topology_to_runtime_shape backend/tests/test_runner.py::test_hill_climb_honors_selected_topology_no_force_star -q` → 6 passed.
+     - `python -m py_compile backend/studio/prompts.py ../agentkit/planner/core.py ../agentkit/topology/dynamic.py` → passed.
+     - `npm run build` in `frontend/` → passed.
+115. Ran post-commit regression checkpoint:
+   - `pytest backend/tests/test_section_workspace.py backend/tests/test_section_ownership.py backend/tests/test_runner.py::test_active_template_tracks_added_sections_without_removing_original backend/tests/test_runner.py::test_section_writeback_assembles_artifact_from_section_files backend/tests/test_runner.py::test_section_writeback_prefers_active_report_title backend/tests/test_runner.py::test_section_reducer_demotes_missing_anchor_no_conflict_marker backend/tests/test_runner.py::test_section_assignment_queue_fetches_all_files_despite_agent_cap backend/tests/test_report_quality.py backend/tests/test_genericity_audit.py backend/tests/test_report_profiles.py backend/tests/test_rubric_profile_api.py backend/tests/test_client_max_tokens.py backend/tests/test_model_profiles.py -q` → 90 passed.
+   - `npm run build` in `frontend/` → passed.
+   - Remaining dirty files were not staged: `.gitignore`, deleted design/handoff docs, `backend/pyproject.toml`, mixed `backend/tests/test_m8_m9_helpers.py`, local `.agents/.claude/.codex`, `DESIGN-v2.md`, and `skills-lock.json`.
 
 ## Current Next Steps
 

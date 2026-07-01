@@ -34,18 +34,20 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
 from agentkit.planner.core import Plan, PlanStep
 from agentkit.topology.a2a import MessageBus
 from agentkit.topology.core import (
+    EXPLICIT,
     MAP,
     MESH,
     PIPELINE,
     SINGLE,
     STAR,
     TaskSpec,
+    TopologyChoice,
     select_topology,
 )
 from agentkit.topology.infer import infer_spec
@@ -166,6 +168,42 @@ def assign_topologies(
     raise ValueError(f"unknown mode {mode!r}; expected {MODE_MANUAL!r} or {MODE_AUTO!r}")
 
 
+def assign_topologies_with_choices(
+    plan: Plan,
+    *,
+    client: LLMClient | None = None,
+    llm: bool = False,
+) -> tuple[Plan, dict[str, "TopologyChoice"]]:
+    """Like ``assign_topologies(mode='auto')`` but ALSO return the full ``TopologyChoice``
+    per step (topology + rationale + which §2.7 question fired), so a caller can SURFACE
+    *why* each phase got its topology (observability — Studio's TopologyEvent / hub I/O log).
+
+    Mirrors the auto path exactly: LLM ``infer_spec → select_topology`` when ``llm`` and a
+    client are given, else the deterministic ``classify_step_topology`` (wrapped into a
+    ``TopologyChoice`` with its own rationale so the return shape is uniform). The Plan is
+    never mutated."""
+    from agentkit.topology.core import TopologyChoice
+    use_llm = llm and client is not None
+    if llm and client is None:
+        raise ValueError("assign_topologies_with_choices(llm=True) requires a client")
+    new_steps = []
+    choices: dict[str, TopologyChoice] = {}
+    for s in plan.steps:
+        if use_llm:
+            assert client is not None
+            spec = infer_spec(s.description, client)
+            choice = select_topology(spec)
+        else:
+            top = classify_step_topology(s.description)
+            choice = TopologyChoice(
+                top, EXPLICIT, 1,
+                f"deterministic keyword cue → {top}", ("classify_step_topology",),
+            )
+        choices[s.id] = choice
+        new_steps.append(replace(s, topology=choice.topology))
+    return replace(plan, steps=tuple(new_steps)), choices
+
+
 # ---------------------------------------------------------------------------
 # -- Per-step execution -----------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -181,6 +219,7 @@ class StepRun:
     n_agents: int          # how many agent invocations this step fanned out to
     tokens: int            # summed reported tokens for this step's invocations
     wall_s: float
+    agent_io: tuple[dict, ...] = ()  # per-invocation I/O: role/prompt/output/tokens
 
 
 @dataclass(frozen=True)
@@ -242,113 +281,9 @@ _REDUCER: Callable[[list[str]], tuple[str, int]] | None = None
 _PIPELINE_STAGES = ("Outline the approach.", "Develop the details.",
                     "Produce the final result.")
 
-
-def _run_single(client: LLMClient, step: PlanStep, upstream: str) -> tuple[str, int, int]:
-    """Single agent: one LLM call on the step (+ upstream context). → (text, n, tokens)."""
-    prompt = _with_upstream(step.description, upstream)
-    text, tok = _chat(client, prompt)
-    return text, 1, tok
-
-
-def _run_star(
-    client: LLMClient, step: PlanStep, upstream: str, *,
-    budget: FanoutBudget | None,
-) -> tuple[str, int, int]:
-    """STAR: fan out independent workers in parallel, then reduce. → (text, n, tokens)."""
-    facets = _facets(step.description, _spoke_cap())
-    base = _with_upstream(step.description, upstream)
-
-    def work(facet: str) -> tuple[str, int]:
-        return _chat(client, f"{base}\n\nFocus specifically on: {facet}")
-
-    results: list[tuple[str, int]] = _parallel_map(work, list(facets))
-    tokens = 0
-    drafts = []
-    for text, tok in results:
-        _charge(budget, tok)
-        tokens += tok
-        drafts.append(text)
-    if _REDUCER is not None:
-        # Orchestrator-owned consolidation (§4.5: section-aware merge/refine/
-        # review). Core stays domain-free — it just hands over the worker drafts.
-        final, rtok = _REDUCER(drafts)
-    else:
-        synthesis = "\n\n".join(f"[worker {i + 1}] {d}" for i, d in enumerate(drafts))
-        final, rtok = _chat(
-            client,
-            f"Synthesize these independent findings into one answer:\n\n{synthesis}",
-        )
-    _charge(budget, rtok)
-    return final, len(facets) + 1, tokens + rtok
-
-
-def _run_mesh(
-    client: LLMClient, step: PlanStep, upstream: str, *,
-    budget: FanoutBudget | None,
-) -> tuple[str, int, int]:
-    """MESH: peers draft (round 1), READ each other via a MessageBus, REVISE
-    (round 2), then reduce. The cross-read is what distinguishes mesh from a
-    star fan-out — peers debate. → (text, n, tokens)."""
-    facets = _facets(step.description, _spoke_cap())
-    base = _with_upstream(step.description, upstream)
-    bus = MessageBus()
-    tokens = 0
-
-    # Round 1 — each peer drafts a hypothesis in parallel.
-    def draft(idx_facet: tuple[int, str]) -> tuple[int, str, int]:
-        i, facet = idx_facet
-        text, tok = _chat(
-            client, f"{base}\n\nArgue this angle: {facet}",
-        )
-        return i, text, tok
-
-    for i, text, tok in _parallel_map(draft, list(enumerate(facets, 1))):
-        bus.post(f"peer{i}", text, round=1)
-        _charge(budget, tok)
-        tokens += tok
-
-    # Round 2 — each peer revises after reading EVERY other peer's round-1.
-    def revise(idx_facet: tuple[int, str]) -> tuple[int, str, int]:
-        i, facet = idx_facet
-        peers = bus.context(reader=f"peer{i}")
-        text, tok = _chat(
-            client,
-            f"{base}\n\nYour angle: {facet}\n\nYour peers said:\n{peers}\n\n"
-            "Reconsider and give your refined position.",
-        )
-        return i, text, tok
-
-    revised = []
-    for i, text, tok in _parallel_map(revise, list(enumerate(facets, 1))):
-        _charge(budget, tok)
-        tokens += tok
-        revised.append(text)
-
-    debate = "\n\n".join(f"[peer {i + 1}] {d}" for i, d in enumerate(revised))
-    final, rtok = _chat(
-        client,
-        f"Synthesize this debate into one balanced recommendation:\n\n{debate}",
-    )
-    _charge(budget, rtok)
-    return final, 2 * len(facets) + 1, tokens + rtok
-
-
-def _run_pipeline(
-    client: LLMClient, step: PlanStep, upstream: str, *,
-    budget: FanoutBudget | None,
-) -> tuple[str, int, int]:
-    """PIPELINE: ordered stages, each fed the previous stage's output. → (text, n, tokens)."""
-    base = _with_upstream(step.description, upstream)
-    carry = ""
-    tokens = 0
-    for stage in _PIPELINE_STAGES:
-        prompt = f"{base}\n\nStage: {stage}"
-        if carry:
-            prompt += f"\n\nPrevious stage produced:\n{carry}"
-        carry, tok = _chat(client, prompt)
-        _charge(budget, tok)
-        tokens += tok
-    return carry, len(_PIPELINE_STAGES), tokens
+# Sentinel prompt recorded for the fan-in record when an injected ``_REDUCER``
+# consolidates the drafts — core can't see the reducer's internal prompt.
+_INJECTED_REDUCER_PROMPT = "<injected reducer>"
 
 
 def _extract_items(text: str) -> list[str]:
@@ -397,62 +332,319 @@ def _extract_items(text: str) -> list[str]:
     return [ln.strip() for ln in text.splitlines() if ln.strip()]
 
 
-def _run_map(
-    client: LLMClient, step: PlanStep, upstream: str, *,
-    budget: FanoutBudget | None,
-) -> tuple[str, int, int]:
+def _agent_record(prompt: str, output: str, tokens: int) -> dict:
+    """One per-spoke I/O record (an LLM agent invocation)."""
+    return {"role": "agent", "prompt": prompt, "output": output, "tokens": tokens}
+
+
+def _reducer_record(prompt: str, output: str, tokens: int) -> dict:
+    """One fan-in I/O record (the reduce/synthesis step)."""
+    return {"role": "reducer", "prompt": prompt, "output": output, "tokens": tokens}
+
+
+class DecompositionStrategy(Protocol):
+    """One topology's per-step execution shape.
+
+    ``run`` returns ``(text, n_agents, tokens, agent_io)`` — the legacy
+    ``(text, n, tokens)`` triple plus an observability list, one dict per LLM
+    invocation (``role``/``prompt``/``output``/``tokens``). Strategies read the
+    module globals ``_REDUCER``/``_POOL_WORKERS``/``_MAX_SPOKES`` exactly as the
+    legacy runners did — they are injected once per ``run_plan`` call.
+    """
+
+    def run(
+        self, client: LLMClient, step: PlanStep, upstream: str, *,
+        budget: FanoutBudget | None,
+    ) -> tuple[str, int, int, list[dict]]:
+        ...
+
+
+class SingleStrategy:
+    """Single agent: one LLM call on the step (+ upstream context)."""
+
+    def run(
+        self, client: LLMClient, step: PlanStep, upstream: str, *,
+        budget: FanoutBudget | None,
+    ) -> tuple[str, int, int, list[dict]]:
+        prompt = _with_upstream(step.description, upstream)
+        text, tok = _chat(client, prompt)
+        agent_io = [_agent_record(prompt, text, tok)]
+        if _REDUCER is not None:
+            # §4b SINGLE reducer = IDENTITY fold: route the lone draft through the shared
+            # assemble+verify reducer (e.g. Studio's additive section merge + coverage check)
+            # so a SINGLE phase under hill-climb folds into the artifact rather than replacing
+            # it. No injected reducer (CLI default) → the bare text, unchanged.
+            final, rtok = _REDUCER([text])
+            return final, 1, tok + rtok, agent_io
+        return text, 1, tok, agent_io
+
+
+class StarStrategy:
+    """STAR: fan out independent workers in parallel, then reduce."""
+
+    def run(
+        self, client: LLMClient, step: PlanStep, upstream: str, *,
+        budget: FanoutBudget | None,
+    ) -> tuple[str, int, int, list[dict]]:
+        facets = _worker_foci(step, _spoke_cap()) or _facets(step.description, _spoke_cap())
+        base = _with_upstream(step.description, upstream)
+
+        def work(facet: str) -> tuple[str, int]:
+            return _chat(client, f"{base}\n\nFocus specifically on: {facet}")
+
+        results: list[tuple[str, int]] = _parallel_map(work, list(facets))
+        tokens = 0
+        drafts = []
+        agent_io: list[dict] = []
+        for facet, (text, tok) in zip(facets, results):
+            _charge(budget, tok)
+            tokens += tok
+            drafts.append(text)
+            agent_io.append(_agent_record(f"{base}\n\nFocus specifically on: {facet}", text, tok))
+        if _REDUCER is not None:
+            # Orchestrator-owned consolidation (§4.5: section-aware merge/refine/
+            # review). Core stays domain-free — it just hands over the worker drafts.
+            final, rtok = _REDUCER(drafts)
+            reducer_prompt = _INJECTED_REDUCER_PROMPT
+        else:
+            synthesis = "\n\n".join(f"[worker {i + 1}] {d}" for i, d in enumerate(drafts))
+            reducer_prompt = f"Synthesize these independent findings into one answer:\n\n{synthesis}"
+            final, rtok = _chat(client, reducer_prompt)
+        _charge(budget, rtok)
+        agent_io.append(_reducer_record(reducer_prompt, final, rtok))
+        return final, len(facets) + 1, tokens + rtok, agent_io
+
+
+class MeshStrategy:
+    """MESH: peers draft (round 1), READ each other via a MessageBus, REVISE
+    (round 2), then reduce. The cross-read is what distinguishes mesh from a
+    star fan-out — peers debate."""
+
+    def run(
+        self, client: LLMClient, step: PlanStep, upstream: str, *,
+        budget: FanoutBudget | None,
+    ) -> tuple[str, int, int, list[dict]]:
+        facets = _worker_foci(step, _spoke_cap()) or _facets(step.description, _spoke_cap())
+        base = _with_upstream(step.description, upstream)
+        bus = MessageBus()
+        tokens = 0
+
+        # Round 1 — each peer drafts a hypothesis in parallel.
+        def draft(idx_facet: tuple[int, str]) -> tuple[int, str, int]:
+            i, facet = idx_facet
+            text, tok = _chat(
+                client, f"{base}\n\nArgue this angle: {facet}",
+            )
+            return i, text, tok
+
+        for i, text, tok in _parallel_map(draft, list(enumerate(facets, 1))):
+            bus.post(f"peer{i}", text, round=1)
+            _charge(budget, tok)
+            tokens += tok
+
+        # Round 2 — each peer revises after reading EVERY other peer's round-1.
+        def revise(idx_facet: tuple[int, str]) -> tuple[int, str, str, int]:
+            i, facet = idx_facet
+            peers = bus.context(reader=f"peer{i}")
+            prompt = (
+                f"{base}\n\nYour angle: {facet}\n\nYour peers said:\n{peers}\n\n"
+                "Reconsider and give your refined position."
+            )
+            text, tok = _chat(client, prompt)
+            return i, prompt, text, tok
+
+        revised = []
+        agent_io: list[dict] = []
+        for i, prompt, text, tok in _parallel_map(revise, list(enumerate(facets, 1))):
+            _charge(budget, tok)
+            tokens += tok
+            revised.append(text)
+            agent_io.append(_agent_record(prompt, text, tok))
+
+        if _REDUCER is not None:
+            # Orchestrator-owned consolidation (§4b: one shared assemble+verify reducer for
+            # every fan-out topology, not STAR-only). The reducer sees the debated peer drafts.
+            final, rtok = _REDUCER(revised)
+            reducer_prompt = _INJECTED_REDUCER_PROMPT
+        else:
+            debate = "\n\n".join(f"[peer {i + 1}] {d}" for i, d in enumerate(revised))
+            reducer_prompt = f"Synthesize this debate into one balanced recommendation:\n\n{debate}"
+            final, rtok = _chat(client, reducer_prompt)
+        _charge(budget, rtok)
+        agent_io.append(_reducer_record(reducer_prompt, final, rtok))
+        return final, 2 * len(facets) + 1, tokens + rtok, agent_io
+
+
+class PipelineStrategy:
+    """PIPELINE: ordered stages, each fed the previous stage's output."""
+
+    def run(
+        self, client: LLMClient, step: PlanStep, upstream: str, *,
+        budget: FanoutBudget | None,
+    ) -> tuple[str, int, int, list[dict]]:
+        base = _with_upstream(step.description, upstream)
+        carry = ""
+        tokens = 0
+        agent_io: list[dict] = []
+        for stage in _PIPELINE_STAGES:
+            prompt = f"{base}\n\nStage: {stage}"
+            if carry:
+                prompt += f"\n\nPrevious stage produced:\n{carry}"
+            carry, tok = _chat(client, prompt)
+            _charge(budget, tok)
+            tokens += tok
+            agent_io.append(_agent_record(prompt, carry, tok))
+        if _REDUCER is not None:
+            # §4b PIPELINE reducer = TERMINAL-STAGE CAPTURE: sequential stages can't
+            # section-partition, so the contract is "capture the final stage + verify
+            # coverage", not concat. Fold the terminal stage through the shared reducer.
+            final, rtok = _REDUCER([carry])
+            _charge(budget, rtok)
+            return final, len(_PIPELINE_STAGES), tokens + rtok, agent_io
+        return carry, len(_PIPELINE_STAGES), tokens, agent_io
+
+
+class MapStrategy:
     """MAP: fan out one independent worker per item extracted from upstream.
 
     Items are URLs, file paths, IDs, or any list found in the prior step's
     output. Workers are parallel and isolated — no MessageBus, no cross-reads.
     Falls back to SINGLE when upstream is empty or yields no parseable list.
     """
-    items = _extract_items(upstream)
-    if not items:
-        # No list in upstream — degrade gracefully to a single call.
-        text, tok = _chat(client, _with_upstream(step.description, upstream))
-        return text, 1, tok
 
-    base = step.description
+    def run(
+        self, client: LLMClient, step: PlanStep, upstream: str, *,
+        budget: FanoutBudget | None,
+    ) -> tuple[str, int, int, list[dict]]:
+        items = _extract_items(upstream)
+        if not items:
+            foci = _worker_foci(step, _spoke_cap())
+            if foci:
+                base = _with_upstream(step.description, upstream)
 
-    # Bound the worker count: one worker per BUCKET, not per item. With no cap
-    # (CLI, _MAX_SPOKES is None) keep the original one-worker-per-item shape; a
-    # cap (Studio's max_agents) partitions the items into ≤cap buckets so an
-    # upstream emitting 30 URLs spawns ≤cap workers, not 30 (the gap-flood fix
-    # applied to MAP's own breadth lever — item count, not _facets).
-    buckets = (
-        _bucket(items, _MAX_SPOKES) if _MAX_SPOKES is not None
-        else [[it] for it in items]
-    )
+                def focus_work(focus: str) -> tuple[str, int]:
+                    return _chat(client, f"{base}\n\nFocus specifically on: {focus}")
 
-    def work(bucket: list[str]) -> tuple[str, int]:
-        listing = "\n".join(f"- {it}" for it in bucket)
-        return _chat(client, f"{base}\n\nItems:\n{listing}")
+                results: list[tuple[str, int]] = _parallel_map(focus_work, list(foci))
+                tokens = 0
+                drafts = []
+                agent_io: list[dict] = []
+                for focus, (text, tok) in zip(foci, results):
+                    _charge(budget, tok)
+                    tokens += tok
+                    drafts.append(text)
+                    agent_io.append(_agent_record(
+                        f"{base}\n\nFocus specifically on: {focus}", text, tok
+                    ))
+                if _REDUCER is not None:
+                    final, rtok = _REDUCER(drafts)
+                    reducer_prompt = _INJECTED_REDUCER_PROMPT
+                else:
+                    synthesis = "\n\n".join(
+                        f"[worker {i + 1}] {d}" for i, d in enumerate(drafts)
+                    )
+                    reducer_prompt = f"Synthesize these focused findings into one answer:\n\n{synthesis}"
+                    final, rtok = _chat(client, reducer_prompt)
+                _charge(budget, rtok)
+                agent_io.append(_reducer_record(reducer_prompt, final, rtok))
+                return final, len(foci) + 1, tokens + rtok, agent_io
+            # No list in upstream — degrade gracefully to a single call.
+            prompt = _with_upstream(step.description, upstream)
+            text, tok = _chat(client, prompt)
+            return text, 1, tok, [_agent_record(prompt, text, tok)]
 
-    results: list[tuple[str, int]] = _parallel_map(work, buckets)
-    tokens = 0
-    drafts = []
-    for text, tok in results:
-        _charge(budget, tok)
-        tokens += tok
-        drafts.append(text)
+        base = step.description
 
-    synthesis = "\n\n".join(f"[group {i + 1}] {d}" for i, d in enumerate(drafts))
-    final, rtok = _chat(
-        client,
-        f"Synthesize these per-item results into one answer:\n\n{synthesis}",
-    )
-    _charge(budget, rtok)
-    return final, len(buckets) + 1, tokens + rtok
+        # Bound the worker count: one worker per BUCKET, not per item. With no cap
+        # (CLI, _MAX_SPOKES is None) keep the original one-worker-per-item shape; a
+        # cap (Studio's max_agents) partitions the items into ≤cap buckets so an
+        # upstream emitting 30 URLs spawns ≤cap workers, not 30 (the gap-flood fix
+        # applied to MAP's own breadth lever — item count, not _facets).
+        buckets = (
+            _bucket(items, _MAX_SPOKES) if _MAX_SPOKES is not None
+            else [[it] for it in items]
+        )
+
+        def work(bucket: list[str]) -> tuple[str, int]:
+            listing = "\n".join(f"- {it}" for it in bucket)
+            return _chat(client, f"{base}\n\nItems:\n{listing}")
+
+        results: list[tuple[str, int]] = _parallel_map(work, buckets)
+        tokens = 0
+        drafts = []
+        agent_io: list[dict] = []
+        for bucket, (text, tok) in zip(buckets, results):
+            _charge(budget, tok)
+            tokens += tok
+            drafts.append(text)
+            listing = "\n".join(f"- {it}" for it in bucket)
+            agent_io.append(_agent_record(f"{base}\n\nItems:\n{listing}", text, tok))
+
+        if _REDUCER is not None:
+            # §4b: the shared assemble+verify reducer also consolidates MAP's per-item drafts.
+            final, rtok = _REDUCER(drafts)
+            reducer_prompt = _INJECTED_REDUCER_PROMPT
+        else:
+            synthesis = "\n\n".join(f"[group {i + 1}] {d}" for i, d in enumerate(drafts))
+            reducer_prompt = f"Synthesize these per-item results into one answer:\n\n{synthesis}"
+            final, rtok = _chat(client, reducer_prompt)
+        _charge(budget, rtok)
+        agent_io.append(_reducer_record(reducer_prompt, final, rtok))
+        return final, len(buckets) + 1, tokens + rtok, agent_io
 
 
-_DISPATCH = {
-    SINGLE: lambda c, s, u, budget: _run_single(c, s, u),
-    MAP: lambda c, s, u, budget: _run_map(c, s, u, budget=budget),
-    STAR: lambda c, s, u, budget: _run_star(c, s, u, budget=budget),
-    MESH: lambda c, s, u, budget: _run_mesh(c, s, u, budget=budget),
-    PIPELINE: lambda c, s, u, budget: _run_pipeline(c, s, u, budget=budget),
+_STRATEGIES: dict[str, DecompositionStrategy] = {
+    SINGLE: SingleStrategy(),
+    STAR: StarStrategy(),
+    MESH: MeshStrategy(),
+    PIPELINE: PipelineStrategy(),
+    MAP: MapStrategy(),
 }
+
+
+# Legacy per-topology runner names — kept importable as thin wrappers so any
+# external caller is unaffected. They delegate to the strategy instances and
+# return ONLY the legacy ``(text, n, tokens)`` triple (dropping the agent_io).
+def _run_single(client: LLMClient, step: PlanStep, upstream: str) -> tuple[str, int, int]:
+    """Single agent: one LLM call on the step (+ upstream context). → (text, n, tokens)."""
+    text, n, tokens, _ = _STRATEGIES[SINGLE].run(client, step, upstream, budget=None)
+    return text, n, tokens
+
+
+def _run_star(
+    client: LLMClient, step: PlanStep, upstream: str, *,
+    budget: FanoutBudget | None,
+) -> tuple[str, int, int]:
+    """STAR: fan out independent workers in parallel, then reduce. → (text, n, tokens)."""
+    text, n, tokens, _ = _STRATEGIES[STAR].run(client, step, upstream, budget=budget)
+    return text, n, tokens
+
+
+def _run_mesh(
+    client: LLMClient, step: PlanStep, upstream: str, *,
+    budget: FanoutBudget | None,
+) -> tuple[str, int, int]:
+    """MESH: two debate rounds over a MessageBus + a reduce call. → (text, n, tokens)."""
+    text, n, tokens, _ = _STRATEGIES[MESH].run(client, step, upstream, budget=budget)
+    return text, n, tokens
+
+
+def _run_pipeline(
+    client: LLMClient, step: PlanStep, upstream: str, *,
+    budget: FanoutBudget | None,
+) -> tuple[str, int, int]:
+    """PIPELINE: ordered stages, each fed the previous stage's output. → (text, n, tokens)."""
+    text, n, tokens, _ = _STRATEGIES[PIPELINE].run(client, step, upstream, budget=budget)
+    return text, n, tokens
+
+
+def _run_map(
+    client: LLMClient, step: PlanStep, upstream: str, *,
+    budget: FanoutBudget | None,
+) -> tuple[str, int, int]:
+    """MAP: fan out one independent worker per item extracted from upstream. → (text, n, tokens)."""
+    text, n, tokens, _ = _STRATEGIES[MAP].run(client, step, upstream, budget=budget)
+    return text, n, tokens
 
 
 def run_plan(
@@ -517,9 +709,9 @@ def run_plan(
             if outputs.get(dep)
         )
         topology = step.topology or SINGLE
-        runner = _DISPATCH.get(topology, _DISPATCH[SINGLE])
+        strategy = _STRATEGIES.get(topology, _STRATEGIES[SINGLE])
         st = time.perf_counter()
-        text, n_agents, tokens = runner(client, step, upstream, budget)
+        text, n_agents, tokens, agent_io = strategy.run(client, step, upstream, budget=budget)
         outputs[step.id] = text
         total_tokens += tokens
         runs.append(StepRun(
@@ -530,6 +722,7 @@ def run_plan(
             n_agents=n_agents,
             tokens=tokens,
             wall_s=time.perf_counter() - st,
+            agent_io=tuple(agent_io),
         ))
 
     return DynamicPlanResult(
@@ -606,6 +799,18 @@ def _facets(description: str, n: int) -> tuple[str, ...]:
               "the practical trade-offs", "edge cases and risks",
               "the simplest viable option")
     return angles[:n]
+
+
+def _worker_foci(step: PlanStep, n: int) -> tuple[str, ...]:
+    """Explicit caller-provided worker foci, capped to the same breadth limit.
+
+    Studio uses this to pass section-owned assignments to fan-out workers. Empty
+    means preserve the original generic facet derivation.
+    """
+    foci = tuple(
+        str(f).strip() for f in getattr(step, "worker_foci", ()) or () if str(f).strip()
+    )
+    return foci[:n] if foci else ()
 
 
 def _bucket(items: list, n: int) -> list[list]:
@@ -715,6 +920,18 @@ def _demo() -> None:
     assert r2.runs[0].n_agents > 1 and fc2.n > 1
     assert r2.runs[0].topology == MESH
     print(f"OK: run_plan fan-out dispatch (MESH, {r2.runs[0].n_agents} agents, {fc2.n} calls)")
+
+    # 5b. agent_io observability — a STAR run surfaces per-spoke + reducer I/O.
+    star_plan = assign_topologies(make_plan("gather sources on the topic"), mode=MODE_AUTO)
+    assert star_plan.steps[0].topology == STAR
+    fc_star = FakeClient()
+    r_star = run_plan(star_plan, fc_star)
+    aio = r_star.runs[0].agent_io
+    assert len(aio) >= 2, aio
+    for rec in aio:
+        assert set(rec.keys()) == {"role", "prompt", "output", "tokens"}, rec
+    assert aio[-1]["role"] == "reducer" and aio[0]["role"] == "agent"
+    print(f"OK: run_plan STAR agent_io ({len(aio)} records: per-spoke + reducer)")
 
     # 6. FanoutBudget bound (optional) — a tight ceiling aborts the fan-out.
     fc3 = FakeClient()

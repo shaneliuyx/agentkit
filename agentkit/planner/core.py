@@ -42,6 +42,9 @@ class PlanStep:
                      ``agentkit.topology.dynamic.assign_topologies`` to one of
                      SINGLE / STAR / MESH / PIPELINE so each step can run under
                      its own internal shape.
+        worker_foci: Optional explicit per-worker focus strings for fan-out
+                     topologies. Empty means the topology runner derives foci
+                     from the step description as before.
     """
 
     id: str
@@ -50,6 +53,7 @@ class PlanStep:
     role: str | None = None
     difficulty: str | None = None
     topology: str | None = None
+    worker_foci: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
