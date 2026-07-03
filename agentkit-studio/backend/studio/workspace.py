@@ -85,16 +85,19 @@ class Workspace:
 
     # -- operations --------------------------------------------------------
 
-    def read(self, rel_path: str) -> tuple[str, int]:
+    def read(self, rel_path: str, *, max_bytes: int | None = None) -> tuple[str, int]:
         """Read a file inside the workspace → ``(text, bytes_read)``.
 
-        Output is capped at ``MAX_OUTPUT_BYTES``. Raises ``WorkspaceError`` on an
-        escape or a missing/unreadable file.
+        Output is capped at ``max_bytes`` (default ``MAX_OUTPUT_BYTES``, 64 KiB).
+        ``read_file`` keeps the default; ``edit_file`` passes a larger studio-local
+        cap because it reads the whole file to rewrite it. Raises ``WorkspaceError``
+        on an escape or a missing/unreadable file.
         """
+        cap = MAX_OUTPUT_BYTES if max_bytes is None else max_bytes
         target = self._resolve_inside(rel_path)
         if not target.is_file():
             raise WorkspaceError(f"not a file: {rel_path}")
-        raw = target.read_bytes()[:MAX_OUTPUT_BYTES]
+        raw = target.read_bytes()[:cap]
         return raw.decode("utf-8", "replace"), len(raw)
 
     def write(self, rel_path: str, content: str) -> tuple[int, str]:

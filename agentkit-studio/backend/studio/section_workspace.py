@@ -30,6 +30,39 @@ def _section_title(heading: str) -> str:
     return re.sub(r"^#{1,6}\s*", "", heading or "").strip()
 
 
+def _match_key(title: str) -> str:
+    """Level- and enumerator-agnostic identity of a section title, matching
+    ``artifact_text._heading_key`` so ``# 2. Key Findings`` and ``## Key Findings``
+    resolve to the same key."""
+    s = re.sub(r"^#{1,6}\s*", "", title or "")
+    s = re.sub(r"^\d+[.)]\s*", "", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _normalize_heading_levels(text: str, known_titles: list[str] | tuple[str, ...]) -> str:
+    """Demote/promote any markdown heading whose title matches a KNOWN section title
+    to the canonical ``##`` level, so ``split_sections`` recognizes it as that section.
+
+    Scoped to the fold boundary: a reducer/worker that emits a full report at ``#`` (H1)
+    instead of patching the ``##`` scaffold would otherwise have its rich content parsed
+    as ``(intro)`` preamble and duplicated beside a placeholder H2 of the same name. Only
+    headings that match an existing outline title are touched — legitimate ``###`` subsections
+    and a genuine document title (which match no section) keep their level."""
+    known = {_match_key(t) for t in known_titles if str(t).strip()}
+    if not known:
+        return text or ""
+
+    def _fix(m: "re.Match[str]") -> str:
+        hashes, title = m.group(1), m.group(2)
+        if len(hashes) == 2:  # already canonical
+            return m.group(0)
+        if _match_key(title) in known:
+            return f"## {title}"
+        return m.group(0)
+
+    return re.sub(r"(?m)^(#{1,6})\s+(.+?)\s*$", _fix, text or "")
+
+
 def _section_body(title: str, body: str | None = None) -> str:
     text = (body or "").strip()
     if text:
@@ -62,7 +95,7 @@ def split_artifact_to_sections(
     text: str, initial_outline: list[str] | tuple[str, ...] = ()
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Return ``(active_outline, section_file_contents)`` for an artifact."""
-    pairs = split_sections(text or "")
+    pairs = split_sections(_normalize_heading_levels(text or "", initial_outline))
     preamble = ""
     section_bodies: dict[str, str] = {}
     order: list[str] = []
@@ -77,6 +110,8 @@ def split_artifact_to_sections(
         if key not in section_bodies:
             order.append(title)
             section_bodies[key] = body
+        elif len((body or "").strip()) > len((section_bodies[key] or "").strip()):
+            section_bodies[key] = body  # heading-level dup: keep the richer body
 
     outline_titles: list[str] = []
     seen: set[str] = set()

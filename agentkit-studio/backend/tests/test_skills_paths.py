@@ -111,3 +111,12 @@ def test_retrieval_semantics_surfaces_loop_doctor() -> None:
         register_paths(lib)
         hits = lib.retrieve("audit and repair an existing loop for weak checks", k=3)
         assert any(h.name == "loop-doctor" for h in hits), [h.name for h in hits]
+
+
+def test_domain_skills_include_research_report_agent():
+    from studio.skills_paths import build_domain_skills
+    d = build_domain_skills()
+    names = {s.name for s in d}
+    assert "research-report-agent" in names
+    rr = next(s for s in d if s.name == "research-report-agent")
+    assert "research report" in rr.trigger and rr.body.strip()

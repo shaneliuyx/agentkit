@@ -59,25 +59,55 @@ def _weakness_score(
 
 
 #: Max cited URLs to prefetch per reduce phase (bounds added fetch latency/cost).
-_PREFETCH_LIMIT = 8
+#: Raised 8→24: a 3-spoke-per-phase fan-out routinely cites 8-9 URLs itself, so 8
+#: silently truncated genuine citations even before the cross-thread cache-miss
+#: (Codex review, 2026-07-03): the reducer's OWN client.chat() call can populate its
+#: local _fetch_cache with unrelated entries, making cache_active True while none of
+#: those entries match the spokes' real URLs — grounding then drops every real
+#: finding whose URL didn't fit under the old cap.
+_PREFETCH_LIMIT = 24
+
+
+def _cited_urls(drafts: list[str]) -> list[str]:
+    """Extract every cited URL from worker drafts, plain ``URL:`` lines AND the
+    JSON-wrapped ``{"RESEARCH_FINDING": {"URL": ...}}`` shape (oMLX/qwen models) —
+    ``_parse_findings`` already parses both, but the old prefetch only scanned plain
+    lines, so a JSON-only finding's URL was never prefetched and stayed ungrounded."""
+    seen: list[str] = []
+
+    def _add(u: str) -> None:
+        u = u.strip().rstrip('.,)')
+        if u.lower().startswith('http') and u not in seen:
+            seen.append(u)
+
+    for d in drafts:
+        for m in _re.finditer(r'URL:\s*(https?://\S+)', d):
+            _add(m.group(1))
+        for blk in _re.findall(r"```[a-zA-Z_]*\s*\n?(.*?)```", d, _re.DOTALL):
+            try:
+                obj = _json.loads(blk.strip())
+            except Exception:  # noqa: BLE001 — a non-JSON fence is not a finding
+                continue
+            for rec in (obj if isinstance(obj, list) else [obj]):
+                r = rec.get("RESEARCH_FINDING", rec) if isinstance(rec, dict) else None
+                if isinstance(r, dict):
+                    u = r.get("URL") or r.get("url")
+                    if isinstance(u, str):
+                        _add(u)
+    return seen
 
 
 def _prefetch_cited(drafts: list[str], limit: int = _PREFETCH_LIMIT) -> int:
     """Fetch cited-but-uncached URLs from the worker drafts so genuine sources pass the
-    grounding guard (the fetch-density fix). No-op when the fetch cache is empty — that
-    means no grounding drop happens (cache_active is False), so there is nothing to fix,
-    and tests stay offline. Bounded by ``limit`` to cap latency. Returns how many cited
-    URLs are now cached."""
+    grounding guard (the fetch-density fix). Always attempts prefetch regardless of
+    the reducer's current cache state: an empty cache fails grounding open (nothing to
+    fix), but a NON-empty cache seeded by unrelated tool activity (e.g. the reducer's
+    own client.chat() call) makes cache_active True without containing the spokes'
+    real URLs — prefetch is what puts them there. Bounded by ``limit`` to cap latency.
+    Returns how many cited URLs are now cached."""
     from studio.runner import _dbg
-    from studio.tools import _fetch_cache, prefetch_url
-    if not _fetch_cache:
-        return 0
-    seen: list[str] = []
-    for d in drafts:
-        for m in _re.finditer(r'URL:\s*(https?://\S+)', d):
-            u = m.group(1).strip().rstrip('.,)')
-            if u not in seen:
-                seen.append(u)
+    from studio.tools import prefetch_url
+    seen = _cited_urls(drafts)
     fetched = sum(1 for u in seen[:limit] if prefetch_url(u))
     _dbg(f"prefetch cited={len(seen)} fetched_ok={fetched} (cap {limit})")
     return fetched
@@ -144,7 +174,15 @@ def _apply_ranking(doc: str, findings: list) -> str:
     ).text
 
 
-def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], embedder=None):
+def _make_section_reducer(
+    client,
+    artifact_text: str,
+    weaknesses: list[str],
+    embedder=None,
+    scoring_rules: str = "",
+    evidence_fn=None,
+    requirement_clause: str = "",
+):
     """Build the section-aware STAR reducer closure (DESIGN §4.5; Lever 3).
 
     Returns ``run_plan``'s reducer hook ``(worker_drafts) -> (merged_text, tokens)``.
@@ -163,9 +201,35 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], emb
     from studio.runner import _dbg
     wk_block = "\n".join(f"- {w}" for w in (weaknesses or [])) or "(none)"
     art_block = artifact_text.strip()
+    scoring_block = scoring_rules.strip() or "- (no scoring matrix provided)"
+    # Per-phase requirement-compliance clause (studio.requirement_compliance),
+    # built by the runner: phase-1 proactive requirement list or phase-2..N
+    # verify-and-correct list. Empty string when there are no requirements /
+    # everything is addressed / the check failed (fail-open).
+    req_block = (requirement_clause or "").strip()
+    req_section = (
+        "STATED TASK REQUIREMENTS (satisfy these where a patched section is "
+        f"relevant):\n{req_block}\n\n" if req_block else ""
+    )
+
+    _io_capture: dict[str, str] = {}
 
     def reduce(drafts: list[str]) -> tuple[str, int]:
         workers = "\n\n".join(f"[worker {i + 1}]\n{d}" for i, d in enumerate(drafts))
+        # Fetched materials (same FETCHED EVIDENCE FILES handoff the final synthesis gets):
+        # give the reducer the fetched source files for URLs cited this phase so it can
+        # evaluate the current-stage deliverable against real evidence, not worker prose alone.
+        evidence_block = ""
+        if evidence_fn is not None:
+            try:
+                evidence_block = (evidence_fn(f"{workers}\n\n{art_block}") or "").strip()
+            except Exception:  # noqa: BLE001 — evidence handoff must never crash the reduce
+                evidence_block = ""
+        evidence_section = (
+            f"FETCHED EVIDENCE FILES (read to verify claims before patching):\n"
+            f"{evidence_block}\n\n"
+            if evidence_block else ""
+        )
         prompt = (
             _today_note() +
             "You are the section-aware reducer of a multi-worker research phase.\n"
@@ -197,12 +261,21 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], emb
             "as a sentence, not a bare citation line.\n"
             "  - No worker content for a section → emit no patch for it.\n\n"
             f"SECTION WEAKNESSES (review checklist):\n{wk_block}\n\n"
+            f"{req_section}"
+            f"FULL SCORING RULES (measure the whole artifact after section patches):\n"
+            f"{scoring_block}\n\n"
+            f"{evidence_section}"
             f"CURRENT ARTIFACT:\n--- BEGIN ---\n{art_block or '(empty)'}\n--- END ---\n\n"
             f"WORKER OUTPUTS:\n{workers}\n\n"
             "Output ONLY:\nPATCHES:\n```json\n[ ... ]\n```\n"
             "Nothing else — no document, no preamble, no commentary."
         )
         res = client.chat([{"role": "user", "content": prompt}])
+        # Capture the reducer prompt+output so the runner can persist it to
+        # io/<step>.reducer.in.md — otherwise the reducer stage is invisible and its
+        # FULL SCORING RULES / weaknesses / FETCHED EVIDENCE injection can't be inspected.
+        _io_capture["prompt"] = prompt
+        _io_capture["output"] = res.text or ""
         tokens = int(getattr(res, "total_tokens", 0) or 0)
         llm_patches = _sanitize_llm_patches(
             art_block, _parse_patches_from_output(res.text or "")
@@ -263,6 +336,7 @@ def _make_section_reducer(client, artifact_text: str, weaknesses: list[str], emb
              f"ranked_delta={len(merged) - len(rr.text)}")
         return merged.strip(), tokens
 
+    reduce._io_capture = _io_capture  # type: ignore[attr-defined]
     return reduce
 
 
@@ -406,7 +480,21 @@ def _parse_findings(text: str) -> list:
                 quote_verified=j_qv,
                 grounded=j_grounded,
             ))
-    return out
+    from studio.task_runs import _normalize_url
+
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list = []
+    for f in out:
+        key = (
+            _normalize_url(getattr(f, "url", "")),
+            str(getattr(f, "patch_target", "") or ""),
+            str(getattr(f, "why", "") or getattr(f, "quote", "") or "").strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(f)
+    return deduped
 
 
 def _findings_to_patches(findings: list) -> list:

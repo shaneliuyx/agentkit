@@ -32,6 +32,18 @@
   align-self: center;
 }
 
+.backend-connect-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.backend-status {
+  color: var(--color-text-dim);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+}
+
 /* ── run bar ── */
 .run-bar {
   display: flex;

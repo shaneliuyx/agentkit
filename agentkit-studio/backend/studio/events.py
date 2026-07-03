@@ -310,6 +310,15 @@ class VerifyEvent(StudioEvent):
 
 
 @dataclass(frozen=True)
+class EvidenceEvent(StudioEvent):
+    """``evidence`` - accepted source-backed findings used in the final report."""
+
+    EVENT_TYPE: str = field(default="evidence", init=False, repr=False)
+    items: list[dict[str, Any]] = field(default_factory=list)
+    matrix: str = ""
+
+
+@dataclass(frozen=True)
 class LoopDoctorEvent(StudioEvent):
     """``loopdoctor`` — the run audited against loop-library's checklist (M8).
 
@@ -323,6 +332,14 @@ class LoopDoctorEvent(StudioEvent):
 
     EVENT_TYPE: str = field(default="loopdoctor", init=False, repr=False)
     checks: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MetricsEvent(StudioEvent):
+    """``metrics`` - compact run metrics and stop reason."""
+
+    EVENT_TYPE: str = field(default="metrics", init=False, repr=False)
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +361,9 @@ class DoneEvent(StudioEvent):
     #: Absolute path the final result was saved to (in the session workspace), or
     #: "" if there was nothing to save / the write failed.
     result_path: str = ""
+    scorecard_100: dict[str, Any] | None = None
+    review: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

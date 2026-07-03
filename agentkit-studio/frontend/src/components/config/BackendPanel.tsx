@@ -4,7 +4,7 @@
  * then POST /session to build the StudioChatClient. Exposes the created session
  * id + chosen mode/budget to the parent via `onSession`.
  */
-import { useEffect, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useState } from "react";
 import { createSession, fetchBackends } from "../../api/sse";
 import type {
   BackendProfile,
@@ -13,10 +13,17 @@ import type {
 } from "../../api/types";
 import "./config.css";
 
+export interface BackendPanelHandle {
+  connect: () => Promise<string>;
+}
+
 interface BackendPanelProps {
   onSession: (sessionId: string, mode: RunMode) => void;
+  onDirty: () => void;
   mode: RunMode;
   disabled: boolean;
+  connected: boolean;
+  stale: boolean;
 }
 
 const RAW = "__raw__";
@@ -34,7 +41,11 @@ interface RawOverride {
   apiKey: string;
 }
 
-export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
+export const BackendPanel = forwardRef<BackendPanelHandle, BackendPanelProps>(
+  function BackendPanel(
+    { onSession, onDirty, mode, disabled, connected, stale },
+    ref,
+  ) {
   const [profiles, setProfiles] = useState<BackendProfile[]>([]);
   const [embedders, setEmbedders] = useState<BackendProfile[]>([]);
   const [llmProfile, setLlmProfile] = useState<string>("");
@@ -43,6 +54,11 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
   const [raw, setRaw] = useState<RawOverride>({ baseUrl: "", model: "", apiKey: "" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Captured at the moment a connect actually succeeds — must NOT be derived
+  // live from the current dropdown selection, or changing the LLM profile
+  // post-connect (which flips the button to "Reconnect to apply changes")
+  // would make the status pill falsely claim the new profile is already live.
+  const [connectedLabel, setConnectedLabel] = useState<string>("");
 
   useEffect(() => {
     fetchBackends()
@@ -57,7 +73,7 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
       });
   }, []);
 
-  const handleConnect = async () => {
+  const doConnect = async (): Promise<string> => {
     setBusy(true);
     setError(null);
     try {
@@ -68,12 +84,27 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
         budget: { ceiling: ceiling ? Number(ceiling) : null },
       });
       onSession(res.session_id, mode);
+      setConnectedLabel(
+        llmProfile === RAW
+          ? raw.model || "raw override"
+          : (profiles.find((p) => p.name === llmProfile)?.label ?? llmProfile),
+      );
+      return res.session_id;
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Session creation failed");
+      throw e;
     } finally {
       setBusy(false);
     }
   };
+
+  useImperativeHandle(ref, () => ({ connect: doConnect }), [
+    llmProfile,
+    embedProfile,
+    ceiling,
+    raw,
+    mode,
+  ]);
 
   return (
     <section className="backend-panel">
@@ -82,7 +113,10 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
         <select
           id="llm-profile"
           value={llmProfile}
-          onChange={(e) => setLlmProfile(e.target.value)}
+          onChange={(e) => {
+            setLlmProfile(e.target.value);
+            onDirty();
+          }}
           disabled={disabled}
         >
           {profiles.map((p) => (
@@ -99,7 +133,10 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
         <select
           id="embed-profile"
           value={embedProfile}
-          onChange={(e) => setEmbedProfile(e.target.value)}
+          onChange={(e) => {
+            setEmbedProfile(e.target.value);
+            onDirty();
+          }}
           disabled={disabled}
         >
           {embedders.map((p) => (
@@ -117,14 +154,20 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
             aria-label="Base URL"
             placeholder="base_url"
             value={raw.baseUrl}
-            onChange={(e) => setRaw({ ...raw, baseUrl: e.target.value })}
+            onChange={(e) => {
+              setRaw({ ...raw, baseUrl: e.target.value });
+              onDirty();
+            }}
             disabled={disabled}
           />
           <input
             aria-label="Model"
             placeholder="model"
             value={raw.model}
-            onChange={(e) => setRaw({ ...raw, model: e.target.value })}
+            onChange={(e) => {
+              setRaw({ ...raw, model: e.target.value });
+              onDirty();
+            }}
             disabled={disabled}
           />
           <input
@@ -132,7 +175,10 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
             placeholder="api_key"
             type="password"
             value={raw.apiKey}
-            onChange={(e) => setRaw({ ...raw, apiKey: e.target.value })}
+            onChange={(e) => {
+              setRaw({ ...raw, apiKey: e.target.value });
+              onDirty();
+            }}
             disabled={disabled}
           />
         </div>
@@ -145,18 +191,34 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
           inputMode="decimal"
           placeholder="∞"
           value={ceiling}
-          onChange={(e) => setCeiling(e.target.value)}
+          onChange={(e) => {
+            setCeiling(e.target.value);
+            onDirty();
+          }}
           disabled={disabled}
         />
       </div>
 
-      <button
-        className="btn"
-        onClick={handleConnect}
-        disabled={disabled || busy}
-      >
-        {busy ? "Connecting…" : "Connect session"}
-      </button>
+      <div className="backend-connect-row">
+        <button
+          className="btn"
+          onClick={() => {
+            doConnect().catch(() => {});
+          }}
+          disabled={disabled || busy}
+        >
+          {busy
+            ? "Connecting…"
+            : stale
+              ? "Reconnect to apply changes"
+              : connected
+                ? "Reconnect"
+                : "Connect session"}
+        </button>
+        {connected && !busy ? (
+          <span className="backend-status">Connected — {connectedLabel}</span>
+        ) : null}
+      </div>
 
       {error ? (
         <span className="backend-error" role="alert">
@@ -165,4 +227,5 @@ export function BackendPanel({ onSession, mode, disabled }: BackendPanelProps) {
       ) : null}
     </section>
   );
-}
+  },
+);

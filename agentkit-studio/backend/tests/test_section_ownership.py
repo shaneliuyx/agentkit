@@ -59,6 +59,34 @@ class RecordingChat:
         return ChatResult(text="ok", total_tokens=1)
 
 
+def test_section_reducer_receives_full_scoring_rules() -> None:
+    from studio.findings import _make_section_reducer
+    from studio.rubric import format_scoring_rules
+
+    client = RecordingChat()
+    rules = format_scoring_rules(
+        [
+            {"category": "Scope and research framing", "points": 40, "signal": "structure"},
+            {"category": "Citation integrity", "points": 30, "signal": "verification"},
+            {"category": "Readability and formatting", "points": 30, "signal": "structure"},
+        ]
+    )
+    reducer = _make_section_reducer(
+        client,
+        "## Executive Summary\n\nDraft.",
+        weaknesses=[],
+        scoring_rules=rules,
+    )
+
+    reducer([""])
+
+    prompt = client.prompts[-1]
+    assert "FULL SCORING RULES" in prompt
+    assert "Scope and research framing" in prompt
+    assert "Citation integrity" in prompt
+    assert "Readability and formatting" in prompt
+
+
 # --- N4: code-fence comments are not headings -------------------------------
 
 def test_n4_mask_hides_incode_hash_lines():
@@ -118,6 +146,24 @@ def test_n2_n3_refutes_false_claims_keeps_real_ones():
     ]
     kept = refute_false_weaknesses(ws, doc)
     assert kept == ["[## Key Findings] sources lack URLs"]
+
+
+def test_refute_false_weaknesses_drops_stale_placeholder_claims():
+    doc = (
+        "# R\n"
+        "## Executive Summary\nSubstantive final content with a cited source https://example.com.\n"
+        "## Evidence and Analysis\nDetailed analysis is now present and complete.\n"
+    )
+    ws = [
+        "[document] Placeholder text remains in report: no specific urls were provided",
+        "[Executive Summary] assigned this phase but still empty/placeholder (not addressed)",
+        "[Evidence and Analysis] assigned this phase but still empty/placeholder (not addressed)",
+        "[## Evidence and Analysis] sources lack URLs",
+    ]
+
+    kept = refute_false_weaknesses(ws, doc)
+
+    assert kept == ["[## Evidence and Analysis] sources lack URLs"]
 
 
 def test_n3_section_ends_cleanly():
@@ -186,6 +232,34 @@ def test_one_section_file_per_worker_focus_assigns_all_files():
     assert "sections/002-references.md" not in foci[2]
 
 
+def test_section_worker_focus_requires_grounded_reducer_inputs():
+    foci = build_section_assignment_queue(
+        ["References"],
+        ["[## References] missing grounded source URLs"],
+        section_files={"References": "sections/008-references.md"},
+        scoring_matrix=[
+            {"category": "Citation integrity", "points": 20, "signal": "verification"},
+        ],
+    )
+
+    assert len(foci) == 1
+    prompt = foci[0]
+    assert "WORKER OUTPUT CONTRACT:" in prompt
+    assert "RESEARCH_FINDING" in prompt
+    assert "ARTICLE_TITLE" in prompt
+    assert "URL" in prompt
+    assert "PATCH_TARGET" in prompt
+    assert "QUOTE" in prompt
+    assert "WHY" in prompt
+    assert '{"op":"insert_after","anchor":"## Exact Assigned Heading","content":' in prompt
+    assert "op/anchor/content only" in prompt
+    assert "do not use legacy PATCH_TARGET/CONTENT patch objects" in prompt
+    assert "must not contain markdown headings or full-section prose" in prompt
+    assert "never invent bibliography entries" in prompt
+    assert "Do not return plain markdown section prose" in prompt
+    assert "References section" in prompt
+
+
 def test_section_assignment_rows_are_atomic_agent_file_pairs():
     rows = build_section_assignment_rows(
         ["Executive Summary", "References", "Risks"],
@@ -222,6 +296,22 @@ def test_strip_satisfied_placeholders_keeps_empty_sections_only():
     assert "## Executive Summary\nReal cited content" in out
     assert "## Methodology\n_(pending - needs sourced content)_" in out
     assert out.count("_(pending - needs sourced content)_") == 1
+
+
+def test_strip_satisfied_placeholders_replaces_reference_placeholder_from_urls():
+    doc = (
+        "## Executive Summary\nGrounded claim https://example.com/a.\n\n"
+        "## Evidence\nMore evidence https://example.com/b.\n\n"
+        "## References\n"
+        "*(Note: As no specific URLs were provided in the original draft, this section "
+        "serves as a placeholder for the required citations.)*\n"
+    )
+
+    out = strip_satisfied_placeholders(doc)
+
+    assert "no specific URLs were provided" not in out
+    assert "placeholder" not in out.lower()
+    assert "## References\n\n- https://example.com/a\n- https://example.com/b" in out
 
 
 def test_star_workers_use_explicit_section_foci_not_generic_facets():
@@ -602,6 +692,26 @@ def test_resolve_report_title_replaces_generic_model_title() -> None:
     assert "# Research Report" not in out
 
 
+def test_resolve_report_title_keeps_use_as_core_topic_word() -> None:
+    # Real live bug (session s_9b7bacfdc703): "use" inside the actual topic
+    # ("how to USE Pi and Craft") was matched by the old _TITLE_STOP_RE as a
+    # trailing-instruction marker, deleting the entire rest of the title down
+    # to "# Study how to". The stop-word must only fire on a genuine trailing
+    # instruction clause (comma-anchored), not a verb that's part of the topic.
+    doc = "# Research Report\n\n## Executive Summary\nBody.\n"
+    out = resolve_report_title(
+        doc,
+        "Study how to use Pi and Craft to develop agents and create a research "
+        "report, need to include example code or design architecture.",
+    )
+
+    # 15 words after the stop-clause is dropped; the 14-word cap trims the last one.
+    assert out.startswith(
+        "# Study how to use Pi and Craft to develop agents and create a research\n\n"
+    )
+    assert "example code" not in out.splitlines()[0]
+
+
 def test_resolve_report_title_drops_long_context_clause() -> None:
     doc = "# Research Report\n\n## Executive Summary\nBody.\n"
     out = resolve_report_title(
@@ -675,3 +785,46 @@ def test_consolidate_findings_density_cap_per_target():
     fs = [Finding(url=f"https://s{i}.com", why=f"w{i}", patch_target="## T") for i in range(5)]
     kept, st = consolidate_findings(fs, norm_url=_default_norm_url, max_per_target=2)
     assert len(kept) == 2 and st["capped"] == 3
+
+
+# --- reducer injects FULL scoring + weaknesses + fetched evidence, and is inspectable ---
+
+class _RRes:
+    text = "PATCHES:\n```json\n[]\n```"
+    total_tokens = 0
+
+
+class _RClient:
+    def __init__(self):
+        self.prompts = []
+
+    def chat(self, msgs):
+        self.prompts.append(msgs[0]["content"])
+        return _RRes()
+
+
+def test_reducer_prompt_injects_scoring_weaknesses_and_fetched_evidence():
+    from studio.findings import _make_section_reducer
+    c = _RClient()
+    ev = lambda _t: "- evidence/source-001.md — https://a.com/doc"
+    red = _make_section_reducer(
+        c, "## Key Findings\nbody", ["add sources"],
+        scoring_rules="- Source quality (14.7 pts): satisfy via sourcing",
+        evidence_fn=ev,
+    )
+    red(["[worker 1]\nURL: https://a.com/doc"])
+    p = c.prompts[0]
+    assert "FULL SCORING RULES" in p and "Source quality (14.7" in p
+    assert "SECTION WEAKNESSES" in p and "add sources" in p
+    assert "FETCHED EVIDENCE FILES" in p and "source-001.md" in p
+    # evidence precedes the artifact body section
+    assert p.index("FETCHED EVIDENCE FILES") < p.index("CURRENT ARTIFACT:\n--- BEGIN")
+    # captured for io/<step>.reducer.in.md persistence
+    assert red._io_capture.get("prompt")
+
+
+def test_reducer_omits_evidence_block_when_no_fetch_fn():
+    from studio.findings import _make_section_reducer
+    c = _RClient()
+    _make_section_reducer(c, "## A\nx", [], scoring_rules="- rule")(["[worker 1]\nx"])
+    assert "FETCHED EVIDENCE FILES" not in c.prompts[0]

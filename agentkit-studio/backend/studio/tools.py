@@ -26,6 +26,7 @@ notice, never raising, never a raw ``open()`` outside the workspace.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 import time
@@ -57,13 +58,90 @@ _MAX_RATE_RETRIES = 3
 #: ~80K chars ≈ 20K tokens (4 chars/token heuristic). Fetch results run up to
 #: 128K chars each; compaction prevents runaway context on multi-fetch loops.
 _COMPACT_CHARS = 80_000
+#: Studio-local size ceiling for edit_file (read-side AND write-side), independent
+#: of agentkit core's shared MAX_OUTPUT_BYTES (64 KiB, used by read_file et al.).
+#: edit_file reads/writes the WHOLE file, so both sides share this one threshold:
+#: a read at/over the cap can't be distinguished from a truncated read, so editing
+#: it would risk a truncated write-back (data loss) — refuse; and a write that would
+#: exceed the cap is refused before touching disk. Deliberately NOT the core
+#: constant: raising that would widen the blast radius to every jailed-read consumer.
+_EDIT_FILE_MAX_BYTES = 100 * 1024
 
 
 def _convo_chars(messages: list) -> int:
     return sum(len(str(m.get("content") or "")) for m in messages)
+class _ContextFetchCache:
+    """Per-run view over the web_fetch cache, isolated by ``contextvars``.
+
+    Finding 4: a single process-global dict let session B's citation "verify"
+    against a URL that session A fetched — grounding (findings.py) treats any
+    match in the cache as proof the page was read. Each Studio run executes on its
+    own ``threading.Thread`` (studio.app worker), and a new thread starts with a
+    fresh context, so keying the store on a ``ContextVar`` gives every run its own
+    cache with no cross-session leakage. It also removes the concurrent-write /
+    iterate race: reads snapshot the current context's dict before iterating, and
+    only this run's thread ever writes into it.
+
+    Behaves like a ``dict`` for every existing call site and test (``[]`` access,
+    ``in``, ``bool()``, ``.values()``/``.items()``, ``.clear()``, iteration)."""
+
+    _var: "contextvars.ContextVar[dict[str, tuple[str, int]]]" = contextvars.ContextVar(
+        "studio_fetch_cache"
+    )
+
+    def _store(self) -> dict[str, tuple[str, int]]:
+        try:
+            return self._var.get()
+        except LookupError:
+            fresh: dict[str, tuple[str, int]] = {}
+            self._var.set(fresh)
+            return fresh
+
+    def __getitem__(self, key: str) -> tuple[str, int]:
+        return self._store()[key]
+
+    def __setitem__(self, key: str, value: tuple[str, int]) -> None:
+        self._store()[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._store()[key]
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._store()
+
+    def __iter__(self):
+        return iter(list(self._store()))  # snapshot — no iterate-vs-write race
+
+    def __len__(self) -> int:
+        return len(self._store())
+
+    def __bool__(self) -> bool:
+        return bool(self._store())
+
+    def get(self, key: str, default: object = None) -> object:
+        return self._store().get(key, default)
+
+    def values(self) -> list[tuple[str, int]]:
+        return list(self._store().values())  # snapshot
+
+    def keys(self) -> list[str]:
+        return list(self._store().keys())
+
+    def items(self) -> list[tuple[str, tuple[str, int]]]:
+        return list(self._store().items())  # snapshot
+
+    def clear(self) -> None:
+        self._store().clear()
+
+    def reset(self) -> None:
+        """Install a fresh empty store in the current context (guards thread reuse)."""
+        self._var.set({})
+
+
 #: In-process cache for successful web_fetch results. Key: "url|selector".
 #: Only successful fetches are cached (errors are not stored so retries work).
-_fetch_cache: dict[str, tuple[str, int]] = {}
+#: Context-isolated per run — see _ContextFetchCache.
+_fetch_cache = _ContextFetchCache()
 
 #: A QUOTE shorter than this carries no grounding signal (e.g. "the", "agents") —
 #: it would match almost any page, so it never counts as substantiation.
@@ -231,6 +309,59 @@ WEB_FETCH_TOOL: dict[str, Any] = {
     },
 }
 
+#: Grep budget for search_evidence: cap matches + context so a local oMLX model's
+#: context is never flooded (same spirit as the 2500-char excerpt cap in
+#: _final_evidence_dossier). A few lines around each hit, not the whole file.
+_MAX_EVIDENCE_MATCHES = 10
+_EVIDENCE_CONTEXT_LINES = 3
+_MAX_EVIDENCE_CONTEXT_CHARS = 800
+
+#: Cap on paths returned by the glob tool (consistent with the evidence caps: keep
+#: a local model's context bounded). Truncation is flagged in the result.
+_MAX_GLOB_RESULTS = 100
+#: Default scope for search_evidence when no ``glob`` arg is given (backward compat).
+_DEFAULT_EVIDENCE_GLOB = "evidence/*.md"
+
+#: Grep across the session's fetched evidence files (jailed to evidence/).
+SEARCH_EVIDENCE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "search_evidence",
+        "description": (
+            "Grep across the fetched evidence files (evidence/*.md) gathered this "
+            "run. A single keyword matches per line; a multi-word query matches "
+            "when most of its words co-occur in one passage. Returns up to 10 "
+            "matches, each with file, line number, the source url, and a few lines "
+            "of surrounding context (never a whole file). Use to find grounding "
+            "content — a quote, statistic, or citation — when a section needs more "
+            "depth or a claim needs support; cite the returned url. Pass 'glob' to "
+            "widen the search to other workspace files (e.g. 'sections/*.md' or "
+            "'**/*.md'); omit it to search evidence only."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Case-insensitive substring/keyword to search for.",
+                },
+                "context_lines": {
+                    "type": "integer",
+                    "description": f"Lines of context around each hit (default {_EVIDENCE_CONTEXT_LINES}).",
+                },
+                "glob": {
+                    "type": "string",
+                    "description": (
+                        "Optional workspace-relative glob selecting which files to search "
+                        f"(default '{_DEFAULT_EVIDENCE_GLOB}'). Widen to search the whole workspace."
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
 #: Read a file from the per-session workspace (jailed).
 READ_FILE_TOOL: dict[str, Any] = {
     "type": "function",
@@ -271,6 +402,61 @@ WRITE_FILE_TOOL: dict[str, Any] = {
     },
 }
 
+#: Edit a file in the per-session workspace by unique find/replace (jailed).
+#: Contract mirrors Claude Code / DeepAgents' edit_file: old_string must be
+#: unique unless replace_all is set. Unlike patch_artifact this has NO OCC — it
+#: is a plain file editor (artifact.md's concurrent-mutation is patch_artifact's
+#: special case, not a generic editor's concern).
+EDIT_FILE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "edit_file",
+        "description": (
+            "Edit a UTF-8 text file in your workspace by replacing old_string with "
+            "new_string. old_string must appear EXACTLY ONCE in the file (else an "
+            "error), unless replace_all=true replaces every occurrence. The path is "
+            "relative to the workspace; paths escaping it are rejected."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Workspace-relative file path."},
+                "old_string": {"type": "string", "description": "Exact text to find (must be unique)."},
+                "new_string": {"type": "string", "description": "Replacement text."},
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence instead of requiring uniqueness (default false).",
+                },
+            },
+            "required": ["file_path", "old_string", "new_string"],
+        },
+    },
+}
+
+#: List files in the per-session workspace matching a glob pattern (jailed).
+GLOB_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "glob",
+        "description": (
+            "List files in your workspace matching a glob pattern (e.g. 'sections/*.md' "
+            "or '**/*.md'). Returns up to 100 workspace-relative paths. Optional 'path' "
+            "scopes the search to a subdirectory. Paths escaping the workspace are rejected."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.md'."},
+                "path": {
+                    "type": "string",
+                    "description": "Optional workspace-relative subdirectory to scope within (default: workspace root).",
+                },
+            },
+            "required": ["pattern"],
+        },
+    },
+}
+
 #: Artifact OCC tool schemas sourced from agentkit.tools.artifact.
 #: Re-exported here for callers that import from studio.tools directly.
 #: read_artifact is overridden to SECTION-SCOPED reads (token-cap, §11.4): the
@@ -294,6 +480,28 @@ _raf.setdefault("parameters", {}).setdefault("properties", {})["section"] = {
     "description": "Exact '## Heading' (verbatim from the index) to read one section. Omit for the index.",
 }
 PATCH_ARTIFACT_TOOL = ARTIFACT_TOOL_SCHEMAS[1]
+
+#: Registry of every tool schema, keyed by advertised name. Used by ``_schemas``
+#: when an explicit ``offer_tools`` allowlist is set (the editor pass restricts to
+#: read_file + search_evidence + read_artifact + patch_artifact + edit_file + glob).
+_ALL_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    WEB_SEARCH_TOOL,
+    WEB_FETCH_TOOL,
+    READ_FILE_TOOL,
+    WRITE_FILE_TOOL,
+    EDIT_FILE_TOOL,
+    GLOB_TOOL,
+    SEARCH_EVIDENCE_TOOL,
+    READ_ARTIFACT_TOOL,
+    PATCH_ARTIFACT_TOOL,
+]
+
+#: Tools that MUTATE state, derived from the schemas above (never a task/domain
+#: keyword) — used to detect a model that keeps calling read-only tools without
+#: ever committing an edit. See ``_READ_ONLY_STREAK_THRESHOLD`` below.
+_WRITE_TOOL_NAMES: frozenset[str] = frozenset(
+    s["function"]["name"] for s in (WRITE_FILE_TOOL, EDIT_FILE_TOOL, PATCH_ARTIFACT_TOOL)
+)
 
 
 def _split_sections(text: str) -> list[tuple[str, str]]:
@@ -410,6 +618,7 @@ class ToolAugmentedClient:
         fetch_fn: Callable[..., Any] | None = None,
         workspace: Workspace | None = None,
         artifact_path: Path | None = None,
+        offer_tools: set[str] | None = None,
         max_iters: int = _MAX_TOOL_ITERS,
         max_searches: int | None = None,
         max_successful_fetches: int | None = None,
@@ -423,6 +632,7 @@ class ToolAugmentedClient:
         self._fetch_fn = fetch_fn
         self._workspace = workspace
         self._artifact_path = artifact_path
+        self._offer_tools = offer_tools
         self._max_iters = max_iters
         self._max_searches = max_searches
         self._max_successful_fetches = max_successful_fetches
@@ -434,7 +644,13 @@ class ToolAugmentedClient:
     @property
     def _schemas(self) -> list[dict[str, Any]]:
         """The tool schemas advertised this run. File tools appear only when a
-        workspace is wired; artifact tools only when artifact_path is set."""
+        workspace is wired; artifact tools only when artifact_path is set.
+
+        When ``offer_tools`` is set (the editor pass), it is an explicit allowlist:
+        exactly the named schemas are advertised (the caller is responsible for
+        wiring the workspace/artifact_path those tools need)."""
+        if self._offer_tools is not None:
+            return [s for s in _ALL_TOOL_SCHEMAS if s["function"]["name"] in self._offer_tools]
         schemas = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL]
         if self._workspace is not None:
             schemas += [READ_FILE_TOOL, WRITE_FILE_TOOL]
@@ -470,6 +686,15 @@ class ToolAugmentedClient:
         # only its pre-tool preamble ("I'll fetch the articles now…"), never the
         # synthesis. See the iteration-exhaustion synthesis guard below.
         stopped_naturally = False
+        # A model offered a write tool that keeps calling only READ-only ones
+        # never triggers the narration-forcing branch below (it IS calling tools,
+        # just never a mutating one) — real evidence: gemma re-read the same
+        # sections 24/24 times across 3 structural-retry attempts, never once
+        # calling patch_artifact. `_write_names` is empty (nothing to force)
+        # when no write tool is offered this call at all.
+        _write_names = names & _WRITE_TOOL_NAMES
+        _read_only_streak = 0
+        _force_threshold = max(2, self._max_iters // 2)
 
         for _ in range(self._max_iters):
             result = self._chat_inner(convo, merged_tools)
@@ -509,6 +734,12 @@ class ToolAugmentedClient:
                 stopped_naturally = True  # model produced a final answer on its own
                 break
 
+            if _write_names:
+                if any(name in _write_names for name, _ in tool_calls):
+                    _read_only_streak = 0
+                else:
+                    _read_only_streak += 1
+
             # Echo the assistant turn WITH its tool_calls, then each result keyed to
             # a matching tool_call_id. agentkit's ChatResult drops the original id,
             # so we synthesize a clean one (`call_N`): a tool_result's id MUST match
@@ -533,6 +764,22 @@ class ToolAugmentedClient:
                 {"role": "assistant", "content": result.text or "", "tool_calls": assistant_calls}
             )
             convo.extend(tool_messages)
+
+            if (
+                _write_names
+                and _read_only_streak >= _force_threshold
+                and _ < self._max_iters - 1
+            ):
+                convo.append({
+                    "role": "user",
+                    "content": (
+                        "You have gathered enough context through reads. Make your "
+                        "decision now: call one of the available write tools with "
+                        "your change, or if no change is needed, say so directly "
+                        "instead of reading again."
+                    ),
+                })
+                _read_only_streak = 0
 
             # Context compaction: prevent runaway context when fetch results
             # (up to 128K chars each) accumulate across iterations. compact()
@@ -642,8 +889,14 @@ class ToolAugmentedClient:
             return msg
         if name == "read_file":
             return self._run_read(step_id, args)
+        if name == "search_evidence":
+            return self._run_search_evidence(step_id, args)
         if name == "write_file":
             return self._run_write(step_id, args)
+        if name == "edit_file":
+            return self._run_edit(step_id, args)
+        if name == "glob":
+            return self._run_glob(step_id, args)
         if name == "read_artifact":
             return self._run_read_artifact(step_id, args)
         if name == "patch_artifact":
@@ -779,6 +1032,91 @@ class ToolAugmentedClient:
         self._emit_result(step_id, "read_file", summary, 1, "")
         return self._tool_message("read_file", {"path": path, "content": text, "bytes": n_bytes})
 
+    def _run_search_evidence(self, step_id: str, args: dict[str, Any]) -> Message:
+        """Grep the session's fetched ``evidence/*.md`` files (jailed to the workspace).
+
+        Returns up to ``_MAX_EVIDENCE_MATCHES`` matches, each ``{file, line,
+        context}`` with a few lines around the hit (``grep -C``) — never a whole
+        file, so a local model's context is not flooded. Reads go through the
+        workspace jail; the manifest ``fetched-sources.json`` (no content) is
+        skipped. An empty query or a missing evidence dir returns cleanly.
+
+        The optional ``glob`` arg widens which files are scanned (e.g.
+        ``'sections/*.md'`` or ``'**/*.md'``); omitted it defaults to
+        ``evidence/*.md`` — the original behaviour, so existing callers are unchanged.
+        """
+        query = str((args or {}).get("query", "")).strip()
+        if self._workspace is None:
+            self._emit_result(step_id, "search_evidence", "no workspace", 0, "tools disabled")
+            return self._tool_message("search_evidence", {"error": "no workspace configured"})
+        if not query:
+            return self._tool_message("search_evidence", {"error": "query must not be empty"})
+        try:
+            ctx = int((args or {}).get("context_lines", _EVIDENCE_CONTEXT_LINES) or _EVIDENCE_CONTEXT_LINES)
+        except (TypeError, ValueError):
+            ctx = _EVIDENCE_CONTEXT_LINES
+        ctx = max(0, min(ctx, 10))
+        scope = str((args or {}).get("glob", "")).strip() or _DEFAULT_EVIDENCE_GLOB
+        root = self._workspace.root
+        try:
+            files = sorted(p for p in root.glob(scope) if p.is_file())
+        except (OSError, ValueError):
+            files = []
+        # Tokenized matching: a single keyword keeps the fast per-line substring
+        # path; a multi-word query matches when a majority of its tokens co-occur
+        # within one context window (Bug A: contiguous substrings like
+        # "methodology and structure" almost never sit on one raw line).
+        tokens = [t for t in query.lower().split() if t]
+        # ceil(0.6 * n): 2-of-2, 2-of-3, 3-of-4, 3-of-5 — tolerant of one absent
+        # or misspelled token without matching on a single incidental word.
+        need = max(1, (3 * len(tokens) + 4) // 5)
+        matches: list[dict[str, Any]] = []
+        for path in files:
+            if len(matches) >= _MAX_EVIDENCE_MATCHES:
+                break
+            try:
+                rel = str(path.relative_to(root))
+                text, _n = self._workspace.read(rel)
+            except (WorkspaceError, ValueError):
+                continue
+            # Bug B: attach the source URL so a hit is citable without fabrication.
+            # Evidence files are written as "URL: <url>\n\n<content>" (runner.py).
+            first = text.splitlines()[0] if text else ""
+            url = first[len("URL:"):].strip() if first.startswith("URL:") else ""
+            lines = text.splitlines()
+            i = 0
+            while i < len(lines):
+                if len(matches) >= _MAX_EVIDENCE_MATCHES:
+                    break
+                line_l = lines[i].lower()
+                lo = max(0, i - ctx)
+                hi = min(len(lines), i + ctx + 1)
+                if len(tokens) <= 1:
+                    # Single keyword: per-line substring (anchor stays line-precise).
+                    hit = bool(tokens) and tokens[0] in line_l
+                    advance = 1
+                else:
+                    # Multi-word: anchor a line carrying >=1 token, require a
+                    # majority of distinct tokens somewhere in its window.
+                    window_l = "\n".join(lines[lo:hi]).lower()
+                    hit = any(t in line_l for t in tokens) and (
+                        sum(1 for t in set(tokens) if t in window_l) >= need
+                    )
+                    advance = hi - i if hit else 1  # skip past window to avoid dupes
+                if not hit:
+                    i += 1
+                    continue
+                context = "\n".join(lines[lo:hi])
+                if len(context) > _MAX_EVIDENCE_CONTEXT_CHARS:
+                    context = context[:_MAX_EVIDENCE_CONTEXT_CHARS].rstrip() + " [truncated]"
+                matches.append(
+                    {"file": rel, "line": i + 1, "context": context, "url": url}
+                )
+                i += advance
+        summary = f"{len(matches)} match(es) for {query!r} in {len(files)} file(s)"
+        self._emit_result(step_id, "search_evidence", summary, len(matches), "")
+        return self._tool_message("search_evidence", {"query": query, "matches": matches})
+
     def _run_write(self, step_id: str, args: dict[str, Any]) -> Message:
         """write_file inside the workspace jail; an escape → error result + notice.
 
@@ -800,6 +1138,105 @@ class ToolAugmentedClient:
         summary = f"wrote {_fmt_bytes(n_bytes)} to {shown}"
         self._emit_result(step_id, "write_file", summary, 1, "")
         return self._tool_message("write_file", {"path": shown, "bytes": n_bytes})
+
+    def _run_edit(self, step_id: str, args: dict[str, Any]) -> Message:
+        """edit_file inside the workspace jail: unique find/replace, no OCC.
+
+        ``old_string`` must occur exactly once (0 → "not found"; >1 without
+        ``replace_all`` → "not unique"). Every failure is a returned error result,
+        never a raise (mirrors read_file/write_file). Reads then writes back through
+        the jail, so an escaping path touches nothing on disk.
+        """
+        path = str(args.get("file_path", ""))
+        old = str(args.get("old_string", ""))
+        new = str(args.get("new_string", ""))
+        replace_all = bool(args.get("replace_all", False))
+        if self._workspace is None:
+            self._emit_result(step_id, "edit_file", "no workspace", 0, "tools disabled")
+            return self._tool_message("edit_file", {"error": "no workspace configured"})
+        if not old:
+            return self._tool_message("edit_file", {"error": "old_string must not be empty"})
+        try:
+            text, n_bytes = self._workspace.read(path, max_bytes=_EDIT_FILE_MAX_BYTES)
+        except WorkspaceError as exc:
+            self._emit_result(step_id, "edit_file", f"rejected: {exc}", 0, str(exc), rejected=True)
+            return self._tool_message("edit_file", {"error": str(exc)})
+        # The read is capped at _EDIT_FILE_MAX_BYTES; a read AT/OVER the cap is
+        # indistinguishable from a truncated one, so editing it would risk a
+        # truncated write-back. Refuse rather than corrupt (data-loss guard).
+        if n_bytes >= _EDIT_FILE_MAX_BYTES:
+            notice = f"file too large to edit safely (>={_EDIT_FILE_MAX_BYTES}B)"
+            self._emit_result(step_id, "edit_file", notice, 0, notice)
+            return self._tool_message("edit_file", {"error": notice})
+        count = text.count(old)
+        if count == 0:
+            notice = f"old_string not found in {path}"
+            self._emit_result(step_id, "edit_file", notice, 0, notice)
+            return self._tool_message("edit_file", {"error": notice})
+        if count > 1 and not replace_all:
+            notice = f"old_string not unique, {count} occurrences found (use replace_all=true)"
+            self._emit_result(step_id, "edit_file", notice, 0, notice)
+            return self._tool_message("edit_file", {"error": notice})
+        edited = text.replace(old, new)
+        # Write-side guard: a replacement that inflates the file past the cap would
+        # persist an oversized file the read-side guard could then never re-open to
+        # edit. Refuse before touching disk (same studio-local threshold as the read).
+        if len(edited.encode("utf-8")) > _EDIT_FILE_MAX_BYTES:
+            notice = f"edit would exceed max file size (>{_EDIT_FILE_MAX_BYTES}B)"
+            self._emit_result(step_id, "edit_file", notice, 0, notice)
+            return self._tool_message("edit_file", {"error": notice})
+        try:
+            n_written, shown = self._workspace.write(path, edited)
+        except WorkspaceError as exc:
+            self._emit_result(step_id, "edit_file", f"rejected: {exc}", 0, str(exc), rejected=True)
+            return self._tool_message("edit_file", {"error": str(exc)})
+        replaced = count if replace_all else 1
+        summary = f"edited {shown} ({replaced} replacement{'s' if replaced != 1 else ''})"
+        self._emit_result(step_id, "edit_file", summary, replaced, "")
+        return self._tool_message(
+            "edit_file", {"path": shown, "replacements": replaced, "bytes": n_written}
+        )
+
+    def _run_glob(self, step_id: str, args: dict[str, Any]) -> Message:
+        """List workspace files matching a glob pattern (jailed to the workspace).
+
+        Returns up to ``_MAX_GLOB_RESULTS`` workspace-relative paths. An optional
+        ``path`` scopes to a subdirectory (jail-checked). Results are relative to the
+        workspace root and any hit that resolves outside it is dropped (never leaks an
+        absolute host path), so a pattern that reaches outside yields nothing.
+        """
+        pattern = str(args.get("pattern", "")).strip()
+        subdir = str(args.get("path", "") or "").strip()
+        if self._workspace is None:
+            self._emit_result(step_id, "glob", "no workspace", 0, "tools disabled")
+            return self._tool_message("glob", {"error": "no workspace configured"})
+        if not pattern:
+            return self._tool_message("glob", {"error": "pattern must not be empty"})
+        root = self._workspace.root
+        base = root
+        if subdir:
+            try:
+                base = self._workspace._resolve_inside(subdir)
+            except WorkspaceError as exc:
+                self._emit_result(step_id, "glob", f"rejected: {exc}", 0, str(exc), rejected=True)
+                return self._tool_message("glob", {"error": str(exc)})
+        try:
+            hits = sorted(p for p in base.glob(pattern) if p.is_file())
+        except (OSError, ValueError) as exc:
+            return self._tool_message("glob", {"error": f"glob failed: {exc}"})
+        rels: list[str] = []
+        for p in hits:
+            try:
+                rels.append(str(p.resolve().relative_to(root)))
+            except ValueError:
+                continue  # jail-safe: silently drop anything outside the workspace root
+        truncated = len(rels) > _MAX_GLOB_RESULTS
+        rels = rels[:_MAX_GLOB_RESULTS]
+        summary = f"{len(rels)} match(es) for {pattern!r}"
+        if truncated:
+            summary += f" (capped at {_MAX_GLOB_RESULTS})"
+        self._emit_result(step_id, "glob", summary, len(rels), "")
+        return self._tool_message("glob", {"pattern": pattern, "matches": rels, "truncated": truncated})
 
     # -- artifact tools (OCC + file locking) ------------------------------
 

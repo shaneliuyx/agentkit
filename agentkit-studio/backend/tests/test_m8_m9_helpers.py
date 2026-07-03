@@ -147,6 +147,19 @@ def test_findings_to_patches_multiple_blocks() -> None:
     assert all(p.op == "insert_after" for p in ps)
 
 
+def test_findings_to_patches_dedupes_repeated_blocks() -> None:
+    txt = (
+        "## RESEARCH_FINDING\nURL: https://a.com/x\nKEY_INSIGHT: same claim\n"
+        "PATCH_TARGET: ## A\n\n"
+        "## RESEARCH_FINDING\nURL: https://a.com/x\nKEY_INSIGHT: same claim\n"
+        "PATCH_TARGET: ## A\n"
+    )
+
+    ps = _research_findings_to_patches(txt)
+
+    assert len(ps) == 1
+
+
 # ---------------------------------------------------------------------------
 # §11 — worker contract + all-error halt
 # ---------------------------------------------------------------------------
@@ -342,6 +355,9 @@ def test_build_planner_cot_prompt_guides_report_plan_depth() -> None:
     assert "Standard report" in prompt
     assert "Large, high-impact" in prompt
     assert "planning heuristics, not hardcoded stages" in prompt
+    assert "durable_board" in prompt
+    assert "gateway" in prompt
+    assert "A later LLM topology selector will make the final choice" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -600,3 +616,31 @@ def test_set_hill_climb_wires_sizing_into_loop_config() -> None:
     cfg = registry.get(s.session_id).loop_config.sizing()
     assert cfg.max_agents == 3 and cfg.max_tasks_per_agent == 4
     assert compute_n_agents(74, cfg) == 3
+
+
+def test_rubric_defaults_expose_profile_templates() -> None:
+    from studio.app import rubric_defaults
+
+    defaults = rubric_defaults()
+
+    assert defaults["report_type"] == "general"
+    presets = {p["report_type"]: p for p in defaults["template_presets"]}
+    assert "general" in presets
+    assert "deep_technical" in presets
+    assert "Practical Implementation" in presets["deep_technical"]["sections"]
+
+
+def test_set_rubric_can_select_profile_template() -> None:
+    from studio.app import registry, set_rubric
+
+    s = registry.create(
+        llm_spec={"name": "haiku", "model": "m", "endpoint": "e"},
+        embed_spec={}, llm_info={}, embed_info={}, mode="llm",
+        budget_ceiling=None,
+    )
+    out = set_rubric(s.session_id, {"report_type": "deep_technical"})
+
+    cfg = out["rubric_config"]
+    assert cfg["report_type"] == "deep_technical"
+    assert "Practical Implementation" in cfg["template"]
+    assert "Appendix B. Evidence Matrix" in cfg["template"]

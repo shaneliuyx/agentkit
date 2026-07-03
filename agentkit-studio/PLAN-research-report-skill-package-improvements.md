@@ -87,6 +87,22 @@ Acceptance tests:
 - Grounded duplicate findings produce one evidence item after dedupe.
 - Offline tests pass without network.
 
+Implemented slice:
+
+- `backend/studio/evidence.py` defines `EvidenceItem`, converts grounded
+  findings into report evidence rows, and renders a markdown evidence matrix.
+- `runner.py` emits an `evidence` SSE event after final artifact cleanup,
+  filtered to findings whose URLs survived into the served artifact.
+- Frontend event types and run store now mirror the `evidence` event, and the
+  ResultWindow renders the markdown evidence matrix below the report.
+- `RunSnapshot` and `/export/{session_id}` include `evidenceMatrix` when a run
+  has accepted evidence.
+- `TaskRunStore` persists accepted evidence rows as `evidence_json` on each run,
+  and reloads them through `latest`, `best`, `all_runs`, and
+  `latest_with_content`. This is the recommended first-step persistence path;
+  a separate query table can still be added later if URL/status analytics need
+  indexed evidence queries.
+
 ## Workstream B: Hard-Fail Publish Gate
 
 Goal: separate "quality score" from "publish decision." A report can score well structurally but still be blocked by hard defects.
@@ -135,8 +151,8 @@ Goal: keep Studio's deterministic scorer but present package-aligned categories 
 Implementation:
 
 1. Keep `rubric_score()` as the machine optimization signal.
-2. Add a unified 100-point scorecard standard with profile-specific applicability.
-   - Use one common category vocabulary across profiles:
+2. Add a profile/template-derived 100-point scorecard standard.
+   - Use one common allowed category vocabulary across profiles:
      1. Scope and research framing (8)
      2. ToC completeness (7)
      3. Source quality (12)
@@ -150,22 +166,83 @@ Implementation:
      11. Reflection and limitations (5)
      12. Governance and safety (4)
    - Each report profile owns a `ScoreProfile`: category weights,
-     applicability, required evidence signals, and the section concepts used for
-     category checks. For example, `deep_technical` may keep code/diagram
-     weights active, while `market`, `policy`, and `literature_review` can
-     reduce or reallocate those categories without changing source code.
+     required evidence signals, and the section concepts used for category
+     checks. The frozen `scoring_matrix` contains only categories associated
+     with the selected profile/template. If a category is not in, implied by, or
+     related to the selected template, it is omitted from scoring rather than
+     kept as an inactive/zero row. For example, `deep_technical` can include
+     code/diagram categories when its template includes code or diagram/table
+     concepts, while `market`, `policy`, and `literature_review` omit those
+     dimensions unless their selected template explicitly requires them.
    - On run start, snapshot both `scoring_template` and `scoring_matrix` from
      the selected report profile. This frozen baseline is the core scoring
      target for the whole run.
    - Dynamic hub/reducer section additions update `active_outline` for publish
      readiness and export, but do not rewrite the frozen core scoring weights
      mid-run. Dynamic sections can contribute as bonus/supporting evidence under
-     synthesis, readability, usefulness, or governance, but they cannot dilute or
-     replace required baseline categories.
+     an already-scored related category, but they cannot add unrelated scoring
+     dimensions, dilute baseline categories, or replace required baseline
+     categories mid-run.
    - Score ToC completeness against `scoring_template`, not the mutable
      `active_outline`. Publish gate still checks `active_outline` so accepted
      dynamic sections cannot disappear from the final report.
-3. Add `rubric_scorecard_100()` that projects current deterministic parts plus publish gate data into the frozen score profile:
+   - Add the unified scoring system to the task at creation/planning time so
+     the planner can create work with scoring constraints in view.
+   - Pass scoring requirements to section agents by relatedness: each worker
+     receives only the scoring rows related to its assigned section plus
+     universal rows such as ToC/readability; unrelated section rules must be
+     cropped out of that worker's prompt.
+   - Pass the full frozen scoring matrix to reducers and final scoring, always.
+     Reducers measure the whole artifact against all profile/template rules
+     after section-local work is merged; reducer prompts do not shrink.
+   - Generate weaknesses from the unified scorecard after each reducer/writeback
+     and after final scoring:
+     low-scoring category rows become section-prefixed weaknesses using
+     `scoring_template` relatedness, or `[document]` weaknesses for universal
+     whole-artifact rules. Achieved rows are removed from the next phase's
+     worker prompts, while unachieved rows join mined/publish/lint weaknesses
+     and seed the next phase/run.
+   - Cold-run lifecycle:
+     1. Freeze the full `scoring_template` and profile/template-bound
+        `scoring_matrix` at run start.
+     2. Give the planner/task creator the full frozen scoring block so the
+        initial work plan is built with every requirement visible.
+     3. Split that scoring block for section workers by relatedness:
+        section-related rows plus universal rows only.
+     4. Give every reducer the full frozen scoring block, not the split or
+        remaining subset. Reducers always evaluate the whole assembled artifact
+        against every frozen requirement.
+     5. After reducer/writeback, compute the scorecard against the full frozen
+        matrix; remove achieved rows only from future worker prompts; turn
+        unachieved rows into weaknesses for the next phase/run.
+     6. After enough grounded findings/patches exist, run a sanctioned final
+        synthesis/refine pass that may write full report prose from the assembled
+        evidence. Section workers must still return only grounded findings or
+        scoped patches; the synthesis pass is the only full-prose escape hatch,
+        and it must preserve every verified URL/source claim. This pass must
+        synthesize the fetched material into summary, analysis, implications,
+        and limitations/reflection; adding URLs to otherwise shallow prose is
+        not sufficient quality repair.
+        Pass prior fetched materials to this pass as session-local file paths
+        (for example `evidence/fetched-sources.json` and `evidence/source-001.md`)
+        plus the existing bounded handoff, not by inlining the raw cache. The
+        final synthesis agent can use the jailed `read_file` tool to inspect
+        source files when upstream findings are too thin. This applies to both
+        cold final synthesis and seeded-artifact final steps; seeded steps still
+        must not echo the whole document. Do not expose the global `.web_cache.json`
+        wholesale; only write/read the per-run evidence manifest and source files
+        relevant to cited upstream evidence.
+        Final prompts must use the explicit heading `FETCHED EVIDENCE FILES`
+        and must never show an empty full-standard block just because a session
+        is missing `rubric_config.scoring_matrix`; fall back to the selected
+        profile/template default so final synthesis still sees the full frozen
+        scoring requirements. Tests must inspect the generated workspace prompt
+        file under `io/*.in.md`, not only an in-memory prompt capture.
+     7. Final scoring and publish readiness also use the full frozen matrix, not
+        `remaining_scoring_matrix`.
+3. Add `rubric_scorecard_100()` as the unified scoring surface: compute the
+   original deterministic rubric base/signals, then project those signals plus
+   publish-gate/lint evidence through the frozen `scoring_matrix`:
    - Scope/framing: intake metadata present and final answer addresses requirement.
    - ToC completeness: `sections_present` over `scoring_template`.
    - Source quality: evidence reliability/source type mix.
@@ -179,16 +256,22 @@ Implementation:
    - Reflection/limitations: section presence and uncertainty language.
    - Governance/safety: gates, budget, human-review flag, privacy/security/cost controls.
 
-Tradeoff: replace `_WEIGHTS` with the 12 package weights vs add a projection layer.
+Tradeoff: replace `_WEIGHTS` with the 12 package weights vs add a unified
+matrix projection over the original rubric signals.
 
 - Replacing `_WEIGHTS` gives conceptual alignment but risks destabilizing the hill-climb metric already calibrated in tests.
-- A projection layer gives user-facing package compatibility while preserving the optimized internal signal.
+- A unified matrix projection gives user-facing package compatibility while
+  preserving the optimized internal signal. The reported scorecard should expose
+  both the original base score/signals and the matrix-projected 100-point
+  categories.
 - Dynamically adjusting weights from the active ToC would reward template drift
   and let the model dilute hard categories by adding easier sections. Freezing
   the score profile at run start keeps drift comparisons meaningful.
 
-Chosen: projection layer with frozen score profiles. Use `rubric_score()` for
-epoch keep/discard; use `rubric_scorecard_100()` for publish/readiness reporting.
+Chosen: unified scorecard with frozen score profiles. Use `rubric_score()` as
+the calibrated epoch keep/discard control signal; use `rubric_scorecard_100()`
+as the unified reporting/readiness surface built from the same original signals
+plus `scoring_matrix`.
 
 Acceptance tests:
 
@@ -196,9 +279,48 @@ Acceptance tests:
 - A good fixture maps above 80/90 depending on hard fails.
 - A thin fixture maps below 70 or is blocked by missing evidence.
 - Selecting different report profiles produces different frozen
-  `scoring_matrix` applicability while keeping the same category vocabulary.
+  `scoring_matrix` rows from the shared allowed category vocabulary, omitting
+  categories unrelated to the selected template.
+- A custom template that omits code, diagram, governance, or other dimensions
+  also omits those unrelated categories from `scoring_matrix`.
+- A cold run sends only section-relevant/universal scoring rows to workers, but
+  sends the full frozen scoring block to reducers in every phase.
+- After a reducer pass, fulfilled rows disappear from later worker assignments,
+  unfulfilled rows become weaknesses, and the next reducer still receives the
+  full frozen requirements.
+- A cold run with valid grounded findings but no polished prose still reaches a
+  final synthesis/refine pass; a cold run with no grounded findings keeps
+  placeholders and reports weaknesses instead of inventing prose.
+- Section worker prompts state the exact reducer-applicable `PATCHES` shape:
+  `{"op":"insert_after","anchor":"## Exact Assigned Heading","content":"...URL..."}`.
+  Legacy `PATCH_TARGET`/`CONTENT` patch objects are explicitly forbidden for
+  `PATCHES`; `PATCH_TARGET` remains valid only inside `RESEARCH_FINDING`.
+- Final placeholder cleanup is deterministic: if a References section only says
+  citations/URLs were not provided but the final artifact contains URLs
+  elsewhere, it is replaced with a URL list; stale placeholder/empty-section
+  weaknesses are refuted against the post-synthesis artifact before scoring.
 - Adding a dynamic section changes `active_outline` and publish checks, but does
   not change the frozen core `scoring_template` or category weights.
+
+Implemented slice (reducer scoring + evidence handoff):
+
+- The section reducer previously received `rubric_config.scoring_matrix` directly, so when scoring
+  lived in the requirement (empty `rubric_config`) it saw `- (no scoring matrix provided)`. It now
+  receives `format_scoring_rules(_full_scoring_matrix(session))` — the full frozen matrix with the
+  profile/template fallback (the same fix entry 152 applied to final synthesis). Every reducer
+  measures the whole artifact against every frozen requirement, per this workstream's contract.
+- The reducer prompt now also injects a `FETCHED EVIDENCE FILES` block (via `_final_evidence_dossier`
+  over the phase's worker drafts + current artifact), so reducers verify claims against fetched
+  source files, not worker prose alone — matching the final-synthesis evidence handoff.
+- The reducer prompt+output are persisted to `io/<step>.reducer.in.md`/`.out.md` and an `agent_io.jsonl`
+  `reducer` row, so the injected FULL SCORING STANDARD / UNRESOLVED WEAKNESSES / FETCHED EVIDENCE
+  are inspectable (previously the reducer stage left no io artifact).
+- Loop-seed carry-forward (local + remote): a loop-seeded or reworded run can rotate the
+  task_hash so the exact-key prior lookup misses and it would cold-start. The runner now falls
+  back to semantic search (`similar_runs`, cosine >= 0.6) and seeds from the closest prior with
+  real content; among multiple content-bearing priors it takes the latest (`session_recency`).
+  Only a genuinely novel task (nothing above threshold) cold-starts. This keeps hill-climb
+  improving the nearest existing report regardless of how the run's identity was seeded.
 
 ## Workstream D: Intake, Research Brief, And Generic Report Profile
 
@@ -252,11 +374,11 @@ Acceptance tests:
 
 Goal: export not only a loop definition but a complete research-report bundle like the downloaded package.
 
-Scope note: this workstream is the minimal export spine. Workstream L extends the same `report_export.py` module into the full enhanced bundle. Do not create a second exporter for Workstream L.
+Scope note: this workstream is the minimal export spine. Workstream L extends the same export module into the full enhanced bundle. Do not create a second exporter for Workstream L.
 
 Implementation:
 
-1. Add `backend/studio/report_export.py`.
+1. Add a research-package serializer to the export module.
    - Input: `RunSnapshot`, final markdown, evidence matrix, scorecard, publish gate result, loopdoctor checks.
    - Output files:
      - `research_report.md`
@@ -281,6 +403,20 @@ Acceptance tests:
 - Finished run with evidence returns all required files.
 - Bundle manifest includes package version, run metadata, scorecard, and evidence counts.
 
+Implemented slice:
+
+- Reused `backend/studio/export.py` instead of adding a second exporter module.
+- Added `run_to_research_package(snapshot)` returning a JSON manifest plus file
+  contents for `research_report.md`, `evidence_matrix.md`, `scorecard.json`,
+  `human_review_checklist.md`, `run_manifest.json`, and `loop.json`.
+- Added `GET /export/{session_id}/research-package` with the same 404/409
+  behavior as `/export/{session_id}`.
+- Extended `RunSnapshot` with `scorecard_100` and wired the runner's existing
+  final scorecard into the recorded snapshot, so package export uses the run's
+  actual scorecard instead of recalculating or inventing one.
+- Manifest output includes `packageVersion`, run metadata, `hasEvidenceMatrix`,
+  `evidenceCount`, and `hasScorecard`.
+
 ## Workstream F: Human Review Workflow
 
 Goal: expose the package's "do not publish high-impact reports without review" rule.
@@ -302,6 +438,22 @@ Acceptance tests:
 
 - Legal/medical/security/investment keywords or explicit config set `REVIEW_REQUIRED`.
 - Review-required result cannot be `PUBLISH_READY` even with score >= 90.
+
+Implemented slice:
+
+- Added `build_review_status()` in `backend/studio/report_quality.py`. It marks
+  `REVIEW_REQUIRED` for high-impact topics, publish/readiness issues, missing
+  accepted evidence on report tasks, non-passing Loop Doctor checks, or weak
+  report scorecard evidence/source/citation signals.
+- Extended `DoneEvent` and `RunSnapshot` with a `review` payload. The payload
+  includes `required`, `status`, `publish_decision`, `reviewed`, and `reasons`.
+  When review is required, `publish_decision` is `REVIEW_REQUIRED`, not
+  `PUBLISH_READY`.
+- The research-package manifest and `run_manifest.json` include the review
+  payload, and `human_review_checklist.md` adds a required-review checklist item
+  when applicable.
+- The ResultWindow renders a visible `REVIEW REQUIRED — not reviewed` block
+  with reasons. Manual approval remains deferred as planned.
 
 ## Workstream G: Diagram And Code Quality Checks
 
@@ -329,6 +481,16 @@ Acceptance tests:
 - Empty tables and unexplained diagrams flagged.
 - Pseudocode-labelled blocks are not treated as broken runnable code.
 
+Implemented slice:
+
+- Extended `backend/studio/artifact_lint.py` with static checks for malformed
+  markdown table separators, empty comparison tables, mermaid diagrams without
+  nearby explanatory prose, and syntax errors in fenced `python`/`py` blocks.
+- Pseudocode and other non-Python fences are ignored by the runnable-code check.
+- Added the new lint markers to the runner's resolved-weakness pruning list so
+  fixed table/diagram/code weaknesses are not carried forward.
+- Kept execution out of scope; fenced Python is parsed with stdlib `ast` only.
+
 ## Workstream H: Source Quality And Corroboration
 
 Goal: implement "never trust one source" without forcing every claim into costly duplicate retrieval.
@@ -355,6 +517,27 @@ Acceptance tests:
 - One official source can be `verified`.
 - One blog source for a major recommendation is `partially_supported` or hard-fail candidate.
 - Two independent non-primary sources can corroborate.
+
+Implemented slice:
+
+- Extended `backend/studio/evidence.py` with URL-based source-type inference
+  for official docs, standards, academic/preprint sources, repositories, blogs,
+  forum/social sources, and generic web sources.
+- Added graded claim corroboration in the evidence layer. Major-section claims
+  in findings/analysis/recommendation/conclusion/decision/risk/summary sections
+  can stand on primary/high-reliability sources; single non-primary sources are
+  downgraded to `status="weak"` with a corroboration note.
+- Independent hosts for the same normalized claim are marked as corroborated,
+  so two non-primary sources can support a major claim without adding a new
+  retrieval loop or source database.
+- `runner.py` now counts weak evidence rows after final artifact cleanup and
+  passes that count into `build_review_status()`. Human review therefore sees
+  "weak or uncorroborated evidence" when a report-like task depends on weak
+  major evidence.
+- `build_review_status()` remains advisory/export-facing; reducers and final
+  scoring still receive the full frozen scoring requirements, while evidence
+  weakness feeds the review/publish workflow rather than directly rewriting the
+  deterministic rubric score.
 
 ## Workstream I: Add Research Report Loop And Skill Through Existing Loop Search/Seed
 
@@ -440,6 +623,22 @@ Tradeoff: add the research report workflow as a loop, a skill, or both.
 - Both: loop handles execution; skill documents/routs the workflow and can be retrieved by agents.
 
 Chosen: both, but loop first. The loop is what makes "Seed this run" work today; the skill is discoverability and future retrieval.
+
+Implemented slice:
+
+- Added `backend/studio/local_catalog/loops/research-report-agent.json` (slug, title,
+  description, useWhen, research/category, keywords, the 8-step package loop, verification, why).
+- `CatalogClient` gained `include_local: bool = True`; the `loops` property merges bundled local
+  loops after remote ones, local overriding remote by slug. Local loops survive a remote-fetch
+  failure (resilient discovery). Wired via `_LOCAL_LOOP_DIR` + `_load_local_loops()`.
+- `/loops` ranks `research-report-agent` for research/report/evidence/citation queries; `get`,
+  `find`, and `adapt` return it; `/session/{id}/seed` seeds its 8 steps and emits `loop_seed`.
+- Domain skill added: `skills_paths.py::build_domain_skills()` returns `research-report-agent`
+  (trigger + body routing to Studio's local loop, evidence matrix, frozen scoring, publish gate,
+  package export). `/skills` now returns path skills plus domain skills with `source`/`kind` tags.
+- Tests: `test_loops.py` (local loop find/seed/override + degrade), `test_skills_paths.py`
+  (domain skill), `test_export.py` (`/skills` lists paths + domain). Catalog management CRUD
+  (`/catalog/*`) and the Find/Loops/Skills/Sources frontend tabs remain Workstream J, not started.
 
 ## Workstream J: Catalog Management For Local And Remote Loops/Skills
 
@@ -847,6 +1046,32 @@ Acceptance tests:
 - A phase checkpoint records artifact path, observation ids, and evidence count.
 - Stop report is emitted/exported for budget, cancel, and validation-pass paths.
 
+Implemented slice:
+
+- Added a minimal run-level stop report and metrics path without introducing a
+  separate observation store yet.
+- `runner.py` now distinguishes `budget_exceeded`, `cancel_requested`, and
+  `validation_passed` stop reasons for the run-level report, counts existing
+  tool-result failures from the shared tool-result emit path, and emits a
+  `metrics` SSE event before `done`.
+- `DoneEvent` and `RunSnapshot` carry the same metrics payload so live clients
+  and exports see the same stop reason.
+- `RunSnapshot` now carries compact `agent_trace_jsonl` and
+  `checkpoints_jsonl` strings. Tool-result observations are appended from the
+  shared tool-result emit path, phase checkpoints are appended from real
+  `StepRun` completions, and a final checkpoint captures evidence count, score,
+  failed validation count, observation ids, and stop reason.
+- Tool observations include `args_redacted` from the paired tool-call event and
+  a timestamp. Secret-like keys are replaced with `[redacted]`, and long string
+  arguments are clipped at the trace boundary.
+- `checkpoints.jsonl` now includes a `pre_validation` checkpoint before final
+  stop accounting. It records evidence count, weak evidence count, score,
+  publish issue count, Loop Doctor failure count, review-required state, and
+  observation ids so exported runs show the validation inputs, not only the
+  final stop reason.
+- This remains the JSONL-first path from the tradeoff above; SQLite indexing
+  can wait until the UI needs cross-run querying.
+
 ## Workstream L: Full Enhanced Report Bundle Export
 
 Goal: match the enhanced report's bundle standard: a finished research run should be exportable as a complete shareable package, not only a Markdown report or loop JSON.
@@ -875,7 +1100,7 @@ Required bundle files:
 
 Implementation:
 
-1. Extend `backend/studio/report_export.py`.
+1. Extend `backend/studio/export.py`.
    - Add `build_research_bundle(snapshot, evidence, scorecard, publish_gate, observations, checkpoints)`.
    - Return a manifest plus file-content mapping initially.
 
@@ -908,6 +1133,30 @@ Acceptance tests:
 - PDF unavailable path is explicit and non-fatal.
 - Demo code runs offline and writes expected sample files.
 - Manifest records renderer status and every file name.
+
+Implemented slice:
+
+- Extended `run_to_research_package()` in `backend/studio/export.py` to include
+  additional core bundle files without adding renderer dependencies:
+  `research_report.html`, `evidence_matrix.json`, `agent_trace.jsonl`,
+  `checkpoints.jsonl`, `source_notes.json`, and `requirements.txt`.
+- Added a minimal offline Markdown-to-HTML renderer for headings, paragraphs,
+  lists, fenced code, and markdown tables. This keeps HTML export reliable even
+  when Pandoc or diagram tooling is unavailable.
+- Added structured evidence JSON and source notes by parsing the exported
+  evidence matrix. This is intentionally derived from current snapshot state;
+  a future slice can replace it with first-class persisted evidence rows in
+  `RunSnapshot`.
+- `run_manifest.json` and package manifest now record `rendererStatus`; PDF and
+  diagram rendering are explicitly `unavailable` rather than silently omitted.
+- `run_manifest.json` records `exportedFiles` so consumers can audit the exact
+  package contents.
+- Added deterministic offline practice-code files:
+  `research_agent_demo.py`, `research_agent_demo.pseudo`, and
+  `research_agent_demo_output.txt`. The Python demo uses only stdlib, mirrors
+  Studio concepts at toy scale, and writes a report, source notes, and trace
+  file when run.
+- Still deferred: PDF/PNG rendering and richer generated diagrams.
 
 ## Workstream M: Evaluation Metrics And Stop-Condition Dashboard
 
@@ -948,6 +1197,21 @@ Acceptance tests:
 - Metrics are deterministic for a synthetic trace.
 - Tool-call accuracy and citation accuracy handle zero denominators.
 - Stop reason appears in metrics and export manifest.
+
+Implemented slice:
+
+- Added `backend/studio/run_metrics.py` with deterministic `build_stop_report()`
+  and `build_run_metrics()` helpers.
+- Added the `metrics` SSE event and frontend store/type support. The store keeps
+  metrics as state and also copies `done.metrics` into the final result payload.
+- Research-package export now includes `metrics.json`, plus `metrics` and
+  `stopReport` in `run_manifest.json`.
+- `agent_trace.jsonl` and `checkpoints.jsonl` now come from `RunSnapshot` trace
+  state instead of placeholder empty strings.
+- Metrics currently use available run signals: tool-result counts, evidence
+  count, weak evidence count, review-required state, scorecard score, elapsed
+  wall time, and token cost. Full trace-derived metrics wait for Workstream K's
+  observation/checkpoint state.
 
 ## Workstream N: Generic Template Presets And Editorial Cleanup Gates
 
@@ -1055,6 +1319,45 @@ Acceptance tests:
 - Replacing a stale DB template preserves provenance while preventing future automatic reuse.
 - Duplicate heading lint catches repeated sections.
 - Editorial cleanup does not drop citations.
+
+Implemented slice:
+
+- `backend/studio/report_profiles.py` owns built-in generic/profile presets and
+  exposes them through the existing defaults API/UI path.
+- `TemplateStore` now migrates lightweight metadata columns onto
+  `report_templates`: `report_type`, `source`, `status`, and
+  `failure_reason`.
+- `TemplateStore.audit_templates(report_type)` reuses deterministic artifact
+  lints and disables unsafe stored skeletons while preserving the rows for
+  provenance. General/market/policy-style profiles also disable code or
+  implementation sections as off-profile content.
+- `find_template()` now only considers `status='active'` templates, so stale or
+  disabled skeletons cannot be automatically reused.
+- Added `POST /catalog/templates/audit`, which runs the same quarantine audit
+  and returns audited rows plus a disabled count.
+- Added `GET /catalog/templates`, a read-only inventory endpoint that returns
+  template metadata, status, failure reason, heading count, and a bounded
+  skeleton preview without returning full template bodies.
+- Added `POST /catalog/templates/{id}/replace`, which replaces one stored
+  skeleton in place, preserves the catalog row identity and existing
+  requirement/provenance fields, immediately applies the same structural audit,
+  and leaves invalid replacements disabled instead of deleting them.
+- Added template catalog import/export endpoints:
+  - `GET /catalog/templates/export` returns metadata plus full skeleton bodies,
+    intended for explicit catalog backup or transfer rather than read-only UI
+    inventory.
+  - `POST /catalog/templates/import` imports skeletons with name, requirement,
+    report type, and source metadata; each imported row is audited before
+    activation, and exact duplicate skeletons are skipped rather than inserted.
+- Added approval metadata and actions:
+  - `report_templates` now carries `quality_score`, `created_from_session`,
+    `approved_by`, and `last_used_at`.
+  - `POST /catalog/templates/{id}/approve` approves only clean audited rows;
+    unsafe rows stay disabled with `failure_reason`.
+  - Automatic template reuse stamps `last_used_at` when `find_template()`
+    selects an active template.
+- Still deferred: richer UI/editor approval workflow around these backend
+  fields if users need multi-step review queues.
 
 ## Workstream O: Weak-Model Report Quality Hardening
 
@@ -1510,6 +1813,10 @@ Verdict: the plan is feasible, but implementation should be reuse-first. Studio 
    - Existing component: `agentkit.artifacts.types.Finding`.
    - Use it as the base research-finding shape and add Studio-side metadata only for report-specific evidence fields such as `source_type`, `publication_date`, `reliability`, `used_in_sections`, and `publish_status`.
    - Rationale: `backend/studio/findings.py` already extracts and grounds `Finding` objects before patching artifacts. A separate evidence parser would duplicate the most reliable code path.
+   - Implemented guard: parsed `RESEARCH_FINDING` blocks are deduped by
+     normalized URL, patch target, and claim/quote before they become additive
+     patches. This keeps fetched evidence yield while preventing repeated
+     worker findings from creating duplicate prose walls.
 
 2. Artifact patching and section ownership.
    - Existing components: `agentkit.artifacts.patcher.DocPatch`, `reduce_patches`, `write_artifact`; `agentkit.artifacts.sections.split_sections`, `accept_rewrite`.
@@ -1599,7 +1906,7 @@ Verdict: the plan is feasible, but implementation should be reuse-first. Studio 
    - Rationale: Workstream J defines a catalog source model. A second local-loop directory would create conflict and migration work.
 
 2. One exporter module.
-   - Correction: Workstream E and Workstream L must both extend `backend/studio/report_export.py`.
+   - Correction: Workstream E and Workstream L must both extend `backend/studio/export.py`.
    - Rationale: Workstream E is the minimal export spine; Workstream L is the full enhanced bundle. Two exporters would create inconsistent manifests and tests.
 
 3. Skill file format.
@@ -1755,36 +2062,71 @@ Gap:
 - Replacing the internal rubric would destabilize calibrated hill-climb behavior.
 
 Decision: keep `rubric_score` for optimization; add a frozen profile-based
-100-point projection for reporting.
+100-point unified scorecard for reporting. The scorecard is original-plus-matrix:
+it exposes the original deterministic base/signals and the profile/template
+matrix category scores together.
 
 Actionable steps:
 
 1. Add `ScoreProfile` definitions keyed by report profile.
-   - Each `ScoreProfile` uses the same 12 category names and total 100-point
-     scale, but can set category applicability/weights by profile.
+   - Each `ScoreProfile` uses the same allowed 12-category vocabulary and a
+     total 100-point scale after filtering, but emits only categories related to
+     the selected template.
    - Store the user's provided scoring matrix as the default deep technical /
      implementation-report profile.
    - Add lighter score profiles for `general`, `market`, `policy`,
      `literature_review`, `competitive`, and `product` so irrelevant categories
-     such as code or diagrams do not unfairly penalize non-technical reports.
+     such as code or diagrams are omitted from non-technical report scoring
+     unless the selected template explicitly includes related sections.
 2. At run start, snapshot `scoring_template` and `scoring_matrix` from the
    selected profile into session/run state.
    - `scoring_template` is the frozen original template used for weighted ToC
      coverage and drift comparison.
    - `active_outline` remains mutable for hub/reducer section creation and
      publish readiness.
-3. Add `rubric_scorecard_100(text, evidence, publish_gate, lint, metrics, scoring_template, scoring_matrix)`.
+   - Inject the full scoring block into the planner/task requirement.
+   - Crop scoring rows by section relatedness before passing assignments to
+     worker agents; include universal rows in every worker assignment.
+   - Give reducers the full frozen scoring block for whole-artifact measurement
+     on every phase, regardless of which rows have already been achieved. The
+     reducer input is never cropped by section and never replaced by
+     `remaining_scoring_matrix`.
+   - Convert scorecard deficits into section-routable weaknesses after
+     each reducer/writeback and finalization. Feed those weaknesses through the
+     existing carry-forward path:
+     `TaskRunStore.record` → `TaskRunStore.accumulated_weaknesses` →
+     `session.weaknesses` → `planning._section_focus_text`.
+   - Keep a run-local `remaining_scoring_matrix` for worker prompts only. After
+     each reducer pass, rows that score above the achieved threshold are removed
+     so later workers do not receive already-fulfilled requirements. Rows that
+     remain below threshold are preserved as weaknesses and remain measurable by
+     the next reducer because the reducer still receives the full frozen matrix.
+   - Keep final scorecard calculation on the full frozen `scoring_matrix`; the
+     shrinking matrix is only a prompt-cropping optimization for workers, not a
+     scoring source of truth.
+   - Keep section workers strict (`RESEARCH_FINDING` or scoped `PATCHES` only),
+     but require a final synthesis/refine pass once grounded evidence exists so
+     the system can turn verified findings into coherent report prose without
+     accepting ungrounded worker prose.
+   - Keep false-weakness refutation and semantic dedup in the weakness path so
+     scorecard/miner gaps do not create repeated or already-satisfied work.
+3. Add `rubric_scorecard_100(text, evidence, publish_gate, lint, metrics, scoring_template, scoring_matrix)` that returns the original base score/signals plus the matrix-projected category scores.
 4. Keep existing `_WEIGHTS` and tests unchanged for internal optimization.
 5. Add the enhanced technical-report template and score profile as presets, not the default.
-6. Add frontend display for scorecard categories and profile applicability.
+6. Add frontend display for the emitted scorecard categories; do not show
+   unrelated categories as inactive rows.
 
 Rationale:
 
-- Current deterministic metric is a known working control signal. The 100-point rubric should be a presentation/readiness layer, not a replacement for the optimizer.
+- Current deterministic metric is a known working control signal. The 100-point
+  rubric should unify that original metric with the profile/template scoring
+  matrix for reporting/readiness, not replace the optimizer's scalar control
+  signal.
 - Freezing `scoring_template` and `scoring_matrix` at run start prevents the
   model from improving its score by changing the template mid-run. Dynamic
   sections are still valuable, but they should affect publish readiness and
-  optional bonus/supporting quality signals, not core category weights.
+  optional supporting quality under related emitted categories, not add
+  unrelated core category weights.
 
 ### 6. Artifact Lint, Editorial Cleanup, And Report Structure
 
@@ -1834,7 +2176,7 @@ Decision: keep existing loop export and add a separate research-package export.
 Actionable steps:
 
 1. Extend `RunSnapshot` with evidence, scorecard, publish gate, metrics, trace paths.
-2. Add `backend/studio/report_export.py`.
+2. Extend `backend/studio/export.py`.
 3. Add `GET /export/{session_id}/research-package`.
 4. Keep `/export/{session_id}` unchanged for loop JSON compatibility.
 5. Make PDF/PNG renderers best-effort with explicit status in manifest.
@@ -2190,9 +2532,50 @@ Acceptance:
 ### Slice 4: E2E Drift Validation
 
 Run the same rubric-configured normal Gemma task used for the last comparisons.
+This validation is a cold-run baseline unless explicitly stated otherwise:
+use one epic/one cold run. A two-epic run exercises the hill-climb path and must
+be tracked as a separate not-yet-baselined validation mode, not compared as the
+normal cold-run result.
 
 Compare against:
 
+- `s_9d7a9d9f16fc`: rerun after final verified-URL recomputation;
+  7,961-byte artifact, 8 H2 sections, 13 unique URLs, zero placeholder hits,
+  publish-ready pass, adjusted score 0.4686, scorecard 78.84. This improves
+  over `s_6eb0a036aabc` because Citation integrity is no longer measured as
+  zero, but still trails `s_831049d2caee` on length, verified evidence volume,
+  adjusted score, and scorecard. The remaining real gap is evidence quality:
+  only the URLs present in the local search/fetch cache count as verified, so
+  broad or synthesized references that were not fetched still depress Citation
+  integrity.
+- `s_6eb0a036aabc`: clean rerun after the scoring-instruction publish-gate fix;
+  6,881-byte artifact, 8 H2 sections, 6 unique URLs, zero placeholder hits,
+  publish-ready pass, adjusted score 0.3862, scorecard 69.04. It confirms the
+  false scoring-instruction terms are gone, but regresses further on evidence
+  volume and citation integrity. The run summary scored Citation integrity at
+  0.0/14.7 because final synthesis/readability can change the cited URLs after
+  the verified URL cache is computed; finalization must recompute verified URLs
+  before publish readiness, scoring, and scorecard weakness generation.
+- `s_6c2f8f47151e`: latest post-scorecard/lint-aware run before the
+  scoring-instruction term fix; 7,945-byte artifact, 8 H2 sections, 13 unique
+  URLs, zero placeholder hits, adjusted score 0.4374, scorecard 78.84. It
+  regressed against `s_831049d2caee` on length, citation count, adjusted score,
+  and scorecard. Re-evaluating its saved artifact after the
+  scoring-instruction publish-gate fix yields `publish_ready = true` with no
+  combined publish/lint issues, so the recorded low score partly reflects a
+  stale gate calculation rather than only artifact quality.
+- `s_831049d2caee`: current corrected run after patch-schema alignment;
+  9,346-byte artifact, 8 H2 sections, 21 unique URLs, zero placeholder hits,
+  adjusted score 0.6721, scorecard 91.74.
+- `s_c333e5fc8596`: pre-schema-alignment run; 7,272-byte artifact, 8 H2
+  sections, 3 unique URLs, placeholder note remained in References, adjusted
+  score 0.2602.
+- `s_4e70dc3a135a`: strict-worker failed run; 561-byte placeholder artifact,
+  0 URLs, adjusted score 0.0894.
+- `s_3bdf12f07b9e`: older relatively better run; 3,825-byte artifact, 5 URLs,
+  no placeholders but thin citations.
+- `s_2dafb96d6fb6`: best prior normal run; 14,135-byte artifact, 19 URLs,
+  no placeholders, score 0.544, still fragmented.
 - `s_e4df76cf9882`: duplicate long-sentence extras 32.
 - `s_40c4382877d0`: duplicate heading extras 43.
 - `s_5c9736ef5aa1`: 7 H2 sections because `References` heading was lost.
@@ -2206,6 +2589,51 @@ Success requires:
 - every active-outline section is present or publish gate fails;
 - no drift in `agent_io.jsonl` creation;
 - no production-code genericity audit issues.
+- no section-worker prompt drift back to legacy `PATCH_TARGET`/`CONTENT`
+  `PATCHES` objects.
+- publish-gate topic-term checks ignore internal structure/focus assignment
+  boilerplate such as top-level heading order and assigned section labels.
+- publish-gate topic-term checks also ignore the injected unified scoring
+  requirement block, so terms like `scoring`, `original`, `deterministic`,
+  `rubric`, and `matrix` are never treated as user topic requirements.
+- final publish readiness, final scoring, and final scorecard weakness
+  generation recompute verified URLs after any final synthesis/readability,
+  revision, or epoch-gate writeback so Citation integrity is measured against
+  the exact artifact being served and recorded.
+- final weakness recording prunes stale deterministic lint/publish weaknesses
+  after final synthesis/readability/revision. If the final served artifact no
+  longer has placeholder references, citation-free long sections, or "no
+  citations / empty References" defects, those resolved weaknesses must not
+  lower adjusted score or seed the next run.
+- final publish revision and publish-ready gates include artifact lints, not
+  only publish-term issues, so long evidence-bearing sections without citation
+  URLs are revised or carried as current-run weaknesses.
+- final publish revision and publish-ready gates include synthesis-depth issues,
+  not only URL presence. A report with citations but no detailed analysis,
+  summary, implications, limitations/reflection, or meaningful use of fetched
+  documents is not publish-ready and must either be revised from the evidence
+  excerpts or carry unresolved weaknesses forward.
+- final report synthesis prompts must require evidence-backed analysis and
+  limitations/reflection before the publish gate runs. The gate is a backstop;
+  it should not be the first place the model learns that a cited source list is
+  insufficient.
+- final report synthesis must receive the full frozen scoring matrix and current
+  unresolved weaknesses, not only upstream text. The final writer is responsible
+  for evaluating prior agent outputs against the full standard before emitting
+  the served report; cropped worker scoring is not enough.
+- result selection must not prefer a longer workspace artifact when it has more
+  deterministic quality lints than the final synthesis output. A clean final
+  synthesis should beat a stale artifact that appends body sections after
+  References or otherwise preserves obsolete drafts.
+- practical-usefulness scoring requires concrete implementation signals such as
+  risks, mitigations, sequencing, owners, metrics, rollout/rollback, or next
+  actions; generic analysis markers alone do not satisfy that category.
+- section-worker prompt cropping for scoring must never remove the executor
+  contract. The global `Unified scoring requirements for this task:` block may
+  be stripped from worker goals before section-local scoring rows are appended,
+  but the surviving worker prompt must still include the imperative
+  `web_search`/`web_fetch` requirement, grounded `RESEARCH_FINDING` schema, and
+  reducer-applicable scoped `PATCHES` schema.
 
 ## Concrete File Map
 
@@ -2220,7 +2648,7 @@ New backend files:
 
 - `backend/studio/evidence.py`
 - `backend/studio/publish_gate.py`
-- `backend/studio/report_export.py`
+- `backend/studio/export.py`
 - `backend/studio/catalog_mgmt.py`
 - `backend/studio/observations.py`
 - `backend/studio/run_metrics.py`
@@ -2270,7 +2698,7 @@ Tests to add:
 
 - `backend/tests/test_evidence.py`
 - `backend/tests/test_publish_gate.py`
-- `backend/tests/test_report_export.py`
+- `backend/tests/test_export.py`
 - `backend/tests/test_observations.py`
 - `backend/tests/test_run_metrics.py`
 - `backend/tests/test_catalog_mgmt.py`
@@ -2279,6 +2707,17 @@ Tests to add:
 - `backend/tests/fixtures/bad_report_duplicate_sections.md`
 - `backend/tests/test_bad_report_quality_gate.py`
 - Extend `backend/tests/test_rubric.py`, `backend/tests/test_artifact_lint.py`, `backend/tests/test_events.py`, and frontend store/type tests.
+
+## Session Findings Beyond Original Scope (2026-07-02)
+
+This plan (dated 2026-06-30) does not carry a per-item completion checkbox scheme — `CURRENT-research-report-generator-task-list.md` and `WORKLOG-research-report-generator-plan.md` are the completion trackers. This section records work landed in a single long session (WORKLOG entries 157-165) that fell OUTSIDE this plan's original enumerated workstreams (A-O): it was discovered live during E2E testing, not pre-scoped here. Recorded for continuity in case a future revision of this plan folds these into a formal workstream.
+
+- **Cross-task seed contamination (relevance/adaptation), two layers.** Neither the original evidence-matrix/publish-gate work above nor any Workstream A-O item anticipated that an R10 semantically-similar seed (§ "Add Research Report Loop And Skill...", `similar_runs` cosine ≥0.6) could carry a genuinely off-topic prior task's content forward. Shipped: a per-section binary LLM relevance check (`studio/relevance.py::relevance_issues`) wired into the rubric as `relevance_penalty`, worker/editor repair-clause prompts, an unconditional cross-task-seed adaptation notice, and a `relevance_checked` DB flag that deprioritizes (not excludes) unchecked historical runs as R10 seed candidates; then an ADDITIVE, earlier, coarser whole-document gate (`studio/relevance.py::seed_doc_relevance`) that drops a wholesale cross-field seed before generation starts (100% recall / 0% false-reject on 30 real calibration samples). This is a genuine gap in the evidence/relevance model this plan's "Typed Evidence Matrix" and "Source Quality And Corroboration" sections did not cover: those sections govern citation quality within a document, not whole-seed provenance across tasks.
+- **Duplicate-title-at-two-heading-levels** (`studio/section_workspace.py::_normalize_heading_levels`): a live root-caused bug where a section-aware reducer emitted a full report at `#` H1 instead of patching `##` H2 sections, producing duplicate titles at two heading levels. Related to, but distinct from, the "duplicate-section" lint already planned above (`artifact_lint.py`, referenced near "Enhanced Report Coverage Checklist" and the concrete file map) — that lint *detects and reports* duplicate sections for review; this fix *prevents* the specific fold-boundary cause so the duplication does not occur in the first place.
+- **Report formatting/beautification** (`studio/markdown_format.py::beautify_markdown`, `mdformat`/`mdformat-gfm` pinned): a post-run-only cosmetic normalization pass on the served artifact (heading spacing, list markers, table alignment), applied strictly after all scoring/gating has run on the unformatted text. Adjacent to, but not the same as, this plan's "Full Enhanced Report Bundle Export" (HTML/PDF rendering) — this is markdown-source-level polish, not a new export format.
+- **Report-title truncation regression** (`studio/artifact_text.py::_TITLE_STOP_RE`): a real live defect (title cut to `# Study how to`) unrelated to any planned workstream — a regex specificity bug in existing title-derivation code, fixed by comma-anchoring the stop-word match.
+- **Production-risk hardening from an independent adversarial review** (`/codex challenge`, 6 findings, all fixed): unauthenticated catalog-template mutation routes + stale embedding on replace (touches this plan's "Catalog Management For Local And Remote Loops/Skills" workstream — that workstream's original scope did not specify authentication, which the review found necessary before those routes should be considered production-safe); per-run global state in `agentkit/topology/dynamic.py` and a process-global fetch cache, both converted to `contextvars` for concurrent-session isolation; a race condition in hill-climb version allocation (`task_runs.py`, now `UNIQUE(task_hash, version)` + retry-on-conflict); a premature `last_run` publish that could serve stale unvalidated output; and a fail-open URL-verification path that could not distinguish "no citations" from "couldn't check during an outage" (now emits a distinguishable warning while preserving the deliberate fail-open). None of these were anticipated by this plan's original security/concurrency assumptions, which did not model concurrent sessions or an unauthenticated-by-default catalog surface.
+- **Deferred, not fixed:** a sustained LLM-backend outage during a run loses all progress (nothing persisted to `task_runs.db`) because of a single top-level catch-all in `runner.py`. Logged as WORKLOG entry 166, explicitly deferred given session cost — not in scope for this plan revision either, but worth a future workstream if run-death-loses-progress recurs.
 
 ## Non-Goals
 

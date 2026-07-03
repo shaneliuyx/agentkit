@@ -22,15 +22,17 @@ interface ChatPanelProps {
   sessionId: string | null;
   mode: RunMode;
   onModeChange: (mode: RunMode) => void;
+  connectIfNeeded: () => Promise<string>;
 }
 
 let _msgId = 0;
 
-export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
+export function ChatPanel({ sessionId, mode, onModeChange, connectIfNeeded }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<RunStreamHandle | null>(null);
+  const hasTriggeredConnectRef = useRef(false);
 
   const status = useRunStore((s) => s.status);
   const apply = useRunStore((s) => s.apply);
@@ -40,7 +42,7 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
   const streamText = useRunStore((s) => s.streamText);
 
   const isRunning = status === "running" || status === "connecting";
-  const canSend = !!sessionId && input.trim().length > 0 && !isRunning;
+  const canSend = input.trim().length > 0 && !isRunning;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -65,9 +67,21 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status]);
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const req = input.trim();
-    if (!sessionId || !req) return;
+    if (!req) return;
+
+    // Connect (or reconnect a stale session) before running. This runs even
+    // when sessionId is set: item #6 may have marked the session stale, and
+    // connectIfNeeded forces a fresh session rather than reusing the stale id.
+    // On failure, no run starts and no message is appended — the connection
+    // error surfaces via BackendPanel's own error UI, not a chat bubble.
+    let sid: string;
+    try {
+      sid = await connectIfNeeded();
+    } catch {
+      return;
+    }
 
     const userMsg: ChatMessage = { id: ++_msgId, role: "user", content: req };
     const asstMsg: ChatMessage = { id: ++_msgId, role: "assistant", content: "", status: "running" };
@@ -83,8 +97,8 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
       .map((m) => ({ role: m.role, content: m.content }));
 
     streamRef.current?.close();
-    beginRun(sessionId, mode);
-    streamRef.current = openRunStream(sessionId, req, {
+    beginRun(sid, mode);
+    streamRef.current = openRunStream(sid, req, {
       onEvent: apply,
       onError: (message) => {
         setMessages((prev) =>
@@ -95,7 +109,7 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
         if (useRunStore.getState().status !== "done") {
           apply({
             type: "error",
-            session_id: sessionId,
+            session_id: sid,
             ts: Date.now() / 1000,
             payload: { message, where: "sse" },
           });
@@ -145,7 +159,18 @@ export function ChatPanel({ sessionId, mode, onModeChange }: ChatPanelProps) {
           value={input}
           rows={2}
           aria-label="New message"
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            const val = e.target.value;
+            setInput(val);
+            if (val.trim()) {
+              if (!sessionId && !hasTriggeredConnectRef.current) {
+                hasTriggeredConnectRef.current = true;
+                connectIfNeeded().catch(() => {});
+              }
+            } else {
+              hasTriggeredConnectRef.current = false;
+            }
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();

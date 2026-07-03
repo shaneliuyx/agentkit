@@ -16,6 +16,7 @@ so the runner can hand them straight to ``run_plan`` unchanged.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable
 
 from agentkit.backends.openai_compat import _resilient, make_client
@@ -44,6 +45,7 @@ class StudioChatClient:
         api_key: str | None,
         on_usage: OnUsage,
         temperature: float = 0.0,
+        timeout_s: float | None = None,
         # 7 retries (~4 min with backoff 2.0) instead of 4 (~30s): a research run
         # fans out many concurrent phase calls, and a transient upstream 503 lasting
         # longer than 30s would otherwise FAIL that phase (losing its research) rather
@@ -54,7 +56,10 @@ class StudioChatClient:
     ) -> None:
         self.model = model
         self.temperature = temperature
-        self.retries = retries
+        self.retries = int(os.getenv("STUDIO_LLM_RETRIES", str(retries)))
+        self.timeout_s = timeout_s if timeout_s is not None else float(
+            os.getenv("STUDIO_LLM_TIMEOUT_S", "90")
+        )
         self._on_usage = on_usage
         self._client = make_client(base_url, api_key)
         self.n_calls = 0
@@ -89,7 +94,7 @@ class StudioChatClient:
             kwargs["max_tokens"] = max_tokens if max_tokens is not None else 8192
             if tools:
                 kwargs["tools"] = tools
-            r = self._client.chat.completions.create(**kwargs)
+            r = self._client.with_options(timeout=self.timeout_s).chat.completions.create(**kwargs)
             message = r.choices[0].message
             text = (getattr(message, "content", None) or "").strip()
             usage = getattr(r, "usage", None)

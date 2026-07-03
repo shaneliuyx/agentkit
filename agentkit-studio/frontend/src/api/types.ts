@@ -216,6 +216,26 @@ export interface VerifyPayload {
   uncited: string[];
 }
 
+export interface EvidenceItem {
+  id: string;
+  claim: string;
+  source: string;
+  source_type: string;
+  url: string;
+  date: string;
+  reliability: string;
+  relevance: string;
+  status: string;
+  used_in: string;
+  quote: string;
+  notes: string;
+}
+
+export interface EvidencePayload {
+  items: EvidenceItem[];
+  matrix: string;
+}
+
 export interface DonePayload {
   total_tokens: number;
   input: number;
@@ -227,11 +247,55 @@ export interface DonePayload {
   cancelled: boolean;
   /** Absolute path the result was saved to (session workspace); "" if not saved. */
   result_path: string;
+  scorecard_100?: Scorecard100 | null;
+  review?: ReviewStatus | null;
+  metrics?: RunMetrics | null;
 }
 
 export interface ErrorPayload {
   message: string;
   where: string;
+}
+
+export interface ScorecardCategory {
+  category: string;
+  points: number;
+  score: number;
+  signal_score?: number;
+}
+
+export interface Scorecard100 {
+  score: number;
+  max_score: number;
+  base_score: number;
+  categories: ScorecardCategory[];
+}
+
+export interface ReviewStatus {
+  required: boolean;
+  status: "REVIEW_REQUIRED" | "NOT_REQUIRED";
+  publish_decision: "REVIEW_REQUIRED" | "PUBLISH_READY";
+  reviewed: boolean;
+  reasons: string[];
+}
+
+export interface StopReport {
+  reason: string;
+  tool_calls: number;
+  failed_validations: number;
+  checkpoints: number;
+  wall_s: number;
+  token_cost: number;
+}
+
+export interface RunMetrics {
+  task_success: boolean;
+  tool_call_accuracy: number | null;
+  citation_accuracy: number | null;
+  human_intervention_required: boolean;
+  score: number | null;
+  stop_reason: string;
+  stop_report: StopReport;
 }
 
 // ── M7 Wave 1: loop library + web-tool activity ────────────────────────────
@@ -278,6 +342,10 @@ export interface LoopDoctorCheck {
 
 export interface LoopDoctorPayload {
   checks: LoopDoctorCheck[];
+}
+
+export interface MetricsPayload {
+  metrics: RunMetrics;
 }
 
 // ── The discriminated union ────────────────────────────────────────────────
@@ -346,6 +414,8 @@ export type StudioEvent =
   | Frame<"gate", GatePayload>
   | Frame<"dag", DagPayload>
   | Frame<"verify", VerifyPayload>
+  | Frame<"evidence", EvidencePayload>
+  | Frame<"metrics", MetricsPayload>
   | Frame<"done", DonePayload>
   | Frame<"error", ErrorPayload>
   | Frame<"loops", LoopsPayload>
@@ -404,5 +474,12 @@ export interface SessionResponse {
 export interface RubricConfig {
   weights: Record<string, number>;
   template: string[];
+  scoring_template?: string[];
+  scoring_matrix?: Array<{
+    category: string;
+    points: number;
+    applicable?: boolean;
+    signal?: string;
+  }>;
   report_type?: string;
 }

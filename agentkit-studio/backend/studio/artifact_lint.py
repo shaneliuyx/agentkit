@@ -15,6 +15,7 @@ real runs, not a full grammar.
 from __future__ import annotations
 
 import re
+import ast
 
 #: A mermaid edge label `|...|` must attach to a link operator (``-->``, ``---``,
 #: ``-.->``, ``==>`` …). When the char immediately before the opening ``|`` is a
@@ -100,10 +101,21 @@ def _placeholder_issues(text: str) -> list[str]:
     return issues
 
 
+#: A CLEAN, already-healed (entry 173) bare `(unverified)` marker is well-formed
+#: text — but it still means a citation failed verification and shipped to the
+#: user with no visibility into the fix loop (lint_artifact never flagged it, so
+#: it never entered the editor's weakness list). The negative lookbehind excludes
+#: the garbled forms above (`((unverified)`, `[(unverified)`), which already get
+#: their own message — this only matches the clean, single-paren form.
+_CLEAN_UNVERIFIED_RE = re.compile(r"(?<![(\[])\(unverified\)")
+
+
 def _broken_link_issues(text: str) -> list[str]:
     issues: list[str] = []
     if "((unverified)" in text.lower() or "](unverified" in text.lower():
         issues.append("[document] Malformed or explicitly unverified markdown link remains.")
+    if _CLEAN_UNVERIFIED_RE.search(text or ""):
+        issues.append("[document] Citation marked (unverified) remains visible in report text.")
     for m in re.finditer(r"\[[^\]]+\]\(([^)]*)\)", text or ""):
         target = (m.group(1) or "").strip()
         if not target or "unverified" in target.lower():
@@ -171,6 +183,131 @@ def _citation_free_section_issues(text: str) -> list[str]:
     return issues
 
 
+def _fenced_blocks(text: str) -> list[tuple[str, str, int, int]]:
+    lines = (text or "").splitlines()
+    blocks: list[tuple[str, str, int, int]] = []
+    start = None
+    lang = ""
+    body: list[str] = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if start is None:
+                start = i
+                lang = stripped[3:].strip().lower()
+                body = []
+            else:
+                blocks.append((lang, "\n".join(body), start, i))
+                start = None
+                lang = ""
+                body = []
+            continue
+        if start is not None:
+            body.append(line)
+    return blocks
+
+
+def _table_issues(text: str) -> list[str]:
+    lines = (text or "").splitlines()
+    issues: list[str] = []
+    for i in range(len(lines) - 1):
+        header = lines[i].strip()
+        sep = lines[i + 1].strip()
+        if not (header.startswith("|") and header.endswith("|")):
+            continue
+        if not (sep.startswith("|") and sep.endswith("|")):
+            continue
+        if not re.fullmatch(r"[\s|:\-]+", sep):
+            continue
+        header_cells = [c.strip() for c in header.strip("|").split("|")]
+        sep_cells = [c.strip() for c in sep.strip("|").split("|")]
+        if len(header_cells) < 2:
+            continue
+        valid_sep = (
+            len(sep_cells) == len(header_cells)
+            and all(re.fullmatch(r":?-{3,}:?", c or "") for c in sep_cells)
+        )
+        if not valid_sep:
+            issues.append(
+                f"[{_section_at(lines, i)}] Malformed markdown table separator: {sep[:80]}"
+            )
+            continue
+        rows: list[list[str]] = []
+        j = i + 2
+        while j < len(lines):
+            row = lines[j].strip()
+            if not (row.startswith("|") and row.endswith("|")):
+                break
+            rows.append([c.strip() for c in row.strip("|").split("|")])
+            j += 1
+        if rows and all(
+            not any(cell and cell.lower() not in {"-", "—", "n/a", "tbd"} for cell in row)
+            for row in rows
+        ):
+            issues.append(f"[{_section_at(lines, i)}] Empty comparison table has no real cell content.")
+    return issues
+
+
+def _mermaid_explanation_issues(text: str) -> list[str]:
+    lines = (text or "").splitlines()
+
+    def prose_near(start: int, end: int) -> bool:
+        lo = max(0, start - 3)
+        hi = min(len(lines), end + 4)
+        for idx in list(range(lo, start)) + list(range(end + 1, hi)):
+            s = lines[idx].strip()
+            if not s or s.startswith(("#", "```", "|", "-", "*", ">")):
+                continue
+            if re.match(r"^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram)", s):
+                continue
+            if len(re.findall(r"[A-Za-z]{3,}", s)) >= 4:
+                return True
+        return False
+
+    issues: list[str] = []
+    for lang, _body, start, end in _fenced_blocks(text):
+        if lang == "mermaid" and not prose_near(start, end):
+            issues.append(
+                f"[{_section_at(lines, start)}] Mermaid diagram has no nearby explanatory prose."
+            )
+    return issues
+
+
+def _python_code_issues(text: str) -> list[str]:
+    lines = (text or "").splitlines()
+    issues: list[str] = []
+    for lang, body, start, _end in _fenced_blocks(text):
+        if lang not in {"python", "py"}:
+            continue
+        try:
+            ast.parse(body or "\n")
+        except SyntaxError as exc:
+            issues.append(
+                f"[{_section_at(lines, start)}] Python code block has syntax error: "
+                f"line {exc.lineno or '?'} {exc.msg}"
+            )
+    return issues
+
+
+def _references_terminal_issues(text: str) -> list[str]:
+    """References should not be followed by new report body sections."""
+    headings = list(re.finditer(r"(?m)^(#{1,6})\s+(.+)$", text or ""))
+    for i, match in enumerate(headings):
+        title = match.group(2).strip().lower()
+        if title not in {"references", "reference", "sources", "bibliography"}:
+            continue
+        trailing = headings[i + 1:]
+        for nxt in trailing:
+            nxt_title = nxt.group(2).strip().lower()
+            if nxt_title in {"appendix", "appendices", "glossary"}:
+                continue
+            return [
+                "[document] References section is followed by additional report "
+                f"content: {nxt.group(0).strip()}"
+            ]
+    return []
+
+
 def lint_artifact(text: str) -> list[str]:
     """Return content-validity weaknesses for *text* (empty list when clean).
 
@@ -183,6 +320,10 @@ def lint_artifact(text: str) -> list[str]:
       6. Citation walls: repeated source-summary scaffolding instead of synthesis.
       7. Code fragments outside fenced blocks.
       8. Long evidence-bearing sections without citation URLs.
+      9. Malformed/empty markdown tables.
+      10. Mermaid diagrams without nearby explanatory prose.
+      11. Obvious Python fenced-block syntax errors.
+      12. References section followed by more body sections.
     """
     if not text:
         return []
@@ -215,13 +356,17 @@ def lint_artifact(text: str) -> list[str]:
     issues.extend(_citation_wall_issues(text))
     issues.extend(_orphaned_code_issues(text))
     issues.extend(_citation_free_section_issues(text))
+    issues.extend(_table_issues(text))
+    issues.extend(_mermaid_explanation_issues(text))
+    issues.extend(_python_code_issues(text))
+    issues.extend(_references_terminal_issues(text))
 
     return _dedupe(issues)
 
 
 if __name__ == "__main__":  # pragma: no cover — runnable self-check
     bad = (
-        "## Design\n\n```mermaid\ngraph TD\n"
+        "## Design\n\nThis diagram explains the tool-selection flow.\n\n```mermaid\ngraph TD\n"
         "    ToolSelector -->|Search| WebTool\n"
         "    ToolSelector|Read| ReadTool\n```\n"
     )

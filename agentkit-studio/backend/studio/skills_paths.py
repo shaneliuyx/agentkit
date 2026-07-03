@@ -122,6 +122,46 @@ def build_path_skills() -> list[Skill]:
     ]
 
 
+_RESEARCH_REPORT_SKILL_BODY = (
+    "Produce an evidence-backed research report through Studio's own mechanisms.\n"
+    "1. Seed the `research-report-agent` local loop (Loops panel → Seed this run) to get "
+    "the plan → retrieve → verify → synthesize → review → package stages.\n"
+    "2. Retrieve authoritative sources with the web tools; keep verified evidence separate "
+    "from interpretation. The reducer and final synthesis receive the fetched source files.\n"
+    "3. Every major claim keeps its source URL; prefer fewer, stronger sources and corroborate "
+    "non-primary sources for high-impact claims (evidence matrix status).\n"
+    "4. Measure the artifact against the full frozen scoring matrix each phase; turn unmet "
+    "scoring rows into weaknesses for the next phase.\n"
+    "5. Run the publish gate (hard-fail on missing citations, unverified major claims, missing "
+    "limitations) and export the research package (report, evidence matrix, scorecard, "
+    "human-review checklist, manifest)."
+)
+
+
+def build_domain_skills() -> list[Skill]:
+    """Domain skills that document a full workflow (not just a loop-library path).
+
+    ``research-report-agent`` routes the cited-report workflow to Studio's local loop,
+    evidence matrix, frozen scoring matrix, publish gate, and package export.
+    """
+    return [
+        Skill(
+            name="research-report-agent",
+            description=(
+                "Plan, retrieve, verify, synthesize, review, and package an evidence-backed "
+                "research report with citations, an evidence matrix, a scorecard, and a review "
+                "checklist."
+            ),
+            trigger=(
+                "research report, technical deep dive, literature review, comparison report, "
+                "evidence-backed report, market or competitive analysis, policy brief"
+            ),
+            body=_RESEARCH_REPORT_SKILL_BODY,
+            source_task="research-report:domain",
+        )
+    ]
+
+
 def register_paths(library: SkillLibrary) -> list[Skill]:
     """Save the five path skills into ``library`` (direct ``save``; not gated).
 

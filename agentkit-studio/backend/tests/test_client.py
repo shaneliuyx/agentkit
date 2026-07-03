@@ -32,6 +32,9 @@ class _StubOpenAI:
     def __init__(self, usage: Any) -> None:
         self.chat = SimpleNamespace(completions=_StubCompletions(usage))
 
+    def with_options(self, **_kwargs: Any) -> "_StubOpenAI":
+        return self
+
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, usage: Any) -> None:
     monkeypatch.setattr(client_mod, "make_client", lambda base, key: _StubOpenAI(usage))

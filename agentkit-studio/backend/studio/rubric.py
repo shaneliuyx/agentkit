@@ -26,7 +26,8 @@ later for the subjective dimensions (correctness/helpfulness); kept out here on 
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Iterable, Mapping
 
 _URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
 _HEADING_RE = re.compile(r"(?m)^#{1,4}\s+\S")
@@ -89,10 +90,181 @@ _WEIGHTS = {
     "structure": 0.14,       # completeness: summary + sections + conclusion
     "methodology": 0.12,     # completeness: methodology/scope transparency + non-thin body
 }
+
+SCORING_CATEGORIES = (
+    "Scope and research framing",
+    "ToC completeness",
+    "Source quality",
+    "Citation integrity",
+    "Evidence synthesis",
+    "Analytical depth",
+    "Practical usefulness",
+    "Code quality / examples",
+    "Diagrams and tables",
+    "Readability and formatting",
+    "Reflection and limitations",
+    "Governance and safety",
+)
+
+_CATEGORY_SIGNALS = {
+    "Scope and research framing": "structure",
+    "ToC completeness": "structure",
+    "Source quality": "sourcing",
+    "Citation integrity": "verification",
+    "Evidence synthesis": "analysis",
+    "Analytical depth": "analysis",
+    "Practical usefulness": "analysis",
+    "Code quality / examples": "structure",
+    "Diagrams and tables": "structure",
+    "Readability and formatting": "structure",
+    "Reflection and limitations": "methodology",
+    "Governance and safety": "methodology",
+}
+
+_DEEP_TECHNICAL_POINTS = {
+    "Scope and research framing": 8,
+    "ToC completeness": 7,
+    "Source quality": 12,
+    "Citation integrity": 12,
+    "Evidence synthesis": 12,
+    "Analytical depth": 10,
+    "Practical usefulness": 10,
+    "Code quality / examples": 8,
+    "Diagrams and tables": 6,
+    "Readability and formatting": 6,
+    "Reflection and limitations": 5,
+    "Governance and safety": 4,
+}
+
+_PROFILE_CATEGORY_POINTS: dict[str, dict[str, float]] = {
+    "deep_technical": _DEEP_TECHNICAL_POINTS,
+    "technical": _DEEP_TECHNICAL_POINTS,
+    "general": {
+        "Scope and research framing": 10,
+        "ToC completeness": 10,
+        "Source quality": 14,
+        "Citation integrity": 14,
+        "Evidence synthesis": 14,
+        "Analytical depth": 10,
+        "Practical usefulness": 8,
+        "Code quality / examples": 0,
+        "Diagrams and tables": 0,
+        "Readability and formatting": 8,
+        "Reflection and limitations": 7,
+        "Governance and safety": 5,
+    },
+    "market": {
+        "Scope and research framing": 10,
+        "ToC completeness": 8,
+        "Source quality": 14,
+        "Citation integrity": 12,
+        "Evidence synthesis": 14,
+        "Analytical depth": 10,
+        "Practical usefulness": 12,
+        "Code quality / examples": 0,
+        "Diagrams and tables": 4,
+        "Readability and formatting": 6,
+        "Reflection and limitations": 5,
+        "Governance and safety": 5,
+    },
+    "policy": {
+        "Scope and research framing": 10,
+        "ToC completeness": 8,
+        "Source quality": 12,
+        "Citation integrity": 12,
+        "Evidence synthesis": 12,
+        "Analytical depth": 10,
+        "Practical usefulness": 10,
+        "Code quality / examples": 0,
+        "Diagrams and tables": 0,
+        "Readability and formatting": 6,
+        "Reflection and limitations": 10,
+        "Governance and safety": 10,
+    },
+    "literature_review": {
+        "Scope and research framing": 10,
+        "ToC completeness": 8,
+        "Source quality": 16,
+        "Citation integrity": 16,
+        "Evidence synthesis": 14,
+        "Analytical depth": 12,
+        "Practical usefulness": 4,
+        "Code quality / examples": 0,
+        "Diagrams and tables": 0,
+        "Readability and formatting": 6,
+        "Reflection and limitations": 10,
+        "Governance and safety": 4,
+    },
+    "academic": {
+        "Scope and research framing": 10,
+        "ToC completeness": 8,
+        "Source quality": 16,
+        "Citation integrity": 16,
+        "Evidence synthesis": 14,
+        "Analytical depth": 12,
+        "Practical usefulness": 4,
+        "Code quality / examples": 0,
+        "Diagrams and tables": 0,
+        "Readability and formatting": 6,
+        "Reflection and limitations": 10,
+        "Governance and safety": 4,
+    },
+    "competitive": {
+        "Scope and research framing": 10,
+        "ToC completeness": 8,
+        "Source quality": 12,
+        "Citation integrity": 12,
+        "Evidence synthesis": 12,
+        "Analytical depth": 10,
+        "Practical usefulness": 12,
+        "Code quality / examples": 0,
+        "Diagrams and tables": 6,
+        "Readability and formatting": 6,
+        "Reflection and limitations": 6,
+        "Governance and safety": 6,
+    },
+    "product": {
+        "Scope and research framing": 10,
+        "ToC completeness": 8,
+        "Source quality": 12,
+        "Citation integrity": 12,
+        "Evidence synthesis": 12,
+        "Analytical depth": 10,
+        "Practical usefulness": 14,
+        "Code quality / examples": 0,
+        "Diagrams and tables": 4,
+        "Readability and formatting": 6,
+        "Reflection and limitations": 6,
+        "Governance and safety": 6,
+    },
+}
+
+
+@dataclass(frozen=True)
+class ScoreProfile:
+    report_type: str
+    scoring_matrix: tuple[dict[str, object], ...]
+
+
+_CATEGORY_TEMPLATE_TERMS = {
+    "Scope and research framing": ("scope", "question", "context", "background", "summary", "abstract"),
+    "ToC completeness": (),
+    "Source quality": ("source", "reference", "evidence", "bibliography", "citation"),
+    "Citation integrity": ("reference", "citation", "source", "url", "evidence"),
+    "Evidence synthesis": ("evidence", "finding", "analysis", "theme", "insight"),
+    "Analytical depth": ("analysis", "tradeoff", "implication", "comparison", "evaluation", "risk"),
+    "Practical usefulness": ("recommendation", "roadmap", "implementation", "option", "blueprint", "action"),
+    "Code quality / examples": ("code", "example", "implementation", "walkthrough", "listing"),
+    "Diagrams and tables": ("diagram", "table", "matrix", "scorecard", "landscape", "comparison"),
+    "Readability and formatting": (),
+    "Reflection and limitations": ("limitation", "uncertainty", "reflection", "open question", "future"),
+    "Governance and safety": ("governance", "safety", "security", "privacy", "legal", "regulatory", "equity", "cost"),
+}
 _TARGET_SOURCES = 8          # DEER "inclusion of requested items": reward up to N sources
 _TARGET_QUOTES = 8           # direct-evidence density target
 _TARGET_WORDS = 1500         # body-depth floor (a stub must not score full marks)
 _TARGET_ANALYSIS = 6         # analytical/comparative discourse markers for full analysis credit
+_TARGET_PRACTICAL = 6        # action/risk markers for full practical-usefulness credit
 
 #: Discourse markers of analysis & cross-source comparison — interpretation rather than
 #: quotation. Their density is the deterministic `analysis` signal (PLAN item 1B): a report
@@ -107,6 +279,20 @@ _ANALYSIS_MARKERS = re.compile(
     r"|more (?:effective|reliable|robust|mature|popular) than|differ(?:s|ent|ence)?"
     r")\b"
 )
+
+_PRACTICAL_MARKERS = re.compile(
+    r"(?i)\b("
+    r"recommend(?:ation|ed|s)?|next step|action item|roadmap|implementation|implement"
+    r"|mitigat(?:e|ion)|risk|trade[- ]?off|owner|timeline|priority|checklist"
+    r"|roll(?:out|back)|pilot|measure|metric|budget|cost|dependency|constraint"
+    r")\b"
+)
+
+_CATEGORY_WEAKNESS_HINTS = {
+    "Practical usefulness": (
+        "add concrete implementation risks, mitigations, sequencing, and next actions"
+    ),
+}
 
 
 def _clamp01(x: float) -> float:
@@ -219,11 +405,134 @@ def resolve_weights(weights: dict[str, float] | None) -> dict[str, float]:
     return {k: v / total for k, v in merged.items()}
 
 
+def _category_matches_template(category: str, template: Iterable[str] | None) -> bool:
+    terms = _CATEGORY_TEMPLATE_TERMS[category]
+    if not terms:
+        return True
+    text = " ".join(str(s).lower() for s in (template or []) if str(s).strip())
+    return not text or any(term in text for term in terms)
+
+
+def _category_applies_to_section(category: str, section: str) -> bool:
+    terms = _CATEGORY_TEMPLATE_TERMS[category]
+    if not terms:
+        return True
+    text = str(section or "").lower()
+    return any(term in text for term in terms)
+
+
+def _scale_points(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    total = sum(float(row["points"]) for row in rows)
+    if total <= 0:
+        return rows
+    return [{**row, "points": float(row["points"]) * 100.0 / total} for row in rows]
+
+
+def default_scoring_matrix(
+    report_type: str | None = None,
+    template: Iterable[str] | None = None,
+) -> list[dict[str, object]]:
+    """Frozen run-start scoring categories.
+
+    Profiles share one category vocabulary; only weights vary. Each category maps to an
+    existing deterministic rubric signal so this stays reproducible and small.
+    """
+    key = (report_type or "general").strip().lower().replace("-", "_")
+    weights = _PROFILE_CATEGORY_POINTS.get(key, _PROFILE_CATEGORY_POINTS["general"])
+    rows = []
+    for category in SCORING_CATEGORIES:
+        points = float(weights.get(category, 0.0))
+        if points <= 0 or not _category_matches_template(category, template):
+            continue
+        rows.append({
+            "category": category,
+            "points": points,
+            "applicable": True,
+            "signal": _CATEGORY_SIGNALS[category],
+        })
+    return _scale_points(rows)
+
+
+def scoring_rules_for_sections(
+    scoring_matrix: Iterable[Mapping[str, object]] | None,
+    sections: Iterable[str],
+) -> list[dict[str, object]]:
+    """Subset scoring rules for a section worker, keeping universal rules everywhere."""
+    section_list = [str(s) for s in sections if str(s).strip()]
+    rules = resolve_scoring_matrix(scoring_matrix)
+    return [
+        dict(rule)
+        for rule in rules
+        if any(_category_applies_to_section(str(rule["category"]), section) for section in section_list)
+    ]
+
+
+def format_scoring_rules(
+    scoring_matrix: Iterable[Mapping[str, object]] | None,
+    *,
+    sections: Iterable[str] | None = None,
+) -> str:
+    """Compact prompt block for scoring rules."""
+    rules = (
+        scoring_rules_for_sections(scoring_matrix, sections)
+        if sections is not None
+        else [dict(rule) for rule in resolve_scoring_matrix(scoring_matrix)]
+    )
+    if not rules:
+        return "- (none for this assigned section)"
+    return "\n".join(
+        f"- {rule['category']} ({float(rule['points']):.1f} pts): satisfy via {rule['signal']}"
+        for rule in rules
+    )
+
+
+def resolve_score_profile(
+    report_type: str | None = None,
+    template: Iterable[str] | None = None,
+) -> ScoreProfile:
+    """Return the frozen score profile selected by report type."""
+    key = (report_type or "general").strip().lower().replace("-", "_")
+    return ScoreProfile(key, tuple(default_scoring_matrix(key, template)))
+
+
+def resolve_scoring_matrix(
+    matrix: Iterable[Mapping[str, object]] | None = None,
+    template: Iterable[str] | None = None,
+) -> list[dict[str, object]]:
+    """Normalize user/API scoring-matrix payloads to the shared 12-category vocabulary."""
+    if matrix is None:
+        return default_scoring_matrix(template=template)
+    rows: list[dict[str, object]] = []
+    for row in matrix or []:
+        category = str(row.get("category") or "").strip()
+        if category not in SCORING_CATEGORIES or not _category_matches_template(category, template):
+            continue
+        signal = str(row.get("signal") or _CATEGORY_SIGNALS[category]).strip()
+        if signal not in _WEIGHTS:
+            signal = _CATEGORY_SIGNALS[category]
+        try:
+            points = float(row.get("points", row.get("weight", 0.0)))
+        except (TypeError, ValueError):
+            points = 0.0
+        if points <= 0:
+            continue
+        rows.append({
+            "category": category,
+            "points": max(0.0, points),
+            "applicable": True,
+            "signal": signal,
+        })
+    return _scale_points(rows)
+
+
 def rubric_score(
     text: str,
     verified_urls: Iterable[str] | None = None,
     weights: dict[str, float] | None = None,
     required_sections: Iterable[str] | None = None,
+    *,
+    relevance_penalty: float = 0.0,
+    compliance_penalty: float = 0.0,
 ) -> float:
     """Weighted research-report quality score in [0,1] (deterministic).
 
@@ -232,10 +541,155 @@ def rubric_score(
     not. ``weights`` is the GUI-tunable per-criterion weighting and ``required_sections``
     the GUI-supplied deliverable TEMPLATE (both from the session ``rubric_config``); omitted
     → defaults. Use as the scoring standard and as the epoch keep/discard signal.
+
+    ``relevance_penalty`` is an optional precomputed [0,1] fraction — the share of a
+    seeded artifact's sections a binary LLM classification (``studio.relevance``, run
+    ONCE per epoch upstream) flagged as off-topic for THIS task, e.g. cross-task R10
+    seed contamination. Subtracted from the weighted base score, clamped to [0,1].
+    Defaults to 0.0 (no penalty) so existing callers without this context are
+    unaffected. This function itself stays pure/deterministic — it makes NO network
+    call; the classification happens once, upstream, by whoever already holds a live
+    LLM client (rubric_score is called many times per epoch — see runner.py's
+    ``_editor_scored_issues`` call sites — so it must never trigger one itself).
+
+    ``compliance_penalty`` is the analogous precomputed [0,1] fraction from
+    ``studio.requirement_compliance`` — the share of the task's EXPLICIT stated
+    requirements the artifact fails to satisfy. Same subtract-and-clamp
+    treatment as ``relevance_penalty`` (the two stack); defaults to 0.0.
     """
-    w = resolve_weights(weights)
     parts = score_breakdown(text, verified_urls, required_sections)
-    return round(sum(w[k] * parts[k] for k in w), 4)
+    w = resolve_weights(weights)
+    base = sum(w[k] * parts[k] for k in w)
+    penalty = max(0.0, relevance_penalty) + max(0.0, compliance_penalty)
+    return round(_clamp01(base - penalty), 4)
+
+
+def rubric_scorecard_100(
+    text: str,
+    verified_urls: Iterable[str] | None = None,
+    *,
+    required_sections: Iterable[str] | None = None,
+    scoring_matrix: Iterable[Mapping[str, object]] | None = None,
+    weights: dict[str, float] | None = None,
+    relevance_penalty: float = 0.0,
+    compliance_penalty: float = 0.0,
+) -> dict[str, object]:
+    """Unified score surface: original deterministic signals plus scoring matrix.
+
+    The original rubric remains the calibrated optimization signal; this scorecard
+    exposes the same base signals through the frozen profile/template matrix.
+
+    ``relevance_penalty`` / ``compliance_penalty`` — see ``rubric_score``; both also
+    derate ``total`` by the same fraction of ``max_points`` so the 100-point
+    scorecard stays consistent with the base score.
+    """
+    parts = score_breakdown(text, verified_urls, required_sections)
+    base_score = rubric_score(
+        text, verified_urls, weights, required_sections,
+        relevance_penalty=relevance_penalty,
+        compliance_penalty=compliance_penalty,
+    )
+    matrix = resolve_scoring_matrix(scoring_matrix)
+    rows: list[dict[str, object]] = []
+    total = 0.0
+    max_points = 0.0
+    for row in matrix:
+        points = float(row["points"])
+        signal = str(row["signal"])
+        signal_score = _category_signal_score(str(row["category"]), signal, parts, text)
+        earned = round(points * signal_score, 2)
+        total += earned
+        max_points += points
+        rows.append({**row, "score": earned, "signal_score": signal_score})
+    total = max(0.0, total - (max(0.0, relevance_penalty) + max(0.0, compliance_penalty)) * max_points)
+    return {
+        "score": round(total, 2),
+        "max_score": round(max_points, 2),
+        "base_score": base_score,
+        "signals": parts,
+        "categories": rows,
+    }
+
+
+def _category_signal_score(
+    category: str,
+    signal: str,
+    parts: Mapping[str, float],
+    text: str,
+) -> float:
+    if category == "Practical usefulness":
+        return _clamp01(len(_PRACTICAL_MARKERS.findall(text or "")) / _TARGET_PRACTICAL)
+    return float(parts[signal])
+
+
+def scorecard_weaknesses(
+    scorecard: Mapping[str, object],
+    scoring_template: Iterable[str] | None = None,
+    *,
+    min_signal_score: float = 0.75,
+    limit: int = 6,
+) -> list[str]:
+    """Turn weak scorecard rows into section-routable weaknesses for the next run."""
+    weaknesses: list[str] = []
+    sections = [str(s) for s in (scoring_template or []) if str(s).strip()]
+    rows = scorecard.get("categories", []) if isinstance(scorecard, Mapping) else []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        try:
+            signal_score = float(row.get("signal_score", 1.0))
+        except (TypeError, ValueError):
+            continue
+        if signal_score >= min_signal_score:
+            continue
+        category = str(row.get("category") or "").strip()
+        if not category:
+            continue
+        try:
+            score = float(row.get("score", 0.0))
+            points = float(row.get("points", 0.0))
+        except (TypeError, ValueError):
+            score, points = 0.0, 0.0
+        owners = [
+            section for section in sections
+            if _category_applies_to_section(category, section)
+        ] or ["document"]
+        for owner in owners:
+            prefix = "[document]" if owner == "document" else f"[## {owner.removeprefix('## ').strip()}]"
+            hint = _CATEGORY_WEAKNESS_HINTS.get(category, "improve the section against this rule")
+            weaknesses.append(
+                f"{prefix} Scoring gap: {category} scored {score:.1f}/{points:.1f}; "
+                f"{hint}."
+            )
+            if len(weaknesses) >= limit:
+                return weaknesses
+    return weaknesses
+
+
+def remaining_scoring_matrix(
+    scorecard: Mapping[str, object],
+    *,
+    min_signal_score: float = 0.75,
+) -> list[dict[str, object]]:
+    """Return unachieved scorecard rows for the next phase's prompt budget."""
+    rows = scorecard.get("categories", []) if isinstance(scorecard, Mapping) else []
+    remaining: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        try:
+            signal_score = float(row.get("signal_score", 1.0))
+        except (TypeError, ValueError):
+            continue
+        if signal_score >= min_signal_score:
+            continue
+        remaining.append({
+            "category": str(row.get("category") or ""),
+            "points": float(row.get("points") or 0.0),
+            "applicable": True,
+            "signal": str(row.get("signal") or _CATEGORY_SIGNALS.get(str(row.get("category") or ""), "structure")),
+        })
+    return [row for row in remaining if row["category"] in SCORING_CATEGORIES and row["points"] > 0]
 
 
 #: Weakness-penalty calibration (DESIGN §14.7). The rubric measures STRUCTURE/QUANTITY

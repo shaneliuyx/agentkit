@@ -13,17 +13,21 @@ import type {
   CumulativeTokens,
   DagPayload,
   EvolvePayload,
+  EvidenceItem,
   GatePayload,
   GraphEdgePayload,
   GraphNodePayload,
   LoopDoctorCheck,
   MemoryEntry,
+  RunMetrics,
   PlanStep,
   LoopMatch,
   LoopSeedPayload,
   RouterPayload,
   RubricConfig,
   RunMode,
+  ReviewStatus,
+  Scorecard100,
   SelfImprovePayload,
   SessionPayload,
   StudioEvent,
@@ -99,6 +103,9 @@ export interface ResultState {
   result: string;
   /** Absolute path the result was saved to (session workspace); "" if not saved. */
   result_path: string;
+  scorecard_100?: Scorecard100 | null;
+  review?: ReviewStatus | null;
+  metrics?: RunMetrics | null;
 }
 
 export interface RunState {
@@ -129,6 +136,7 @@ export interface RunState {
   gates: GatePayload[];
   dag: DagPayload | null;
   verify: { findings: VerifyFinding[]; uncited: string[] } | null;
+  evidence: { items: EvidenceItem[]; matrix: string } | null;
   router: RouterPayload[];
   agentEvents: AgentEventPayload[];
 
@@ -143,6 +151,7 @@ export interface RunState {
   // ── M8 ──
   /** Loop Doctor health checks from the last `loopdoctor` event (replaced each time). */
   loopDoctor: LoopDoctorCheck[];
+  metrics: RunMetrics | null;
 
   // ── Loop Engineering (agentkit.loop) ──
   goalMet: GoalMetPayload | null;
@@ -173,7 +182,7 @@ const EMPTY_TOKENS: TokenState = { input: 0, output: 0, total: 0, estimated: fal
 const initialState = {
   sessionId: null as string | null,
   status: "idle" as RunStatus,
-  mode: "auto" as RunMode,
+  mode: "llm" as RunMode,
   session: null as SessionPayload | null,
   task: null as string | null,
   errorMessage: null as string | null,
@@ -191,12 +200,14 @@ const initialState = {
   gates: [] as GatePayload[],
   dag: null as DagPayload | null,
   verify: null as { findings: VerifyFinding[]; uncited: string[] } | null,
+  evidence: null as { items: EvidenceItem[]; matrix: string } | null,
   router: [] as RouterPayload[],
   agentEvents: [] as AgentEventPayload[],
   loops: [] as LoopMatch[],
   loopSeed: null as LoopSeedPayload | null,
   tools: [] as ToolActivity[],
   loopDoctor: [] as LoopDoctorCheck[],
+  metrics: null as RunMetrics | null,
   goalMet: null as GoalMetPayload | null,
   configuredGoal: null as RunState["configuredGoal"],
   configuredHillClimb: null as RunState["configuredHillClimb"],
@@ -357,6 +368,9 @@ export const useRunStore = create<RunState>((set) => ({
             },
           };
 
+        case "evidence":
+          return { evidence: event.payload };
+
         case "loops":
           return { loops: event.payload.matches };
 
@@ -371,6 +385,9 @@ export const useRunStore = create<RunState>((set) => ({
 
         case "loopdoctor":
           return { loopDoctor: event.payload.checks };
+
+        case "metrics":
+          return { metrics: event.payload.metrics };
 
         case "goal_met":
           return { goalMet: event.payload };
@@ -392,6 +409,7 @@ export const useRunStore = create<RunState>((set) => ({
             status: "done",
             cancelled: event.payload.cancelled,
             result: event.payload,
+            metrics: event.payload.metrics ?? state.metrics,
             tokens: {
               input: event.payload.input,
               output: event.payload.output,

@@ -6,6 +6,7 @@ text to a vector over a fixed keyword vocabulary, so cosine similarity is
 controlled and predictable (no oMLX / network needed).
 """
 
+import itertools
 from pathlib import Path
 
 import pytest
@@ -27,10 +28,19 @@ class FakeEmbedder:
         return out
 
 
-def _run(req: str, weaknesses: list[str], score: float, sid: str) -> TaskRun:
+_version_counter = itertools.count(1)
+
+
+def _run(
+    req: str, weaknesses: list[str], score: float, sid: str,
+    relevance_checked: bool = False,
+) -> TaskRun:
+    # Distinct version per record so re-recording the same task_hash doesn't
+    # collide on the UNIQUE(task_hash, version) index (real runs increment too).
     return TaskRun(
-        task_hash=task_hash(req), session_id=sid, version=1, score=score,
-        weaknesses=weaknesses, artifact_path="", requirement=req,
+        task_hash=task_hash(req), session_id=sid, version=next(_version_counter),
+        score=score, weaknesses=weaknesses, artifact_path="", requirement=req,
+        relevance_checked=relevance_checked,
     )
 
 
@@ -161,3 +171,68 @@ def test_repeat_failures_below_limit_not_flagged(tmp_path: Path) -> None:
     for i in range(2):  # 2 < REPEAT_LIMIT
         s.record(_run(req, ["[## Results] no popularity metrics"], 0.3, f"r{i}"))
     assert s.repeat_failures(task_hash(req)) == set()
+
+
+# --- Fix 2: relevance_checked flag + R10 seed deprioritization ---
+
+def test_relevance_checked_round_trips(tmp_path: Path) -> None:
+    """The flag persists and is read back onto runs returned by similar_runs()."""
+    s = TaskRunStore(db_path=tmp_path / "rc.db", embedder=FakeEmbedder())
+    s.record(_run("build an agent loop framework", ["x"], 0.5, "s1",
+                  relevance_checked=True))
+    hits = s.similar_runs("agent loop", FakeEmbedder(), k=5, min_similarity=0.1)
+    assert hits and hits[0][0].relevance_checked is True
+
+
+def test_similar_runs_deprioritizes_unchecked_seed(tmp_path: Path) -> None:
+    """Two tasks embed IDENTICALLY (same vocab → same cosine to the query), so raw
+    similarity ties. The relevance_checked=True candidate must outrank the unchecked
+    one — even though the unchecked one has the HIGHER score (score only picks the
+    representative row per hash; the final ranking applies the unchecked penalty)."""
+    s = TaskRunStore(db_path=tmp_path / "dp.db", embedder=FakeEmbedder())
+    # Both contain vocab {"agent","loop"} → vector [1,1,0,0,0,0] → identical sim.
+    s.record(_run("build an agent loop framework", ["a"], 0.9, "s_unchecked",
+                  relevance_checked=False))
+    s.record(_run("design an agent loop system", ["b"], 0.4, "s_checked",
+                  relevance_checked=True))
+    hits = s.similar_runs("agent loop orchestration", FakeEmbedder(),
+                          k=5, min_similarity=0.1)
+    sids = [run.session_id for run, _ in hits]
+    # Deprioritized, NOT excluded — both still present, checked one first.
+    assert sids[0] == "s_checked"
+    assert "s_unchecked" in sids
+
+
+def test_similar_runs_checked_selected_normally(tmp_path: Path) -> None:
+    """A relevance_checked=True candidate is retrieved exactly as before (no penalty)."""
+    s = TaskRunStore(db_path=tmp_path / "ok.db", embedder=FakeEmbedder())
+    s.record(_run("build an agent loop framework", ["a"], 0.5, "s_checked",
+                  relevance_checked=True))
+    hits = s.similar_runs("agent loop", FakeEmbedder(), k=5, min_similarity=0.1)
+    assert [run.session_id for run, _ in hits] == ["s_checked"]
+
+
+def test_legacy_rows_default_unchecked(tmp_path: Path) -> None:
+    """Rows written before the column existed backfill to relevance_checked=0."""
+    import sqlite3
+    db = tmp_path / "legacy_rc.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "task_hash TEXT NOT NULL, session_id TEXT NOT NULL, version INTEGER NOT NULL, "
+        "score REAL NOT NULL, weaknesses_json TEXT NOT NULL DEFAULT '[]', "
+        "artifact_path TEXT NOT NULL DEFAULT '', requirement TEXT NOT NULL DEFAULT '', "
+        "result_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+    )
+    conn.execute(
+        "INSERT INTO task_runs (task_hash, session_id, version, score, requirement) "
+        "VALUES (?,?,?,?,?)",
+        (task_hash("build an agent loop framework"), "s_old", 1, 0.5,
+         "build an agent loop framework"),
+    )
+    conn.commit()
+    conn.close()
+    # Reopen through TaskRunStore → migration adds relevance_checked default 0.
+    s = TaskRunStore(db_path=db, embedder=FakeEmbedder())
+    hits = s.similar_runs("agent loop", FakeEmbedder(), k=5, min_similarity=0.1)
+    assert hits and hits[0][0].relevance_checked is False

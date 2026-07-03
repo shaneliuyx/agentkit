@@ -18,11 +18,13 @@ CORS is open for localhost dev (Vite on :5173).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
 import threading
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
@@ -37,12 +39,13 @@ from studio.backends import (
     resolve_backend,
 )
 from studio.events import StudioEvent
-from studio.export import run_to_loop
+from studio.export import run_to_loop, run_to_research_package
 from studio.loops import CatalogClient
 from studio.models import LoopConfig
 from studio.runner import Runner
 from studio.session import SessionRegistry, flatten_chat_to_requirement
 from studio.skills_paths import build_path_skills
+from studio.templates import TemplateStore
 from studio.workspace import workspace_root
 
 #: Sentinel pushed onto the event queue to signal stream completion.
@@ -127,6 +130,15 @@ def post_session(body: dict[str, Any]) -> dict[str, str]:
         tools_enabled=tools_enabled,
         loop_config=loop_config,
     )
+    from studio.rubric import DEFAULT_TEMPLATE, DEFAULT_WEIGHTS, default_scoring_matrix
+
+    session.rubric_config = {
+        "weights": DEFAULT_WEIGHTS,
+        "template": DEFAULT_TEMPLATE,
+        "scoring_template": DEFAULT_TEMPLATE,
+        "scoring_matrix": default_scoring_matrix("general", DEFAULT_TEMPLATE),
+        "report_type": "general",
+    }
     # Optionally seed from a chosen loop-library loop in the same request.
     loop_id = body.get("loop_id")
     if loop_id:
@@ -311,12 +323,19 @@ def post_cancel(session_id: str) -> dict[str, Any]:
 
 @app.get("/skills")
 def get_skills() -> dict[str, Any]:
-    """The 5 loop-library paths as agentkit skills: name + description each."""
-    return {
-        "skills": [
-            {"name": s.name, "description": s.description} for s in build_path_skills()
-        ]
-    }
+    """Loop-library path skills plus domain skills (e.g. research-report-agent)."""
+    from studio.skills_paths import build_domain_skills
+
+    skills = [
+        {"name": s.name, "description": s.description, "source": "builtin", "kind": "path"}
+        for s in build_path_skills()
+    ]
+    skills += [
+        {"name": s.name, "description": s.description, "trigger": s.trigger,
+         "source": "builtin", "kind": "domain"}
+        for s in build_domain_skills()
+    ]
+    return {"skills": skills}
 
 
 @app.get("/export/{session_id}")
@@ -335,6 +354,20 @@ def get_export(session_id: str) -> dict[str, Any]:
             detail="session has no finished run to export; start a run first",
         )
     return {"loop": run_to_loop(session.last_run)}
+
+
+@app.get("/export/{session_id}/research-package")
+def get_research_package_export(session_id: str) -> dict[str, Any]:
+    """Serialize a finished run into a research-report package draft."""
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="unknown session")
+    if session.last_run is None or not session.last_run.plan_steps:
+        raise HTTPException(
+            status_code=409,
+            detail="session has no finished run to export; start a run first",
+        )
+    return {"package": run_to_research_package(session.last_run)}
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +627,10 @@ def set_hill_climb(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "min_improvement": float(body.get("min_improvement") or 0.02),
         "max_epochs": int(body.get("max_epochs") or 5),
         "auto_improve": bool(body.get("auto_improve", False)),
+        # Optional explicit seed file: point the run at any artifact on disk,
+        # overriding exact-hash + semantic DB seeding (the escape hatch when a
+        # weak same-task lineage would otherwise block a stronger seed).
+        "seed_path": (str(body.get("seed_path")).strip() or None) if body.get("seed_path") else None,
     }
     # Agent Sizing sliders (min/max tasks per agent, max-agents cap) ride in the
     # same panel payload, but the runner reads them from loop_config
@@ -612,14 +649,132 @@ def set_hill_climb(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
 def rubric_defaults() -> dict[str, Any]:
     """Default rubric weights + deliverable template, so the GUI can seed the rubric
     panel with the same values the scorer uses (DESIGN §14.2)."""
-    from studio.rubric import DEFAULT_TEMPLATE, DEFAULT_WEIGHTS
+    from studio.rubric import DEFAULT_TEMPLATE, DEFAULT_WEIGHTS, default_scoring_matrix
     from studio.report_profiles import profile_template_presets
 
     return {
         "weights": DEFAULT_WEIGHTS,
         "template": DEFAULT_TEMPLATE,
+        "scoring_template": DEFAULT_TEMPLATE,
+        "scoring_matrix": default_scoring_matrix("general", DEFAULT_TEMPLATE),
         "report_type": "general",
         "template_presets": profile_template_presets(),
+    }
+
+
+#: Env var holding the shared admin key for catalog mutation/export routes.
+_ADMIN_KEY_ENV = "STUDIO_ADMIN_KEY"
+
+
+def require_catalog_admin(
+    x_studio_admin_key: str | None = Header(default=None),
+) -> None:
+    """Auth gate for catalog template mutation/export routes (finding 1).
+
+    These routes operate on the shared TemplateStore (task_runs.db) and can export
+    skeletons or poison future runs, yet the app otherwise has no auth. Protection is
+    OPT-IN: set ``STUDIO_ADMIN_KEY`` in the backend env to require callers to send a
+    matching ``X-Studio-Admin-Key`` header (403 on missing/mismatch). Unset = the
+    historical keyless localhost-dev default (the GUI sends no key), so existing
+    deployments and tests are unaffected until a key is configured."""
+    expected = os.environ.get(_ADMIN_KEY_ENV)
+    if not expected:
+        return  # no key configured → keyless dev default (see docstring)
+    if not x_studio_admin_key or not hmac.compare_digest(x_studio_admin_key, expected):
+        raise HTTPException(status_code=403, detail="invalid or missing X-Studio-Admin-Key")
+
+
+@app.post("/catalog/templates/audit")
+def audit_templates(
+    body: dict[str, Any] | None = None, _: None = Depends(require_catalog_admin)
+) -> dict[str, Any]:
+    """Audit stored report templates and disable unsafe skeletons."""
+    report_type = str((body or {}).get("report_type") or "general")
+    audited = TemplateStore().audit_templates(report_type)
+    return {
+        "status": "ok",
+        "report_type": report_type,
+        "audited": audited,
+        "disabled": sum(1 for row in audited if row.get("status") == "disabled"),
+    }
+
+
+@app.get("/catalog/templates")
+def list_templates(status: str | None = None) -> dict[str, Any]:
+    """Read-only template inventory for catalog management."""
+    templates = TemplateStore().list_templates(status=status)
+    return {"templates": templates, "count": len(templates)}
+
+
+@app.post("/catalog/templates/{template_id}/replace")
+def replace_template(
+    template_id: int, body: dict[str, Any], _: None = Depends(require_catalog_admin)
+) -> dict[str, Any]:
+    """Replace one stored template skeleton while preserving its catalog row."""
+    try:
+        template = TemplateStore().replace_template(
+            template_id,
+            str(body.get("skeleton") or ""),
+            report_type=str(body.get("report_type") or "general"),
+            source=str(body.get("source") or "approved"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if template is None:
+        raise HTTPException(status_code=404, detail="template not found")
+    return {"status": "ok", "template": template}
+
+
+@app.post("/catalog/templates/{template_id}/approve")
+def approve_template(
+    template_id: int,
+    body: dict[str, Any] | None = None,
+    _: None = Depends(require_catalog_admin),
+) -> dict[str, Any]:
+    """Approve a clean catalog template for future automatic reuse."""
+    body = body or {}
+    score = body.get("quality_score")
+    try:
+        template = TemplateStore().approve_template(
+            template_id,
+            approved_by=str(body.get("approved_by") or ""),
+            quality_score=float(score) if score is not None else None,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="quality_score must be numeric") from exc
+    if template is None:
+        raise HTTPException(status_code=404, detail="template not found")
+    return {"status": "ok", "template": template}
+
+
+@app.get("/catalog/templates/export")
+def export_templates(
+    status: str | None = None, _: None = Depends(require_catalog_admin)
+) -> dict[str, Any]:
+    """Export catalog templates, including full skeleton bodies."""
+    templates = TemplateStore().export_templates(status=status)
+    return {"templates": templates, "count": len(templates)}
+
+
+@app.post("/catalog/templates/import")
+def import_templates(
+    body: dict[str, Any], _: None = Depends(require_catalog_admin)
+) -> dict[str, Any]:
+    """Import catalog templates and audit them before activation."""
+    templates = body.get("templates")
+    if not isinstance(templates, list):
+        raise HTTPException(status_code=422, detail="templates must be a list")
+    try:
+        imported = TemplateStore().import_templates(
+            [item for item in templates if isinstance(item, dict)]
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "status": "ok",
+        "templates": imported,
+        "imported": sum(1 for row in imported if row.get("imported")),
+        "skipped": sum(1 for row in imported if not row.get("imported")),
     }
 
 
@@ -634,7 +789,7 @@ def set_rubric(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
     session = registry.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="session not found")
-    from studio.rubric import resolve_weights
+    from studio.rubric import default_scoring_matrix, resolve_scoring_matrix, resolve_weights
     from studio.report_profiles import resolve_report_profile
 
     weights = body.get("weights")
@@ -646,10 +801,22 @@ def set_rubric(session_id: str, body: dict[str, Any]) -> dict[str, Any]:
         if isinstance(template, list)
         else list(profile.sections)
     )
+    scoring_template = (
+        [str(s) for s in body.get("scoring_template")]
+        if isinstance(body.get("scoring_template"), list)
+        else list(resolved_template)
+    )
+    scoring_matrix = (
+        resolve_scoring_matrix(body.get("scoring_matrix"), scoring_template)
+        if isinstance(body.get("scoring_matrix"), list)
+        else default_scoring_matrix(profile.report_type, scoring_template)
+    )
     session.rubric_config = {
         # Normalize now so a bad GUI payload can't break the gate mid-run.
         "weights": resolve_weights(weights if isinstance(weights, dict) else None),
         "template": resolved_template,
+        "scoring_template": scoring_template,
+        "scoring_matrix": scoring_matrix,
         "report_type": profile.report_type,
     }
     return {"status": "ok", "rubric_config": session.rubric_config}
@@ -670,6 +837,8 @@ def get_task_runs(task_hash_str: str) -> dict[str, Any]:
                 "score": r.score,
                 "weaknesses": r.weaknesses,
                 "artifact_path": r.artifact_path,
+                # entry 166: distinguish failed_partial rows from normal history.
+                "status": r.status,
             }
             for r in runs
         ],

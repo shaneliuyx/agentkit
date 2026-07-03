@@ -5,8 +5,8 @@
  * `?demo=1` replays the canned fixture (SPEC §8 milestone 2 verification) so the
  * full UI can be exercised without a backend.
  */
-import { lazy, Suspense, useEffect, useState } from "react";
-import { BackendPanel } from "./components/config/BackendPanel";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { BackendPanel, type BackendPanelHandle } from "./components/config/BackendPanel";
 import { ChatPanel } from "./components/hud/ChatPanel";
 import { RunActions } from "./components/config/RunActions";
 import { LoopConfigPanel } from "./components/config/LoopConfigPanel";
@@ -25,7 +25,10 @@ import type { RunMode } from "./api/types";
 
 export default function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [mode, setMode] = useState<RunMode>("auto");
+  const [mode, setMode] = useState<RunMode>("llm");
+  const [stale, setStale] = useState(false);
+  const backendRef = useRef<BackendPanelHandle>(null);
+  const connectingRef = useRef<Promise<string> | null>(null);
   const session = useRunStore((s) => s.session);
   const errorMessage = useRunStore((s) => s.errorMessage);
   const cancelled = useRunStore((s) => s.cancelled);
@@ -51,7 +54,23 @@ export default function App() {
   const handleSession = (id: string, m: RunMode) => {
     setSessionId(id);
     setMode(m);
+    setStale(false);
   };
+
+  const handleDirty = () => {
+    if (sessionId) setStale(true);
+  };
+
+  const connectIfNeeded = useCallback((): Promise<string> => {
+    if (sessionId && !stale) return Promise.resolve(sessionId);
+    if (connectingRef.current) return connectingRef.current;
+    if (!backendRef.current) return Promise.reject(new Error("Backend panel not ready"));
+    const p = backendRef.current.connect().finally(() => {
+      connectingRef.current = null;
+    });
+    connectingRef.current = p;
+    return p;
+  }, [sessionId, stale]);
 
   return (
     <div className="studio-shell">
@@ -68,7 +87,15 @@ export default function App() {
             </span>
           ) : null}
         </div>
-        <BackendPanel onSession={handleSession} mode={mode} disabled={false} />
+        <BackendPanel
+          ref={backendRef}
+          onSession={handleSession}
+          onDirty={handleDirty}
+          mode={mode}
+          disabled={false}
+          connected={!!sessionId}
+          stale={stale}
+        />
         <RunActions sessionId={sessionId} />
         <LoopConfigPanel sessionId={sessionId} />
       </header>
@@ -95,7 +122,12 @@ export default function App() {
         </section>
         <aside className="studio-side">
           <TokenMeter />
-          <ChatPanel sessionId={sessionId} mode={mode} onModeChange={setMode} />
+          <ChatPanel
+            sessionId={sessionId}
+            mode={mode}
+            onModeChange={setMode}
+            connectIfNeeded={connectIfNeeded}
+          />
         </aside>
       </main>
 

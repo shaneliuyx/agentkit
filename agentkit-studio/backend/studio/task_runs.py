@@ -74,6 +74,33 @@ _TRACKING_PARAMS = frozenset({
 })
 _URL_RE = re.compile(r"https?://\S+")
 
+#: Matches a citation URL together with any enclosing wrapper so the WHOLE thing can be
+#: collapsed — otherwise neutralizing only the bare URL leaves orphaned brackets/parens
+#: like ``[(unverified))`` or ``((unverified))``. Alternatives are ordered widest-first:
+#: paren-wrapped markdown link, plain markdown link, bare parenthesized URL, then a bare
+#: URL (the original behavior). Inner URLs use ``[^)\s]+`` so the closing wrapper is not
+#: swallowed; the final bare branch keeps ``\S+`` to preserve trailing-punctuation handling.
+_CITATION_RE = re.compile(
+    r"\(\[(?P<ptext>[^\]]*)\]\((?P<plurl>https?://[^)\s]+)\)\)"   # ([text](url))
+    r"|\[(?P<ltext>[^\]]*)\]\((?P<lurl>https?://[^)\s]+)\)"        # [text](url)
+    r"|\((?P<purl>https?://[^)\s]+)\)"                             # (url)
+    r"|(?P<burl>https?://\S+)"                                     # bare url
+)
+
+#: Heals ALREADY-GARBLED markers left behind by the pre-fix orphaned-bracket bug
+#: (entry 173) — e.g. ``([(unverified))``, ``[(unverified))``, ``((unverified))``.
+#: Once that bug ran, the original URL was destroyed, so `_CITATION_RE` (which
+#: matches on a live URL) can never find and re-collapse these — the garbling is
+#: permanent scar tissue in already-generated prose, most visibly in artifacts
+#: carried forward via auto_improve from BEFORE the fix. This is pure text
+#: repair, independent of any verified-URL set, so it heals text even when
+#: verification is unavailable (unlike `_CITATION_RE`'s fail-open gate below,
+#: which is about not wrongly stripping a citation that simply couldn't be
+#: checked — not about leaving known-garbage byte sequences on the page).
+#: 1-2 leading `(`/`[` chars, the literal placeholder, then 1+ trailing `)` —
+#: a bare, already-clean ``(unverified)`` has neither, so it never matches.
+_GARBLED_UNVERIFIED_RE = re.compile(r"[(\[]{1,2}\(unverified\)\)+")
+
 
 def _normalize_url(u: str) -> str:
     """Canonicalize a URL for set-membership matching (PLAN item 7).
@@ -112,19 +139,67 @@ def neutralize_unverified_urls(
     is changed, so a transient outage never blanks out every real citation. URLs are
     normalized (scheme/slash/tracking) before matching so a genuine link is not neutralized
     over a cosmetic format difference.
+
+    Healing already-garbled markers (``_GARBLED_UNVERIFIED_RE``) runs FIRST and
+    unconditionally — it repairs known-garbage byte sequences left by the
+    pre-fix bug, not citations, so it is not gated by the fail-open check below
+    (a text with no such marker is returned byte-identical either way).
     """
-    verified = verified_urls or []
-    if not verified or not text:
+    if not text:
         return text or ""
+    text = _GARBLED_UNVERIFIED_RE.sub(placeholder, text)
+    verified = verified_urls or []
+    if not verified:
+        return text
     vset = {_normalize_url(u) for u in verified}
 
     def _sub(m: "re.Match[str]") -> str:
-        raw = m.group(0)
-        core = raw.rstrip(".,)\"'>")     # split off trailing punctuation to re-append
+        # Markdown link (optionally paren-wrapped): collapse the WHOLE construct so no
+        # orphaned [] / () fragment survives when the URL is unverified.
+        link_url = m.group("plurl") or m.group("lurl")
+        if link_url is not None:
+            if _normalize_url(link_url) in vset:
+                return m.group(0)                 # verified → keep link intact
+            label = (m.group("ptext") or m.group("ltext") or "").strip()
+            # A bare-URL label is not meaningful anchor text (and is itself unvouched),
+            # so drop it; keep only genuine descriptive labels.
+            if label and not label.lower().startswith(("http://", "https://")):
+                return f"{label} {placeholder}"
+            return placeholder
+
+        # Bare parenthesized URL: replace the whole (url) so we never emit ((unverified)).
+        purl = m.group("purl")
+        if purl is not None:
+            return m.group(0) if _normalize_url(purl) in vset else placeholder
+
+        # Bare inline URL: original behavior — strip trailing punctuation and re-append it.
+        raw = m.group("burl")
+        core = raw.rstrip(".,)\"'>")
         trail = raw[len(core):]
         return raw if _normalize_url(core) in vset else placeholder + trail
 
-    return _URL_RE.sub(_sub, text)
+    return _CITATION_RE.sub(_sub, text)
+
+
+#: Any line carrying the `(unverified)` placeholder — a bare reference bullet, an
+#: inline sentence, or a full citation entry — is a claim the pipeline could not
+#: substantiate. Tagging it (``neutralize_unverified_urls``) localizes WHICH
+#: citation failed; this removes the WHOLE line entirely, so nothing unverified
+#: ships to the reader — not even flagged, just gone. Generic: matches on the
+#: literal placeholder text only, no task/domain keywords. Distinct pass from
+#: neutralization (that one only ever runs when ``verified_urls`` is non-empty,
+#: i.e. verification genuinely ran and this citation failed — never a fail-open
+#: guess), so a caller runs this unconditionally right after it.
+_UNVERIFIED_LINE_RE = re.compile(r"(?m)^.*\(unverified\).*\n?")
+
+
+def strip_unverified_lines(text: str) -> str:
+    """Remove every line containing the ``(unverified)`` placeholder — the whole
+    claim it was attached to, not just the tag. A citation that could not be
+    substantiated is dropped entirely rather than shipped with a caveat."""
+    if not text:
+        return text or ""
+    return _UNVERIFIED_LINE_RE.sub("", text)
 
 
 #: A mined "weakness" matching this is actually a POSITIVE statement the miner hallucinated
@@ -213,22 +288,77 @@ def refute_false_weaknesses(weaknesses: list[str], doc: str) -> list[str]:
     has_code = bool(re.search(r"(?m)^\s*```(?!mermaid)\s*\w", doc))
     has_conclusion = bool(re.search(r"(?im)^#+\s*.*conclusion", masked))
     has_summary = bool(re.search(r"(?i)executive summary|abstract", masked))
+    has_url = bool(re.search(r"https?://\S+", doc or ""))
+    has_references = bool(re.search(r"(?im)^#+\s*.*references?", masked))
+    has_placeholder = bool(
+        re.search(
+            r"(?i)(?:_\((?:pending|to be completed)\s*[-—][^)]*\)_|"
+            r"\bplaceholder\b|no\s+specific\s+urls?\s+were\s+provided)",
+            masked,
+        )
+    )
     doc_clean = _ends_cleanly(doc)
+    from studio.rubric import _content_tokens
+
+    def _section_has_real_content(section_name: str) -> bool | None:
+        want = _content_tokens(section_name)
+        if not want:
+            return None
+        for heading, body in _sections:
+            if section_name.lower() in heading.lower() or (want & _content_tokens(heading)):
+                content = "\n".join((body or "").splitlines()[1:]).strip()
+                low_content = content.lower()
+                content = re.sub(
+                    r"(?im)^\s*_\((?:pending|to be completed)\s*[-—][^)]*\)_\s*$",
+                    "",
+                    content,
+                ).strip()
+                if not content:
+                    return False
+                if "placeholder" in low_content and len(content.split()) < 20:
+                    return False
+                return True
+        return None
+
     kept: list[str] = []
     for w in weaknesses:
         body = _norm_weakness(w)            # strip the [## Section] tag, lowercase
+        sec_m = re.match(r"\s*\[([^\]]+)\]", w)
+        if (
+            sec_m
+            and sec_m.group(1).strip().lower() == "document"
+            and re.search(r"(?i)\bplaceholder\b|no\s+specific\s+urls?\s+were\s+provided", body)
+            and not has_placeholder
+        ):
+            continue
+        if sec_m and re.search(r"(?i)\b(?:placeholder|empty|pending|not addressed)\b", body):
+            sec_has_content = _section_has_real_content(sec_m.group(1))
+            if sec_has_content is True:
+                continue
         # N2: an ABSENCE claim ("no/missing X") refuted when the doc demonstrably has X.
         if _ABSENCE_RE.search(body):
+            if (
+                re.search(r"(?i)\b(citation|citations|url|urls|source|sources|references?)\b", body)
+                and has_url
+                and has_references
+            ):
+                continue
             if re.search(r"(?i)\b(example )?code|snippet|sample\b", body) and has_code:
                 continue
             if "conclusion" in body and has_conclusion:
                 continue
             if re.search(r"(?i)summary|abstract", body) and has_summary:
                 continue
+        if (
+            "failure to integrate" in body
+            and re.search(r"(?i)\b(citation|citations|url|urls|source|sources|references?)\b", body)
+            and has_url
+            and has_references
+        ):
+            continue
         # N3: a truncation claim — refute against the named section (if tagged) else the
         # whole document.
         if _TRUNCATION_RE.search(body):
-            sec_m = re.match(r"\s*\[([^\]]+)\]", w)
             if sec_m and sec_m.group(1) not in ("document", ""):
                 sec_clean = _section_ends_cleanly(doc, sec_m.group(1), _sections)
                 if sec_clean is True:
@@ -244,6 +374,11 @@ def refute_false_weaknesses(weaknesses: list[str], doc: str) -> list[str]:
 # so a persistently-unfixable lesson (data doesn't exist, infra 503) cannot crowd
 # out actionable ones forever.
 REPEAT_LIMIT = 3
+
+# similar_runs() rank penalty applied to R10 seed candidates whose recorded score
+# never ran through the relevance-check (relevance_checked falsy — predates the
+# feature). Deprioritizes, not excludes: subtracted from similarity only for ranking.
+_RELEVANCE_UNCHECKED_PENALTY = 0.15
 
 
 def _norm_weakness(w: str) -> str:
@@ -347,6 +482,20 @@ class TaskRun:
     #: §14.4: snapshot of the hill-climb config this run used. Persisted as
     #: ``config_json`` so a later run of the same task can recover its epoch budget.
     config: dict = field(default_factory=dict)
+    #: Evidence rows extracted from findings and retained for cross-run inspection/export.
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    #: True only when the relevance-check (studio.relevance.relevance_issues) actually
+    #: RAN for this record's epoch — i.e. the recorded score accounted for cross-task
+    #: contamination. Defaults False for runs that predate the feature (their score
+    #: never had a relevance penalty applied), so similar_runs() can deprioritize them
+    #: as R10 seeds (a pre-check run looks clean in the DB but may be contaminated).
+    relevance_checked: bool = False
+    #: Run lifecycle: "completed" (normal, scored) or "failed_partial" (the run died
+    #: mid-flight and this row snapshots the partial artifact for carry-forward only —
+    #: entry 166). Failed rows are excluded from every improvement signal (weaknesses,
+    #: repeat-failures, similar-run seeds, config budget) but ARE eligible seed content
+    #: via latest_with_content(). Kept last so positional TaskRun(...) call sites still work.
+    status: str = "completed"
 
 
 class TaskRunStore:
@@ -371,6 +520,8 @@ class TaskRunStore:
                 artifact_path TEXT NOT NULL DEFAULT '',
                 requirement TEXT NOT NULL DEFAULT '',
                 result_text TEXT NOT NULL DEFAULT '',
+                relevance_checked INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'completed',
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
@@ -386,6 +537,35 @@ class TaskRunStore:
             self._conn.execute(
                 "ALTER TABLE task_runs ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'"
             )
+        if "evidence_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "relevance_checked" not in cols:
+            # Existing rows predate the relevance-check feature — default 0 ("not
+            # checked / unknown"), so similar_runs() deprioritizes them as R10 seeds.
+            self._conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN relevance_checked INTEGER NOT NULL DEFAULT 0"
+            )
+        if "status" not in cols:
+            # entry 166: existing rows predate partial-persistence — they are all
+            # completed runs, so 'completed' is the correct backfill default.
+            self._conn.execute(
+                "ALTER TABLE task_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
+            )
+        # Uniqueness on (task_hash, version) is the race guard: two concurrent
+        # auto-improve runs of the same task both compute MAX(version)+1 and would
+        # otherwise insert the SAME version, making latest() nondeterministic. The
+        # unique index makes the second insert raise IntegrityError so record_versioned()
+        # can retry with a fresh number. Best-effort on legacy DBs that already hold a
+        # duplicate — the index just won't be created, atomic allocation still applies going forward.
+        try:
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_runs_hash_version "
+                "ON task_runs(task_hash, version)"
+            )
+        except sqlite3.IntegrityError:
+            pass
         self._conn.commit()
 
     def next_version(self, task_hash_str: str) -> int:
@@ -393,6 +573,26 @@ class TaskRunStore:
             "SELECT MAX(version) FROM task_runs WHERE task_hash = ?", (task_hash_str,)
         ).fetchone()
         return (row[0] or 0) + 1
+
+    def record_versioned(self, run: TaskRun, *, retries: int = 5) -> int:
+        """Atomically allocate the next version for ``run.task_hash`` and record it.
+
+        Replaces the caller doing ``next_version()`` then ``record()`` as two steps —
+        a window in which a concurrent run could read the same MAX(version) before
+        either inserts. The UNIQUE(task_hash, version) index rejects a colliding
+        insert; on that IntegrityError we recompute MAX+1 and retry. Returns the
+        version actually recorded."""
+        for attempt in range(retries):
+            run.version = self.next_version(run.task_hash)
+            try:
+                self.record(run)
+            except sqlite3.IntegrityError:
+                self._conn.rollback()
+                if attempt == retries - 1:
+                    raise
+                continue
+            return run.version
+        raise RuntimeError("record_versioned exhausted retries")  # unreachable
 
     def record(self, run: TaskRun) -> None:
         emb_blob = None
@@ -406,8 +606,8 @@ class TaskRunStore:
             """INSERT INTO task_runs
                (task_hash, session_id, version, score, weaknesses_json,
                 artifact_path, requirement, result_text, requirement_embedding,
-                config_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                config_json, evidence_json, relevance_checked, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run.task_hash,
                 run.session_id,
@@ -419,21 +619,35 @@ class TaskRunStore:
                 run.result_text,
                 emb_blob,
                 json.dumps(run.config or {}),
+                json.dumps(run.evidence or []),
+                int(bool(run.relevance_checked)),
+                run.status or "completed",
             ),
         )
         self._conn.commit()
 
     def _row_to_run(self, row: tuple) -> TaskRun:
+        evidence: list[dict[str, Any]] = []
+        if len(row) > 8 and row[8]:
+            try:
+                parsed = json.loads(row[8])
+            except (TypeError, ValueError):
+                parsed = []
+            if isinstance(parsed, list):
+                evidence = [item for item in parsed if isinstance(item, dict)]
         return TaskRun(
             task_hash=row[0], session_id=row[1], version=row[2], score=row[3],
             weaknesses=json.loads(row[4]), artifact_path=row[5],
-            requirement=row[6], result_text=row[7],
+            requirement=row[6], result_text=row[7], evidence=evidence,
+            # status appended after evidence_json in the standard SELECTs; absent from
+            # similar_runs' row[:9] slice, where every candidate is already completed-filtered.
+            status=row[9] if len(row) > 9 else "completed",
         )
 
     def latest(self, task_hash_str: str) -> TaskRun | None:
         row = self._conn.execute(
             """SELECT task_hash, session_id, version, score, weaknesses_json,
-                      artifact_path, requirement, result_text
+                      artifact_path, requirement, result_text, evidence_json, status
                FROM task_runs WHERE task_hash = ?
                ORDER BY version DESC LIMIT 1""",
             (task_hash_str,),
@@ -447,9 +661,13 @@ class TaskRunStore:
         skipped so they never enable the epoch loop. Returns ``{}`` when no run of
         this task ever persisted a config.
         """
+        # status='completed' guard (entry 166): a failed_partial row stores
+        # config={"failure": ...} — non-empty but NOT a hill-climb budget. Without this
+        # filter it would shadow a prior real config and silently drop the epoch budget.
         row = self._conn.execute(
             """SELECT config_json FROM task_runs
                WHERE task_hash = ? AND config_json NOT IN ('', '{}')
+                     AND status = 'completed'
                ORDER BY version DESC LIMIT 1""",
             (task_hash_str,),
         ).fetchone()
@@ -464,12 +682,21 @@ class TaskRunStore:
     def best(self, task_hash_str: str) -> TaskRun | None:
         row = self._conn.execute(
             """SELECT task_hash, session_id, version, score, weaknesses_json,
-                      artifact_path, requirement, result_text
+                      artifact_path, requirement, result_text, evidence_json, status
                FROM task_runs WHERE task_hash = ?
                ORDER BY score DESC LIMIT 1""",
             (task_hash_str,),
         ).fetchone()
         return self._row_to_run(row) if row else None
+
+    def session_recency(self, session_id: str) -> int:
+        """Recency rank for a session = its max DB row id (autoincrement, higher = later).
+        Breaks ties when several semantically-similar priors qualify as a seed — the latest
+        run has the most accumulated work. Returns 0 for an unknown session."""
+        row = self._conn.execute(
+            "SELECT MAX(id) FROM task_runs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
 
     def latest_with_content(self, task_hash_str: str, ws_root: Path | None = None) -> TaskRun | None:
         """Return most recent run with usable seed content.
@@ -484,6 +711,10 @@ class TaskRunStore:
         post-restart). Returning None there silently cold-starts hill-climb and
         BYPASSES the keep/discard gate — a regressed epoch then overwrites the
         served deliverable with no anti-regression protection (DESIGN §14.6).
+
+        NO status filter (entry 166): this MAY return a ``failed_partial`` row, and that
+        is the carry-forward win — when a run died mid-flight its partial artifact is the
+        best available seed, strictly better than cold-starting from nothing.
         """
         from studio.workspace import workspace_root as _ws_root  # noqa: PLC0415
         root = ws_root or _ws_root()
@@ -498,11 +729,20 @@ class TaskRunStore:
     def all_runs(self, task_hash_str: str) -> list[TaskRun]:
         rows = self._conn.execute(
             """SELECT task_hash, session_id, version, score, weaknesses_json,
-                      artifact_path, requirement, result_text
+                      artifact_path, requirement, result_text, evidence_json, status
                FROM task_runs WHERE task_hash = ? ORDER BY version ASC""",
             (task_hash_str,),
         ).fetchall()
         return [self._row_to_run(r) for r in rows]
+
+    def completed_runs(self, task_hash_str: str) -> list[TaskRun]:
+        """Runs that finished and were scored — excludes ``failed_partial`` rows (entry 166).
+
+        The improvement signal (weaknesses, repeat-failures) must derive only from real
+        scored runs; a mid-flight death recorded a partial artifact for seeding, not a
+        judged outcome, so its (empty) weaknesses/score must never feed forward.
+        """
+        return [r for r in self.all_runs(task_hash_str) if r.status == "completed"]
 
     def _backfill_embeddings(self, embedder: Any) -> None:
         """Embed any rows whose requirement_embedding is NULL (lazy migration).
@@ -558,9 +798,11 @@ class TaskRunStore:
         # (its weaknesses are the most informative). Exclude the current task.
         rows = self._conn.execute(
             """SELECT task_hash, session_id, version, score, weaknesses_json,
-                      artifact_path, requirement, result_text, requirement_embedding
+                      artifact_path, requirement, result_text, evidence_json,
+                      requirement_embedding, relevance_checked
                FROM task_runs
                WHERE requirement_embedding IS NOT NULL AND task_hash != ?
+                     AND status = 'completed'
                ORDER BY score DESC""",
             (exclude_hash or "",),
         ).fetchall()
@@ -570,11 +812,24 @@ class TaskRunStore:
             thash = row[0]
             if thash in best_by_hash:  # already kept the top-scoring row (ORDER BY score DESC)
                 continue
-            sim = _cosine(qvec, _blob_to_vec(row[8]))
+            sim = _cosine(qvec, _blob_to_vec(row[9]))
             if sim >= min_similarity:
-                best_by_hash[thash] = (self._row_to_run(row[:8]), sim)
+                run = self._row_to_run(row[:9])
+                run.relevance_checked = bool(row[10])
+                best_by_hash[thash] = (run, sim)
 
-        ranked = sorted(best_by_hash.values(), key=lambda t: t[1], reverse=True)
+        # Deprioritize (don't exclude — most legitimate runs also lack the flag,
+        # since the relevance-check only runs on cross-task-seeded epochs) candidates
+        # whose recorded score never accounted for cross-task contamination. A
+        # relevance-checked run of comparable similarity now outranks an unchecked
+        # one, so a pre-feature contaminated seed (e.g. s_98742f3026ee) loses to any
+        # verified alternative — but is still available when it's the only close match.
+        # The returned similarity stays RAW (callers threshold on it downstream).
+        ranked = sorted(
+            best_by_hash.values(),
+            key=lambda t: t[1] - (0.0 if t[0].relevance_checked else _RELEVANCE_UNCHECKED_PENALTY),
+            reverse=True,
+        )
         return ranked[:k]
 
     def _consolidate_weaknesses(
@@ -612,7 +867,7 @@ class TaskRunStore:
         history layer); the reducer owns *applying* it before writing a handoff.
         """
         freq: dict[str, int] = {}
-        for run in self.all_runs(exact_hash):
+        for run in self.completed_runs(exact_hash):  # entry 166: failed rows carry no signal
             for nk in {_norm_weakness(w) for w in run.weaknesses}:  # per-run distinct
                 if nk:
                     freq[nk] = freq.get(nk, 0) + 1
@@ -641,7 +896,7 @@ class TaskRunStore:
         """
         seen: set[str] = set()
         merged: list[str] = []
-        for run in self.all_runs(exact_hash):
+        for run in self.completed_runs(exact_hash):  # entry 166: failed rows carry no signal
             for w in run.weaknesses:
                 if w not in seen:
                     seen.add(w)

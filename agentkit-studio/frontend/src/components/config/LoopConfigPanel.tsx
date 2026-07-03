@@ -138,6 +138,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
   const [hcAutoImprove, setHcAutoImprove] = useState(false);
   const [deliverablePath, setDeliverablePath] = useState("");
   const [useLatestPrior, setUseLatestPrior] = useState(true);
+  const [seedPath, setSeedPath] = useState("");
   const [minTasksPerAgent, setMinTasksPerAgent] = useState(3);
   const [maxTasksPerAgent, setMaxTasksPerAgent] = useState(5);
   const [maxAgents, setMaxAgents] = useState(5);
@@ -630,6 +631,21 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                   Create new artifact each run
                 </label>
               </div>
+              <div className="lc-field">
+                <label htmlFor="lc-hc-seed">Seed file (overrides DB seed)</label>
+                <input
+                  id="lc-hc-seed"
+                  className="mono"
+                  placeholder="/path/to/seed-artifact.md"
+                  value={seedPath}
+                  onChange={(e) => setSeedPath(e.target.value)}
+                />
+                <p className="lc-hint muted">
+                  Start this run from a specific artifact on disk, bypassing exact-hash
+                  and semantic seeding. Use when a weak same-task lineage would block a
+                  stronger seed.
+                </p>
+              </div>
               <hr className="lc-divider" />
               <p className="lc-section-label">Agent Sizing</p>
               <div className="lc-row">
@@ -680,6 +696,7 @@ export function LoopConfigPanel({ sessionId, currentTask = "" }: LoopConfigPanel
                       auto_improve: hcAutoImprove,
                       deliverable_path: deliverablePath.trim() || null,
                       use_latest_prior: useLatestPrior,
+                      seed_path: seedPath.trim() || null,
                       min_tasks_per_agent: minTasksPerAgent,
                       max_tasks_per_agent: maxTasksPerAgent,
                       max_agents: maxAgents,

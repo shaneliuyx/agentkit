@@ -54,6 +54,12 @@ class RunSnapshot:
     budget_ceiling: float | None
     result: str
     cancelled: bool
+    evidence_matrix: str = ""
+    scorecard_100: dict[str, Any] | None = None
+    review: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
+    agent_trace_jsonl: str = ""
+    checkpoints_jsonl: str = ""
 
 
 @dataclass
@@ -89,7 +95,8 @@ class Session:
     #: {score_metric: str, min_improvement: float, max_epochs: int, auto_improve: bool}
     hill_climb_config: dict | None = None
     #: GUI rubric + deliverable template (DESIGN §14.2): the keep/discard gate's scoring
-    #: standard. Shape: {"weights": {criterion: float}, "template": [section, ...]}.
+    #: standard. Shape: {"weights": {criterion: float}, "template": [section, ...],
+    #: "scoring_template": [section, ...], "scoring_matrix": [{category, points, signal}]}.
     #: None → studio.rubric defaults (DEFAULT_WEIGHTS / DEFAULT_TEMPLATE).
     rubric_config: dict | None = None
     #: Loop Config panel settings — deliverable path, auto-improve, sizing sliders.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from studio.report_profiles import is_report_request
 
@@ -17,9 +18,14 @@ _STOPWORDS = {
     "about",
     "above",
     "action",
+    "actionable",
     "available",
     "blocks",
     "brief",
+    "citation",
+    "citations",
+    "cite",
+    "cited",
     "code",
     "concise",
     "concrete",
@@ -68,6 +74,27 @@ _EVIDENCE_MARKERS = (
 )
 
 _REVISION_PROMPT_MAX_CHARS = 12_000
+_STRUCTURE_INSTRUCTION_RE = re.compile(
+    r"(?is)structure\s+the\s+deliverable\s+with\s+these\s+sections.*?"
+    r"(?=\n\s*\n|focus\s+specifically\s+on:|$)"
+)
+_FOCUS_ASSIGNMENT_RE = re.compile(r"(?is)focus\s+specifically\s+on:.*$")
+_SCORING_INSTRUCTION_RE = re.compile(
+    r"(?is)\n\s*unified\s+scoring\s+requirements\s+for\s+this\s+task:.*$"
+)
+_ANALYSIS_RE = re.compile(
+    r"(?i)\b("
+    r"analysis|analy[sz]e|synthesis|synthesi[sz]e|implication|trade-?off|"
+    r"pattern|compare|contrast|why\s+it\s+matters|therefore|because|"
+    r"recommendation|next\s+step"
+    r")\b"
+)
+_REFLECTION_RE = re.compile(
+    r"(?i)\b("
+    r"limitation|reflection|open\s+question|uncertain|unverified|caveat|"
+    r"constraint|assumption|further\s+research|not\s+yet\s+verified"
+    r")\b"
+)
 
 
 @dataclass(frozen=True)
@@ -86,8 +113,71 @@ class PublishGateResult:
         return "; ".join(self.issues)
 
 
+_HIGH_IMPACT_RE = re.compile(
+    r"(?i)\b("
+    r"medical|medicine|clinical|health|diagnosis|treatment|patient|"
+    r"legal|law|lawsuit|contract|compliance|regulatory|policy|"
+    r"financial|finance|investment|investor|tax|insurance|"
+    r"security|privacy|safety|risk|incident"
+    r")\b"
+)
+
+
+def build_review_status(
+    requirement: str,
+    *,
+    evidence_count: int = 0,
+    weak_evidence_count: int = 0,
+    scorecard: dict[str, Any] | None = None,
+    publish_issues: tuple[str, ...] | list[str] = (),
+    loopdoctor_checks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return the minimal human-review state for a finished report."""
+    reasons: list[str] = []
+    report_like = is_report_request(requirement)
+    if _HIGH_IMPACT_RE.search(requirement or ""):
+        reasons.append("high-impact topic")
+    if publish_issues:
+        reasons.append("publish/readiness issues")
+    if report_like and evidence_count <= 0:
+        reasons.append("no accepted evidence matrix rows")
+    if report_like and weak_evidence_count > 0:
+        reasons.append("weak or uncorroborated evidence")
+    if any(c.get("status") != "pass" for c in (loopdoctor_checks or [])):
+        reasons.append("non-passing loop-doctor checks")
+
+    if report_like and scorecard:
+        total = scorecard.get("score", scorecard.get("total"))
+        max_score = scorecard.get("max_score", 100)
+        if isinstance(total, (int, float)) and isinstance(max_score, (int, float)) and max_score:
+            if float(total) / float(max_score) < 0.8:
+                reasons.append("scorecard below review threshold")
+        for row in scorecard.get("categories", []) if isinstance(scorecard, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("category", "")).lower()
+            if not any(k in name for k in ("source", "citation", "evidence")):
+                continue
+            score = row.get("score")
+            points = row.get("points")
+            if isinstance(score, (int, float)) and isinstance(points, (int, float)) and points:
+                if float(score) / float(points) < 0.75:
+                    reasons.append(f"weak {row.get('category')} score")
+                    break
+
+    return {
+        "required": bool(reasons),
+        "status": "REVIEW_REQUIRED" if reasons else "NOT_REQUIRED",
+        "publish_decision": "REVIEW_REQUIRED" if reasons else "PUBLISH_READY",
+        "reviewed": False,
+        "reasons": reasons,
+    }
+
+
 def _normalize_token(token: str) -> str:
     token = token.lower()
+    if token.startswith("implement"):
+        return "implement"
     if len(token) > 4 and token.endswith("s"):
         token = token[:-1]
     return token
@@ -95,7 +185,10 @@ def _normalize_token(token: str) -> str:
 
 def _important_terms(requirement: str) -> list[str]:
     terms: list[str] = []
-    for raw in re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", requirement or ""):
+    source = _STRUCTURE_INSTRUCTION_RE.sub(" ", requirement or "")
+    source = _FOCUS_ASSIGNMENT_RE.sub(" ", source)
+    source = _SCORING_INSTRUCTION_RE.sub(" ", source)
+    for raw in re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", source):
         term = _normalize_token(raw.replace("-", ""))
         if term in _STOPWORDS:
             continue
@@ -212,6 +305,74 @@ def evaluate_publish_readiness(
     return PublishGateResult(not issues, tuple(issues))
 
 
+def combined_publish_issues(
+    publish: PublishGateResult,
+    artifact_text: str,
+    evidence_text: str = "",
+) -> tuple[str, ...]:
+    """Return publish gate issues plus deterministic artifact/depth issues."""
+    from studio.artifact_lint import lint_artifact
+
+    return tuple(dict.fromkeys((
+        *publish.issues,
+        *lint_artifact(artifact_text or ""),
+        *synthesis_depth_issues(artifact_text or "", evidence_text or ""),
+    )))
+
+
+def _unique_evidence_urls(evidence_text: str) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for raw in re.findall(r"https?://[^\s)>\]\"']+", evidence_text or ""):
+        url = raw.rstrip(".,;:")
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def synthesis_depth_issues(text: str, evidence_text: str) -> tuple[str, ...]:
+    """Detect cited-but-shallow reports before they are marked publish-ready.
+
+    This is intentionally task-neutral. When fetched evidence exists, the final
+    report must do more than preserve URLs: it needs a summary, analysis, and an
+    explicit limitations/reflection surface so later phases know what remains
+    unresolved.
+    """
+    if not evidence_text or ("http://" not in evidence_text and "https://" not in evidence_text):
+        return ()
+    body = (text or "").strip()
+    if not body:
+        return ("[publish-gate] Final output did not synthesize fetched evidence.",)
+
+    issues: list[str] = []
+    low = body.lower()
+    headings = [h.lower() for h in re.findall(r"(?m)^#{1,3}\s+(.+)$", body)]
+    has_summary = any("summary" in h or "overview" in h for h in headings)
+    if not has_summary:
+        issues.append("[publish-gate] Final report lacks a summary section for synthesized findings.")
+    if not _ANALYSIS_RE.search(body):
+        issues.append("[publish-gate] Final report lacks analysis, implications, or recommendations.")
+    has_reflection = any(
+        any(word in h for word in ("limitation", "reflection", "open question", "caveat"))
+        for h in headings
+    ) or bool(_REFLECTION_RE.search(body))
+    if not has_reflection:
+        issues.append("[publish-gate] Final report lacks limitations, caveats, or reflection.")
+
+    evidence_urls = _unique_evidence_urls(evidence_text)
+    if evidence_urls:
+        cited_urls = set(_unique_evidence_urls(body))
+        used = sum(1 for u in evidence_urls if u in cited_urls)
+        # Same-page multi-finding runs should not be failed for having one URL,
+        # but multi-source evidence should not collapse to a single token citation.
+        if len(evidence_urls) >= 2 and used < max(2, (len(evidence_urls) + 1) // 2):
+            issues.append("[publish-gate] Final report uses too little of the fetched evidence.")
+    if "research_finding" in low:
+        issues.append("[publish-gate] Final report leaked internal RESEARCH_FINDING scaffolding.")
+    return tuple(issues)
+
+
 def _clip_block(text: str, max_chars: int = _REVISION_PROMPT_MAX_CHARS) -> str:
     body = (text or "").strip()
     if len(body) <= max_chars:
@@ -262,8 +423,17 @@ def build_publish_revision_prompt(
         "Make the report specific to the user's task, topic, audience, and evidence. Do not "
         "apply any fixed conclusion, fixed fallback answer, or example-specific prose from "
         "the report-generator implementation.\n\n"
-        "Required output: publishable Markdown with clear sections, source-backed claims, "
-        "limitations, and concrete next steps when the request asks for them.\n\n"
+        "Required output: publishable Markdown with clear sections:\n"
+        "- Executive Summary: answer the user's request using the evidence as a whole.\n"
+        "- Evidence-Backed Analysis: synthesize the fetched findings into patterns, "
+        "trade-offs, and implications; do not merely list sources.\n"
+        "- Recommendations or Next Steps when useful for the request.\n"
+        "- Limitations, Caveats, or Reflection: state what remains uncertain, missing, "
+        "or not fully verified.\n"
+        "- References: include only source URLs present in the evidence excerpts.\n\n"
+        "Use every relevant fetched finding. If multiple findings come from the same URL, "
+        "cover their distinct claims in the analysis rather than citing the URL once and "
+        "moving on.\n\n"
         f"USER REQUEST:\n{req_text}\n\n"
         f"PUBLISH-GATE ISSUES:\n{issue_text}\n\n"
         f"FAILED DRAFT:\n{draft_text}\n\n"

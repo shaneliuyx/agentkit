@@ -115,6 +115,46 @@ def test_write_section_workspace_drops_stray_h1_inside_sections(tmp_path) -> Non
     assert "# Another Stray Title" not in assembled
 
 
+def test_reducer_h1_dump_folds_into_single_sections(tmp_path) -> None:
+    """Real fixture (session s_089481ef5161, e1:s1.spoke8.out.md): a section reducer
+    emitted a full report at '#' (H1) for the first four sections instead of patching the
+    '##' scaffold. Before the fold-boundary heading normalization, split_sections keyed only
+    on '##', so the rich H1 blocks became '(intro)' preamble and duplicated a placeholder H2
+    of the same name. After the fix, each title resolves to exactly ONE section and the
+    reducer's rich content supersedes the thin scaffold body (not discarded to preamble)."""
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "reducer_h1_dump.md"
+    artifact = fixture.read_text(encoding="utf-8")
+    outline = [
+        "Executive Summary",
+        "Scope and Research Questions",
+        "Background and Context",
+        "Key Findings",
+        "Evidence and Analysis",
+        "Implications or Recommendations",
+        "Limitations and Uncertainty",
+        "References",
+    ]
+
+    write_section_workspace(tmp_path, artifact, outline)
+    assembled = assemble_artifact_from_sections(tmp_path)
+
+    # Every title appears exactly once, all at the canonical '##' level (no orphan '#').
+    for title in outline:
+        assert len(re.findall(rf"(?mi)^#{{1,6}}\s+{re.escape(title)}\s*$", assembled)) == 1
+        assert len(re.findall(rf"(?m)^## {re.escape(title)}$", assembled)) == 1
+
+    # The reducer's rich synthesis is preserved, not left as a placeholder.
+    files = section_file_map(tmp_path)
+    es_body = (tmp_path / files["Executive Summary"]).read_text(encoding="utf-8")
+    assert PLACEHOLDER not in es_body
+    assert "Pi agent toolkit" in es_body or "Agent Loop" in es_body
+
+    # Legitimate '###' subsections inside a section body keep their level (not demoted).
+    assert "### 1. The Power of the Agent Loop" in assembled
+
+
 def test_assignment_queue_clears_only_completed_rows(tmp_path) -> None:
     rows = (
         {"agent_id": "agent-001", "section": "## A", "file": "sections/001-a.md", "status": "queued"},

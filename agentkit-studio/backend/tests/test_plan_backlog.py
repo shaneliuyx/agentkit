@@ -83,6 +83,13 @@ def test_synthesis_rejects_when_a_url_is_dropped():
     assert not changed and out == draft
 
 
+def test_synthesis_rejects_when_a_url_is_added():
+    draft = "Finding one. https://a.com/1\n\nFinding two. https://b.com/2\n" * 30
+    invented = draft + "\nExtra unsupported source https://invented.example/new"
+    out, changed = _synthesize_analysis(draft, _FakeClient(invented), "task")
+    assert not changed and out == draft
+
+
 def test_synthesis_rejects_when_materially_shorter():
     draft = "Finding. https://a.com/1\n" * 50
     short = "Finding. https://a.com/1"

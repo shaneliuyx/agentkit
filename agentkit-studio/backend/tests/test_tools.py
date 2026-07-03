@@ -632,3 +632,370 @@ def test_file_tools_present_with_workspace(tmp_path) -> None:
     c = ToolAugmentedClient(_ScriptedClient(), workspace=_ws(tmp_path))
     names = {s["function"]["name"] for s in c._schemas}
     assert names == {"web_search", "web_fetch", "read_file", "write_file"}
+
+
+def test_offer_tools_restricts_advertised_schemas(tmp_path) -> None:
+    """An explicit offer_tools allowlist advertises EXACTLY those tools (the editor
+    pass: read_file + search_evidence + read_artifact + patch_artifact, no web/write)."""
+    art = tmp_path / "artifact.md"
+    art.write_text("# T\n\n## S\nbody\n")
+    c = ToolAugmentedClient(
+        _ScriptedClient(),
+        workspace=_ws(tmp_path),
+        artifact_path=art,
+        offer_tools={"read_file", "search_evidence", "read_artifact", "patch_artifact"},
+    )
+    names = {s["function"]["name"] for s in c._schemas}
+    assert names == {"read_file", "search_evidence", "read_artifact", "patch_artifact"}
+    assert "web_search" not in names and "write_file" not in names
+
+
+# --- read-only wandering forcing turn ---------------------------------------
+# Real live evidence (agentkit-studio, gemma-4-26B-A4B-it-heretic-4bit, editor
+# structural retry): given read_artifact + patch_artifact, the model called
+# read_artifact 24/24 times across 3 real attempts — never once patch_artifact
+# — repeatedly re-reading the same sections instead of ever committing an edit.
+# The existing `_PLANNING_RE` forcing turn only fires on narration text with
+# ZERO tool calls; a model that keeps calling a READ tool never triggers it.
+# This closes that gap: track a streak of read-only tool calls (classified by
+# tool CATEGORY via the existing WRITE_FILE_TOOL/EDIT_FILE_TOOL/PATCH_ARTIFACT_TOOL
+# names, not any task keyword) and force a decision once the streak crosses
+# half the configured iteration budget.
+
+class _AlwaysReadClient:
+    """Inner client that always calls a READ-only tool, never a write tool."""
+
+    def __init__(self, read_name: str, read_args: dict) -> None:
+        self._name = read_name
+        self._args = read_args
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def chat(self, messages, tools=None) -> ChatResult:
+        self.calls += 1
+        self.prompts.append(str(messages[-1].get("content", "")))
+        return ChatResult(text="", total_tokens=1, tool_calls=[(self._name, self._args)])
+
+
+def test_read_only_streak_injects_forcing_turn(tmp_path) -> None:
+    ws = _ws(tmp_path)
+    (ws.root / "notes.md").write_text("body")
+    inner = _AlwaysReadClient("read_file", {"path": "notes.md"})
+    c = ToolAugmentedClient(
+        inner, workspace=ws, offer_tools={"read_file", "write_file"}, max_iters=6,
+    )
+    c.chat([{"role": "user", "content": "fix the doc"}])
+    forced = [p for p in inner.prompts if "Make your decision now" in p]
+    assert forced, "expected a forcing turn once the read-only streak crossed the threshold"
+
+
+def test_read_only_streak_never_fires_without_a_write_tool_offered(tmp_path) -> None:
+    """No write tool advertised (a pure research/read pass) -> nothing to force."""
+    ws = _ws(tmp_path)
+    (ws.root / "notes.md").write_text("body")
+    inner = _AlwaysReadClient("read_file", {"path": "notes.md"})
+    c = ToolAugmentedClient(
+        inner, workspace=ws, offer_tools={"read_file"}, max_iters=6,
+    )
+    c.chat([{"role": "user", "content": "just read"}])
+    assert not any("Make your decision now" in p for p in inner.prompts)
+
+
+def test_read_only_streak_resets_once_a_write_tool_fires(tmp_path) -> None:
+    """A model that writes before the threshold is never nagged."""
+    ws = _ws(tmp_path)
+
+    class _ReadThenWriteClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.prompts: list[str] = []
+
+        def chat(self, messages, tools=None) -> ChatResult:
+            self.calls += 1
+            self.prompts.append(str(messages[-1].get("content", "")))
+            if self.calls == 1:
+                return ChatResult(text="", total_tokens=1, tool_calls=[("read_file", {"path": "n.md"})])
+            if self.calls == 2:
+                return ChatResult(
+                    text="", total_tokens=1,
+                    tool_calls=[("write_file", {"path": "n.md", "content": "x"})],
+                )
+            return ChatResult(text="done", total_tokens=1)
+
+    inner = _ReadThenWriteClient()
+    c = ToolAugmentedClient(inner, workspace=ws, offer_tools={"read_file", "write_file"}, max_iters=6)
+    res = c.chat([{"role": "user", "content": "fix it"}])
+    assert res.text == "done"
+    assert not any("Make your decision now" in p for p in inner.prompts)
+
+
+def _evidence_ws(tmp_path) -> Workspace:
+    ws = Workspace("sess-ev", root=tmp_path / "ws")
+    ev = ws.root / "evidence"
+    ev.mkdir(parents=True, exist_ok=True)
+    (ev / "source-001.md").write_text(
+        "URL: https://x.test/a\n\nLangGraph enables stateful multi-agent orchestration.\n"
+        "It persists checkpoints between steps.\n",
+        encoding="utf-8",
+    )
+    (ev / "source-002.md").write_text("URL: https://x.test/b\n\nNothing relevant.\n", encoding="utf-8")
+    # Manifest carries NO page content — it must never be grepped.
+    (ev / "fetched-sources.json").write_text('[{"url": "https://x.test/a", "stateful": true}]')
+    return ws
+
+
+def test_search_evidence_greps_raw_files_with_context(tmp_path) -> None:
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=_evidence_ws(tmp_path))
+    msg = c._dispatch("search_evidence", {"query": "stateful", "context_lines": 1})
+    payload = json.loads(msg["content"])
+    matches = payload["matches"]
+    assert len(matches) == 1
+    m = matches[0]
+    assert m["file"] == "evidence/source-001.md"
+    assert m["line"] == 3
+    assert "stateful multi-agent" in m["context"]
+    # context window is small — never the whole file, and the .json manifest is skipped.
+    assert "URL: https://x.test/a" not in m["context"]  # ctx=1 excludes the header line
+    assert all(not mm["file"].endswith(".json") for mm in matches)
+
+
+def test_search_evidence_caps_matches(tmp_path) -> None:
+    ws = Workspace("sess-cap", root=tmp_path / "ws")
+    ev = ws.root / "evidence"
+    ev.mkdir(parents=True, exist_ok=True)
+    (ev / "source-001.md").write_text("\n".join(f"agents line {i}" for i in range(50)), encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(c._dispatch("search_evidence", {"query": "agents"})["content"])
+    assert len(payload["matches"]) == 10  # _MAX_EVIDENCE_MATCHES
+
+
+def test_search_evidence_empty_query_and_no_workspace(tmp_path) -> None:
+    no_ws = ToolAugmentedClient(_ScriptedClient())
+    assert "error" in json.loads(no_ws._dispatch("search_evidence", {"query": "x"})["content"])
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=Workspace("s", root=tmp_path / "ws"))
+    assert "error" in json.loads(c._dispatch("search_evidence", {"query": "  "})["content"])
+
+
+def test_search_evidence_matches_returned_url(tmp_path) -> None:
+    """Every match carries the source url parsed from the file's 'URL:' header (Bug B)."""
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=_evidence_ws(tmp_path))
+    payload = json.loads(c._dispatch("search_evidence", {"query": "stateful"})["content"])
+    assert payload["matches"]
+    assert all(m["url"] == "https://x.test/a" for m in payload["matches"])
+
+
+def _split_phrase_ws(tmp_path) -> Workspace:
+    """Evidence where multi-word phrases are SPLIT across lines/words — the exact
+    shape that Bug A's contiguous-substring match returned 0 hits on."""
+    ws = Workspace("sess-split", root=tmp_path / "ws")
+    ev = ws.root / "evidence"
+    ev.mkdir(parents=True, exist_ok=True)
+    (ev / "source-001.md").write_text(
+        "URL: https://paper.test/x\n\n"
+        "This paper describes the methodology used.\n"
+        "The overall structure and layout follow a standard form.\n"
+        "\n"
+        "The results are summarised below and the discussion\n"
+        "that follows interprets them.\n",
+        encoding="utf-8",
+    )
+    return ws
+
+
+def test_search_evidence_multiword_matches_across_lines(tmp_path) -> None:
+    """Bug A regression: previously-failing multi-word queries now return hits when
+    their words are split across nearby lines, with the source url attached."""
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=_split_phrase_ws(tmp_path))
+    for q in ("methodology and structure", "results and discussion"):
+        payload = json.loads(c._dispatch("search_evidence", {"query": q})["content"])
+        matches = payload["matches"]
+        assert matches, f"{q!r} returned no hits"
+        assert matches[0]["url"] == "https://paper.test/x"
+        # The whole phrase is never on one raw line — a substring match would miss it.
+        assert not any(q in ln.lower() for ln in matches[0]["context"].splitlines())
+
+
+# -- edit_file ------------------------------------------------------------
+
+
+def test_edit_file_unique_replace(tmp_path) -> None:
+    ws = _ws(tmp_path)
+    (ws.root / "doc.md").write_text("alpha beta gamma", encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(
+        c._dispatch("edit_file", {"file_path": "doc.md", "old_string": "beta", "new_string": "DELTA"})["content"]
+    )
+    assert payload["replacements"] == 1
+    assert (ws.root / "doc.md").read_text() == "alpha DELTA gamma"
+
+
+def test_edit_file_not_found(tmp_path) -> None:
+    ws = _ws(tmp_path)
+    (ws.root / "doc.md").write_text("hello world", encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(
+        c._dispatch("edit_file", {"file_path": "doc.md", "old_string": "absent", "new_string": "x"})["content"]
+    )
+    assert "error" in payload and "not found" in payload["error"]
+    assert (ws.root / "doc.md").read_text() == "hello world"  # untouched
+
+
+def test_edit_file_not_unique_without_replace_all(tmp_path) -> None:
+    ws = _ws(tmp_path)
+    (ws.root / "doc.md").write_text("a a a", encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(
+        c._dispatch("edit_file", {"file_path": "doc.md", "old_string": "a", "new_string": "b"})["content"]
+    )
+    assert "error" in payload and "not unique" in payload["error"]
+    assert "3 occurrences" in payload["error"]
+    assert (ws.root / "doc.md").read_text() == "a a a"  # untouched
+
+
+def test_edit_file_replace_all(tmp_path) -> None:
+    ws = _ws(tmp_path)
+    (ws.root / "doc.md").write_text("a a a", encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(
+        c._dispatch(
+            "edit_file",
+            {"file_path": "doc.md", "old_string": "a", "new_string": "b", "replace_all": True},
+        )["content"]
+    )
+    assert payload["replacements"] == 3
+    assert (ws.root / "doc.md").read_text() == "b b b"
+
+
+def test_edit_file_escape_rejected(tmp_path) -> None:
+    ws = _ws(tmp_path)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("orig", encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(
+        c._dispatch(
+            "edit_file",
+            {"file_path": "../../secret.txt", "old_string": "orig", "new_string": "pwned"},
+        )["content"]
+    )
+    assert "error" in payload and "escapes workspace" in payload["error"]
+    assert outside.read_text() == "orig"  # untouched
+
+
+def test_edit_file_no_workspace() -> None:
+    c = ToolAugmentedClient(_ScriptedClient())
+    payload = json.loads(
+        c._dispatch("edit_file", {"file_path": "x", "old_string": "a", "new_string": "b"})["content"]
+    )
+    assert "error" in payload and "no workspace" in payload["error"]
+
+
+def test_edit_file_mid_range_file_now_editable(tmp_path) -> None:
+    """A 70 KiB file (over the old 64 KiB cap, under the new 100 KiB cap) is now
+    editable — proving the read-side bump is meaningful, not just a dead number."""
+    ws = _ws(tmp_path)
+    body = "x" * (70 * 1024) + "TARGET"  # ~70 KiB, unique marker at the tail
+    (ws.root / "big.md").write_text(body, encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(
+        c._dispatch("edit_file", {"file_path": "big.md", "old_string": "TARGET", "new_string": "DONE"})["content"]
+    )
+    assert payload["replacements"] == 1
+    assert (ws.root / "big.md").read_text().endswith("DONE")
+
+
+def test_edit_file_refuses_read_over_cap(tmp_path) -> None:
+    """A file at/over _EDIT_FILE_MAX_BYTES is refused (truncated-read → data-loss
+    guard), left untouched — the read-side guard on the studio-local threshold."""
+    from studio.tools import _EDIT_FILE_MAX_BYTES
+    ws = _ws(tmp_path)
+    body = "a" + "b" * _EDIT_FILE_MAX_BYTES  # strictly over the cap
+    (ws.root / "huge.md").write_text(body, encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(
+        c._dispatch("edit_file", {"file_path": "huge.md", "old_string": "a", "new_string": "z"})["content"]
+    )
+    assert "error" in payload and "too large to edit safely" in payload["error"]
+    assert (ws.root / "huge.md").read_text() == body  # untouched
+
+
+def test_edit_file_refuses_write_that_exceeds_cap(tmp_path) -> None:
+    """An edit whose replacement inflates the file past the cap is refused before
+    the write touches disk — the write-side guard on the same threshold."""
+    from studio.tools import _EDIT_FILE_MAX_BYTES
+    ws = _ws(tmp_path)
+    body = "SEED then filler " + "c" * (60 * 1024)  # ~60 KiB, editable
+    (ws.root / "grow.md").write_text(body, encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    inflate = "Z" * (_EDIT_FILE_MAX_BYTES + 1)  # replacement blows past the cap
+    payload = json.loads(
+        c._dispatch("edit_file", {"file_path": "grow.md", "old_string": "SEED", "new_string": inflate})["content"]
+    )
+    assert "error" in payload and "exceed max file size" in payload["error"]
+    assert (ws.root / "grow.md").read_text() == body  # untouched
+
+
+# -- glob -----------------------------------------------------------------
+
+
+def test_glob_matches_within_workspace(tmp_path) -> None:
+    ws = _ws(tmp_path)
+    (ws.root / "sections").mkdir()
+    (ws.root / "sections" / "intro.md").write_text("x", encoding="utf-8")
+    (ws.root / "sections" / "body.md").write_text("y", encoding="utf-8")
+    (ws.root / "notes.txt").write_text("z", encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(c._dispatch("glob", {"pattern": "sections/*.md"})["content"])
+    assert sorted(payload["matches"]) == ["sections/body.md", "sections/intro.md"]
+    assert payload["truncated"] is False
+    # Recursive pattern finds the .md files anywhere but not the .txt.
+    payload2 = json.loads(c._dispatch("glob", {"pattern": "**/*.md"})["content"])
+    assert "notes.txt" not in payload2["matches"]
+    assert "sections/intro.md" in payload2["matches"]
+
+
+def test_glob_escape_rejected(tmp_path) -> None:
+    ws = _ws(tmp_path)
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(c._dispatch("glob", {"pattern": "*", "path": "../.."})["content"])
+    assert "error" in payload and "escapes workspace" in payload["error"]
+
+
+def test_glob_caps_and_notes_truncation(tmp_path) -> None:
+    ws = Workspace("sess-glob-cap", root=tmp_path / "ws")
+    for i in range(120):
+        (ws.root / f"f{i:03d}.md").write_text("x", encoding="utf-8")
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    payload = json.loads(c._dispatch("glob", {"pattern": "*.md"})["content"])
+    assert len(payload["matches"]) == 100  # _MAX_GLOB_RESULTS
+    assert payload["truncated"] is True
+
+
+def test_glob_empty_pattern_and_no_workspace(tmp_path) -> None:
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=_ws(tmp_path))
+    assert "error" in json.loads(c._dispatch("glob", {"pattern": "  "})["content"])
+    no_ws = ToolAugmentedClient(_ScriptedClient())
+    assert "error" in json.loads(no_ws._dispatch("glob", {"pattern": "*"})["content"])
+
+
+# -- search_evidence widening ---------------------------------------------
+
+
+def test_search_evidence_glob_widens_scope(tmp_path) -> None:
+    """A wider glob finds a match in sections/*.md that the default evidence-only
+    scope misses; the default scope stays backward compatible (no glob arg)."""
+    ws = _evidence_ws(tmp_path)
+    (ws.root / "sections").mkdir()
+    (ws.root / "sections" / "draft.md").write_text(
+        "URL: https://draft.test/s\n\nQuantum entanglement is spooky.\n", encoding="utf-8"
+    )
+    c = ToolAugmentedClient(_ScriptedClient(), workspace=ws)
+    # Default scope (evidence/*.md) does not see the sections file.
+    default = json.loads(c._dispatch("search_evidence", {"query": "entanglement"})["content"])
+    assert default["matches"] == []
+    # Widened scope finds it, with the file path and source url attached.
+    wide = json.loads(
+        c._dispatch("search_evidence", {"query": "entanglement", "glob": "**/*.md"})["content"]
+    )
+    assert wide["matches"]
+    assert wide["matches"][0]["file"] == "sections/draft.md"
+    assert wide["matches"][0]["url"] == "https://draft.test/s"

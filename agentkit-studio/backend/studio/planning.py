@@ -371,6 +371,7 @@ def build_section_worker_foci(
     *,
     max_sections_per_agent: int = 1,
     section_files: dict[str, str] | None = None,
+    scoring_matrix: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
 ) -> tuple[str, ...]:
     """Build explicit section-scoped worker assignments for fan-out phases.
 
@@ -385,7 +386,7 @@ def build_section_worker_foci(
         clean_sections[i:i + group_size]
         for i in range(0, len(clean_sections), group_size)
     ]
-    return tuple(_section_focus_text(g, weaknesses, section_files or {}) for g in groups)
+    return tuple(_section_focus_text(g, weaknesses, section_files or {}, scoring_matrix=scoring_matrix) for g in groups)
 
 
 def build_section_assignment_queue(
@@ -394,6 +395,7 @@ def build_section_assignment_queue(
     *,
     section_files: dict[str, str] | None = None,
     agent_slots: int | None = None,
+    scoring_matrix: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
 ) -> tuple[str, ...]:
     """Build one-file worker foci for the section assignment queue."""
     rows = build_section_assignment_rows(
@@ -401,6 +403,7 @@ def build_section_assignment_queue(
         weaknesses,
         section_files=section_files,
         agent_slots=agent_slots,
+        scoring_matrix=scoring_matrix,
     )
     return tuple(row["assignment"] for row in rows)
 
@@ -411,6 +414,7 @@ def build_section_assignment_rows(
     *,
     section_files: dict[str, str] | None = None,
     agent_slots: int | None = None,
+    scoring_matrix: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
 ) -> tuple[dict[str, str], ...]:
     """Build atomic queue rows: one agent slot, one section, one file."""
     clean_sections = [_normalize_section_heading(s) for s in sections if str(s).strip()]
@@ -432,6 +436,7 @@ def build_section_assignment_rows(
                     weaknesses,
                     files,
                     agent_id=agent_id,
+                    scoring_matrix=scoring_matrix,
                 ),
             }
         )
@@ -450,8 +455,10 @@ def _section_focus_text(
     weaknesses: list[str] | tuple[str, ...],
     section_files: dict[str, str],
     agent_id: str | None = None,
+    scoring_matrix: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
 ) -> str:
     from studio.rubric import _content_tokens
+    from studio.rubric import format_scoring_rules
 
     owned_tokens = set()
     for sec in sections:
@@ -470,6 +477,7 @@ def _section_focus_text(
         for s in sections
     )
     weakness_lines = "\n".join(f"- {w}" for w in relevant) if relevant else "- (none)"
+    scoring_lines = format_scoring_rules(scoring_matrix, sections=sections)
     return (
         (f"AGENT ID: {agent_id}\n\n" if agent_id else "")
         + "ASSIGNMENT QUEUE FETCH:\n"
@@ -483,8 +491,24 @@ def _section_focus_text(
         "- Work only on the assigned sections above.\n"
         "- If an assigned section is absent or still pending, create and populate it.\n"
         "- Keep each section's updates in its matching section file; do not combine multiple assigned sections into one file.\n"
-        "- Use PATCH_TARGET values that exactly match one assigned heading.\n"
+        "- For RESEARCH_FINDING blocks, use PATCH_TARGET values that exactly match one assigned heading.\n"
         "- Do not patch or write content for sections assigned to other agents.\n\n"
+        "WORKER OUTPUT CONTRACT:\n"
+        "- Return only grounded RESEARCH_FINDING blocks or a PATCHES JSON block that the reducer can apply.\n"
+        "- For RESEARCH_FINDING, include ARTICLE_TITLE, URL, PATCH_TARGET, QUOTE, and WHY.\n"
+        "- URL must be the exact http(s) page fetched for the finding; never invent bibliography entries.\n"
+        "- PATCH_TARGET must exactly match one assigned heading above.\n"
+        "- For PATCHES, use exactly this reducer-applicable JSON shape:\n"
+        "  PATCHES:\n"
+        "  ```json\n"
+        "  [{\"op\":\"insert_after\",\"anchor\":\"## Exact Assigned Heading\",\"content\":\"One short grounded sentence with the exact source URL.\"}]\n"
+        "  ```\n"
+        "- PATCHES objects use op/anchor/content only; do not use legacy PATCH_TARGET/CONTENT patch objects.\n"
+        "- PATCHES content must include an exact http(s) source URL and must not contain markdown headings or full-section prose.\n"
+        "- Do not return plain markdown section prose, report text, headings, or a References section; the reducer writes the report from grounded findings/patches.\n"
+        "- If no real fetched source supports the assigned section, return no finding for it.\n\n"
+        "SCORING REQUIREMENTS FOR THIS SCOPE:\n"
+        f"{scoring_lines}\n\n"
         "WEAKNESSES TO FIX IN THIS SCOPE:\n"
         f"{weakness_lines}"
     )

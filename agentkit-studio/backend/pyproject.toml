@@ -14,6 +14,10 @@ dependencies = [
     "uvicorn[standard]>=0.27",
     "sse-starlette>=2.0",
     "openai>=1.0",
+    # Pinned: mdformat's own docs warn formatting style can shift release to
+    # release, so the served-artifact cosmetic pass must not drift under us.
+    "mdformat==1.0.0",
+    "mdformat-gfm==1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -37,3 +41,11 @@ markers = [
     "integration: tests that require a live LLM endpoint or local service (skipped by default)",
 ]
 addopts = "-m 'not integration'"
+# Silence known-benign third-party deprecations so test output (and CI collection) is clean:
+#  - starlette.testclient nags to install `httpx2`; we pin httpx 0.28 deliberately for the
+#    app runtime, so the TestClient warning is noise, not a defect.
+#  - FastAPI's `on_event` lifespan deprecation in studio.app — a separate, tracked migration.
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient`",
+    "ignore:(?s).*on_event is deprecated",
+]

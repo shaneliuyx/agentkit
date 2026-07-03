@@ -30,7 +30,7 @@ _TITLE_PREFIX_RE = _re.compile(
     r"(?:about|on|regarding|covering|for)\s+"
 )
 _TITLE_STOP_RE = _re.compile(
-    r"(?is)\b(?:include|use|cover|provide|with|and include|also include)\b.*$"
+    r"(?is),\s*(?:\w+\s+){0,3}\b(?:include|use|cover|provide|with)\b.*$"
 )
 _TITLE_CONTEXT_RE = _re.compile(r"(?i)\s+(?:in|within)\s+.{18,}$")
 
@@ -168,6 +168,7 @@ def _synthesize_block(
         (directive or _DIRECTIVE_ANALYSIS)
         + "HARD RULES (a violation makes the rewrite worthless):\n"
         "- Keep EVERY URL and citation exactly as it appears — never drop, move, or alter one.\n"
+        "- Do not introduce any new URL, citation, source, quote, data, or named source.\n"
         "- Do not remove any sourced fact, quote, or section heading.\n"
         "- The result must be at least as long as the draft.\n"
         "- Output ONLY the improved text, with no preamble or commentary.\n\n"
@@ -186,7 +187,7 @@ def _synthesize_block(
     # Reject regressions: a dropped citation (always), or shrinking below ``min_ratio`` of the
     # block. Analysis ADDS (ratio 0.9); the readability/summarize pass CONDENSES repeated quotes
     # (ratio ~0.4) — so it may come back shorter, but every URL must survive.
-    if not urls_before <= urls_after or len(out) < int(min_ratio * len(src)):
+    if not urls_before <= urls_after or not urls_after <= urls_before or len(out) < int(min_ratio * len(src)):
         return src, False
     return out, True
 
@@ -227,7 +228,9 @@ def _synthesize_windowed(
     # where an embedder is wired.
     rebuilt = _dedup_paragraphs(rebuilt)
     # Final whole-doc guard: never return something that dropped a URL or shrank overall.
-    if not set(_re.findall(r"https?://\S+", src)) <= set(_re.findall(r"https?://\S+", rebuilt)):
+    urls_before = set(_re.findall(r"https?://\S+", src))
+    urls_after = set(_re.findall(r"https?://\S+", rebuilt))
+    if not urls_before <= urls_after or not urls_after <= urls_before:
         return src, False
     if len(rebuilt) < int(min(min_ratio, 0.80) * len(src)):
         return src, False
@@ -361,6 +364,21 @@ def normalize_artifact(text: str) -> str:
 _PENDING_PLACEHOLDER_RE = _re.compile(
     r"(?im)^\s*_\((?:pending|to be completed)\s*[-—][^)]*\)_\s*$"
 )
+_REFERENCE_PLACEHOLDER_RE = _re.compile(
+    r"(?is)(?:no\s+specific\s+urls?\s+were\s+provided|placeholder\s+for\s+"
+    r"(?:the\s+)?required\s+citations|placeholder\s+for\s+citations)"
+)
+
+
+def _urls_in_order(text: str) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for raw in _re.findall(r"https?://[^\s)>\]]+", text or ""):
+        url = raw.rstrip(".,;:")
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
 
 
 def strip_satisfied_placeholders(text: str) -> str:
@@ -377,10 +395,21 @@ def strip_satisfied_placeholders(text: str) -> str:
         return text
     out: list[str] = []
     changed = False
+    all_urls = _urls_in_order(text or "")
     for _heading, body in sections:
         body_text = body or ""
         stripped_body = _PENDING_PLACEHOLDER_RE.sub("", body_text).strip()
+        lines = stripped_body.splitlines()
+        heading_line = lines[0].strip() if lines else ""
         content_only = "\n".join(stripped_body.splitlines()[1:]).strip()
+        if (
+            heading_line.lower().startswith("## references")
+            and all_urls
+            and _REFERENCE_PLACEHOLDER_RE.search(content_only)
+        ):
+            changed = True
+            out.append(heading_line + "\n\n" + "\n".join(f"- {u}" for u in all_urls))
+            continue
         if content_only and stripped_body != body_text.strip():
             changed = True
             out.append(stripped_body)
@@ -389,6 +418,41 @@ def strip_satisfied_placeholders(text: str) -> str:
     if not changed:
         return text
     return "\n\n".join(out).rstrip() + "\n"
+
+
+def add_missing_section_citations(
+    text: str,
+    verified_urls: list[str] | tuple[str, ...] | None,
+) -> str:
+    """Append verified source URLs to long sections that still have no inline URL."""
+    urls = [u for u in (verified_urls or []) if isinstance(u, str) and u.startswith("http")]
+    if not urls or not (text or "").strip():
+        return text
+    matches = list(_re.finditer(r"(?m)^#{1,6}\s+.+$", text or ""))
+    if not matches:
+        return text
+    out: list[str] = []
+    pos = 0
+    url_i = 0
+    for i, match in enumerate(matches):
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        out.append(text[pos:start])
+        section = text[start:end]
+        heading = match.group(0).lower()
+        body = section[match.end() - start:]
+        if (
+            not any(skip in heading for skip in ("reference", "appendix", "glossary", "title"))
+            and len(_re.findall(r"\w+", body)) > 150
+            and "http://" not in body
+            and "https://" not in body
+        ):
+            section = section.rstrip() + f"\n\nSource: {urls[url_i % len(urls)]}\n"
+            url_i += 1
+        out.append(section)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _heading_key(h: str) -> str:

@@ -135,6 +135,8 @@ def build_embedder(spec: dict[str, Any] | None) -> tuple[OpenAIEmbedder | None, 
     when a panel actually embeds (handled in the memory panel).
     """
     spec = spec or {}
+    if not spec:
+        return None, {"label": "none", "model": ""}
     if "raw" in spec and spec["raw"]:
         raw = spec["raw"]
         model = raw.get("model") or DEFAULT_EMBED_MODEL

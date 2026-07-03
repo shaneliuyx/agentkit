@@ -66,6 +66,26 @@ class LoopMatch:
         }
 
 
+_LOCAL_LOOP_DIR = Path(__file__).parent / "local_catalog" / "loops"
+
+
+def _load_local_loops() -> list[dict[str, Any]]:
+    """Load bundled local loop JSON files (research-report-agent, etc.). Missing dir → []."""
+    out: list[dict[str, Any]] = []
+    try:
+        for fp in sorted(_LOCAL_LOOP_DIR.glob("*.json")):
+            try:
+                lp = json.loads(fp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(lp, dict) and lp.get("slug"):
+                lp.setdefault("source", "local")
+                out.append(lp)
+    except OSError:
+        return []
+    return out
+
+
 def _tokens(text: str) -> set[str]:
     """Lowercase content tokens (stopwords dropped) for keyword overlap."""
     raw = "".join(c if c.isalnum() else " " for c in text.lower()).split()
@@ -80,8 +100,11 @@ class CatalogClient:
     injectable for offline tests.
     """
 
-    def __init__(self, data: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, data: dict[str, Any] | None = None, *, include_local: bool = True
+    ) -> None:
         self._data: dict[str, Any] | None = data
+        self._include_local = include_local
 
     # -- loading -----------------------------------------------------------
 
@@ -120,7 +143,18 @@ class CatalogClient:
 
     @property
     def loops(self) -> list[dict[str, Any]]:
-        return list((self._data or {}).get("loops", []))
+        remote = list((self._data or {}).get("loops", []))
+        if not self._include_local:
+            return remote
+        # Merge bundled local loops (e.g. research-report-agent) after remote so a
+        # local definition can override a remote one by slug. Local loops make the
+        # research-report workflow discoverable + seedable through the same /loops path.
+        local = _load_local_loops()
+        if not local:
+            return remote
+        local_slugs = {str(lp.get("slug")) for lp in local}
+        remote_kept = [lp for lp in remote if str(lp.get("slug")) not in local_slugs]
+        return remote_kept + local
 
     def get(self, loop_id: str) -> dict[str, Any] | None:
         """Look up a loop by its id (``slug``) or ``number``."""

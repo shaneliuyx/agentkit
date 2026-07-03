@@ -6,12 +6,21 @@ key, no running services.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Callable
 
 from agentkit.types import LLMClient
 from studio.models import LoopConfig
 from studio.events import StudioEvent
-from studio.runner import Runner
+from studio.runner import (
+    Runner,
+    _final_evidence_dossier,
+    _final_step_instruction,
+    _full_scoring_matrix,
+    _prompt_scoring_matrix,
+    _prune_resolved_weaknesses,
+)
 from studio.session import SessionRegistry
 
 
@@ -55,6 +64,10 @@ def test_done_writes_result_file(
     runner.run("1. compare redis and postgres 2. write a recommendation")
     done = [e for e in events if e.EVENT_TYPE == "done"][0]
     assert done.result_path.endswith("result.md")
+    assert done.scorecard_100
+    assert done.scorecard_100["categories"]
+    assert done.review
+    assert done.review["status"] in {"NOT_REQUIRED", "REVIEW_REQUIRED"}
     saved = Path(done.result_path)
     assert saved.is_file()
     assert saved.read_text(encoding="utf-8") == done.result
@@ -96,6 +109,11 @@ def test_loop_workers_receive_section_assignments_and_weakness_guidance(
     session.rubric_config = {
         "weights": None,
         "template": ["Executive Summary", "Limitations"],
+        "scoring_matrix": [
+            {"category": "Scope and research framing", "points": 40, "signal": "structure"},
+            {"category": "Citation integrity", "points": 30, "signal": "verification"},
+            {"category": "Readability and formatting", "points": 30, "signal": "structure"},
+        ],
     }
     session.weaknesses = [
         "[## Executive Summary] missing cited takeaway",
@@ -114,13 +132,52 @@ def test_loop_workers_receive_section_assignments_and_weakness_guidance(
     spoke_input = (tmp_path / session.session_id / "io" / "s1.spoke0.in.md").read_text(
         encoding="utf-8"
     )
+    plan_event = next(e for e in events if e.EVENT_TYPE == "plan")
+    plan_text = "\n".join(step["description"] for step in plan_event.steps)
+    assert "Unified scoring requirements for this task:" in plan_text
+    assert "Reducers measure the whole artifact against the full scoring matrix." in plan_text
     assert "ASSIGNED SECTIONS:" in spoke_input
     assert "## Executive Summary" in spoke_input
+    assert "Run web_search THEN web_fetch" in spoke_input
+    assert "OUTPUT FORMAT (critical)" in spoke_input
+    assert "Unified scoring requirements for this task:" not in spoke_input
+    assert "SCORING REQUIREMENTS FOR THIS SCOPE:" in spoke_input
+    assert "Scope and research framing" in spoke_input
+    assert "Readability and formatting" in spoke_input
+    assert "Citation integrity" not in spoke_input
     assert "missing cited takeaway" in spoke_input
     assert "missing source grounding" in spoke_input
     assert "create and populate" in spoke_input
     assert "the strongest case for it" not in spoke_input
     assert "## (intro)" not in spoke_input
+
+
+def test_scoring_matrix_helpers_keep_reducers_full() -> None:
+    session = _make_session()
+    full = [
+        {"category": "Scope and research framing", "points": 70, "signal": "structure"},
+        {"category": "Citation integrity", "points": 30, "signal": "verification"},
+    ]
+    remaining = [
+        {"category": "Citation integrity", "points": 30, "signal": "verification"},
+    ]
+    session.rubric_config = {
+        "scoring_matrix": full,
+        "remaining_scoring_matrix": remaining,
+    }
+
+    assert _prompt_scoring_matrix(session) == remaining
+    assert _full_scoring_matrix(session) == full
+
+
+def test_full_scoring_matrix_falls_back_to_profile_template_default() -> None:
+    session = _make_session()
+    session.rubric_config = {}
+
+    rules = _full_scoring_matrix(session)
+
+    assert rules
+    assert any(rule["category"] == "Citation integrity" for rule in rules)
 
 
 def test_section_assignment_queue_fetches_all_files_despite_agent_cap(
@@ -160,6 +217,7 @@ def test_active_template_tracks_added_sections_without_removing_original() -> No
     from studio.runner import (
         _active_report_title,
         _active_template,
+        _scoring_template,
         _update_active_template_from_artifact,
     )
 
@@ -167,6 +225,7 @@ def test_active_template_tracks_added_sections_without_removing_original() -> No
     session.rubric_config = {
         "weights": None,
         "template": ["Executive Summary", "References"],
+        "scoring_template": ["Executive Summary", "References"],
     }
     artifact = "# Catalog Control for Agent Skills\n\n## Executive Summary\nDone.\n\n## New Risk Analysis\nAdded.\n"
 
@@ -174,6 +233,7 @@ def test_active_template_tracks_added_sections_without_removing_original() -> No
 
     assert active == ["Executive Summary", "References", "New Risk Analysis"]
     assert _active_template(session) == active
+    assert _scoring_template(session) == ["Executive Summary", "References"]
     assert _active_report_title(session) == "Catalog Control for Agent Skills"
 
 
@@ -267,12 +327,12 @@ def test_event_order(fake_client_factory: Callable[..., LLMClient]) -> None:
     # Prefix is exact.
     assert types[:4] == ["session", "plan", "topology", "graph"], types
 
-    # Terminal: done is last. Ordering: verify → loopdoctor → hill_climb → done.
+    # Terminal: done is last. Ordering: verify → loopdoctor → hill_climb → metrics → done.
     assert types[-1] == "done", types
-    assert types[-2] == "hill_climb", types
+    assert types[-2] == "metrics", types
     # The Loop Doctor audit is emitted exactly once, after verify, before done.
     assert types.count("loopdoctor") == 1
-    assert types.index("verify") < types.index("loopdoctor") < types.index("hill_climb") < types.index("done")
+    assert types.index("verify") < types.index("loopdoctor") < types.index("hill_climb") < types.index("metrics") < types.index("done")
 
     # No event precedes session; nothing follows done.
     assert types.count("session") == 1
@@ -316,6 +376,18 @@ def test_done_reports_real_wall_time(fake_client_factory) -> None:
     assert done.wall_s > 0.0, done.wall_s
     # And it surfaces through the SSE payload the frontend reads.
     assert done.payload()["wall_s"] > 0.0
+
+
+def test_metrics_event_emits_before_done(fake_client_factory) -> None:
+    events = _run(fake_client_factory)
+    types = [e.EVENT_TYPE for e in events]
+    metrics = [e for e in events if e.EVENT_TYPE == "metrics"]
+    done = [e for e in events if e.EVENT_TYPE == "done"][0]
+
+    assert metrics
+    assert types.index("metrics") < types.index("done")
+    assert metrics[-1].metrics["stop_reason"] == "validation_passed"
+    assert done.metrics == metrics[-1].metrics
 
 
 def test_estimated_flag_sticky_offline(fake_client_factory) -> None:
@@ -623,6 +695,121 @@ def test_section_reducer_demotes_missing_anchor_no_conflict_marker() -> None:
         tools._fetch_cache.clear()
 
 
+# --- Per-phase requirement compliance wiring (additive to entries 167-170) -------
+# Phase 1 of every epoch gets a PROACTIVE requirement notice; phases 2..N verify the
+# partial artifact and inject only what is STILL unaddressed. Both are injected ONLY
+# into the goal-aware reducer prompt, never spoke workers. Mirrors the existing
+# _repair_clause / _relevance_repair_clause test structure.
+
+
+def test_phase1_requirement_notice_lists_all_groups_or_empty() -> None:
+    """The phase-1 proactive notice lists EVERY stated requirement group (single +
+    OR alternatives rendered as 'X (or alternatively: Y)'), and is empty when the
+    task stated no explicit checkable requirement."""
+    from studio.runner import _phase1_requirement_notice
+
+    reqs = [
+        ["include example code", "include a design architecture"],
+        ["cite at least 3 sources"],
+    ]
+    notice = _phase1_requirement_notice(reqs)
+    assert "STATED TASK REQUIREMENTS" in notice
+    assert "cite at least 3 sources" in notice
+    assert "include example code" in notice
+    assert "or alternatively: include a design architecture" in notice
+    # No requirements → nothing injected (a task with no explicit checkable ask).
+    assert _phase1_requirement_notice([]) == ""
+    assert _phase1_requirement_notice(None) == ""
+
+
+def test_phase1_notice_reaches_reducer_prompt() -> None:
+    """A phase-1 reducer prompt build includes the full requirement list when
+    requirements exist (the proactive path)."""
+    from agentkit.types import ChatResult
+    from studio.runner import _make_section_reducer, _phase1_requirement_notice
+
+    captured: dict = {}
+
+    class _C:
+        def chat(self, messages, tools=None) -> ChatResult:
+            captured["prompt"] = messages[-1]["content"]
+            return ChatResult(text="PATCHES:\n```json\n[]\n```", total_tokens=1)
+
+    notice = _phase1_requirement_notice([["include a diagram"], ["cite at least 3 sources"]])
+    _make_section_reducer(
+        _C(), "## Intro\nseed text", [], requirement_clause=notice
+    )(["worker draft"])
+    p = captured["prompt"]
+    assert "STATED TASK REQUIREMENTS" in p
+    assert "include a diagram" in p
+    assert "cite at least 3 sources" in p
+
+
+def test_per_phase_clause_lists_only_still_outstanding() -> None:
+    """Phase-2+ verify-and-correct: a group already satisfied by the partial artifact
+    is NOT re-mentioned; only the genuinely-unaddressed hard miss (and any unmet
+    OR-sibling opportunity of an already-satisfied group) is surfaced."""
+    from studio.runner import _per_phase_compliance_repair_clause
+
+    # Branches (flat): 1='include example code' 2='include a design architecture'
+    # (group 0, an OR), 3='cite at least 3 sources' (group 1).
+    reqs = [["include example code", "include a design architecture"],
+            ["cite at least 3 sources"]]
+
+    class _Verifier:
+        def __init__(self, reply): self.reply = reply
+        def chat(self, messages, tools=None):
+            from agentkit.types import ChatResult
+            return ChatResult(text=self.reply, total_tokens=5)
+
+    # Group 0 satisfied via branch 1 (branch 2 unmet → opportunity); group 1 satisfied.
+    reply = ("REQUIREMENT 1: SATISFIED\nREQUIREMENT 2: NOT_SATISFIED\n"
+             "REQUIREMENT 3: SATISFIED")
+    clause = _per_phase_compliance_repair_clause(_Verifier(reply), reqs, "some doc text")
+    assert "STATED REQUIREMENTS NOT YET ADDRESSED" in clause
+    # Group 1 is satisfied → its requirement is NOT re-mentioned as a hard miss.
+    assert "none of the stated alternatives" not in clause
+    assert "not satisfied: 'cite at least 3 sources'" not in clause
+    # Only the unmet OR-sibling of the already-satisfied group 0 is surfaced.
+    assert "include a design architecture" in clause
+
+    # Everything satisfied (both branches of group 0 + group 1) → empty clause.
+    # The architecture branch needs a REAL mermaid block to count as genuinely
+    # satisfied (diagram-shape gate, entry 176) — a bare SATISFIED verdict alone
+    # is no longer enough for diagram-shaped phrasing.
+    all_sat = ("REQUIREMENT 1: SATISFIED\nREQUIREMENT 2: SATISFIED\n"
+               "REQUIREMENT 3: SATISFIED")
+    doc_with_diagram = "doc ```mermaid\ngraph TD\nA-->B\n``` describing the architecture"
+    assert _per_phase_compliance_repair_clause(_Verifier(all_sat), reqs, doc_with_diagram) == ""
+
+
+def test_per_phase_clause_fails_open_on_verifier_error() -> None:
+    """A phase-level verification failure fails open: no clause, no crash — so the
+    phase proceeds with no repair-clause injected that turn."""
+    from studio.runner import _make_section_reducer, _per_phase_compliance_repair_clause
+
+    class _Boom:
+        def chat(self, *a, **k):
+            raise RuntimeError("verifier down")
+
+    clause = _per_phase_compliance_repair_clause(
+        _Boom(), [["cite at least 3 sources"]], "doc"
+    )
+    assert clause == ""
+
+    # And an empty clause injects nothing into the reducer prompt.
+    captured: dict = {}
+
+    class _C:
+        def chat(self, messages, tools=None):
+            from agentkit.types import ChatResult
+            captured["prompt"] = messages[-1]["content"]
+            return ChatResult(text="PATCHES:\n```json\n[]\n```", total_tokens=1)
+
+    _make_section_reducer(_C(), "## Intro\nbody", [], requirement_clause=clause)(["d"])
+    assert "STATED TASK REQUIREMENTS" not in captured["prompt"]
+
+
 def test_quote_in_cache_substring_and_whitespace() -> None:
     """Lever 1 guard: a verbatim substring of a cached fetched page is grounded
     (whitespace differences from markdown re-wrap still match); an absent quote and
@@ -735,12 +922,15 @@ def test_prefetch_url_rejects_non_http_and_hits_cache() -> None:
 
 def test_prefetch_cited_extracts_dedups_and_caps() -> None:
     """The reducer prefetch step extracts cited URLs from drafts, dedups them, and is
-    bounded by the limit. No-op when the cache is empty (nothing to ground → offline)."""
+    bounded by the limit. Always attempts prefetch regardless of the reducer's own
+    cache state (Codex review, 2026-07-03): the old empty-cache no-op guard assumed
+    an empty cache always means fail-open grounding, but the reducer's own client.chat()
+    call can populate its local cache with UNRELATED entries first — cache_active then
+    becomes True with none of those entries matching the real cited URLs, so grounding
+    drops everything unless prefetch runs anyway."""
     from studio import tools
     from studio.runner import _prefetch_cited
     tools._fetch_cache.clear()
-    drafts = ["RESEARCH_FINDING:\nURL: https://x.example\nURL: https://y.example\n"]
-    assert _prefetch_cited(drafts) == 0                    # empty cache → no-op (offline)
     # pre-cache the URLs so prefetch is a cache-hit (no network), then count
     for u in ("https://x.example", "https://y.example", "https://z.example"):
         tools._fetch_cache[f"{u}|"] = ("p", 1)
@@ -750,6 +940,37 @@ def test_prefetch_cited_extracts_dedups_and_caps() -> None:
     ]
     try:
         assert _prefetch_cited(drafts, limit=2) == 2       # 3 unique, capped at 2
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_prefetch_cited_runs_even_with_empty_starting_cache() -> None:
+    """Prefetch must not skip just because the cache is empty when it starts —
+    that early-return regressed real citations once the reducer's own cache could
+    become non-empty-but-irrelevant later in the same call (Codex review)."""
+    from studio import tools
+    from studio.runner import _prefetch_cited
+    tools._fetch_cache.clear()
+    drafts = ["RESEARCH_FINDING:\nURL: https://cached.example\n"]
+    tools._fetch_cache["https://cached.example|"] = ("p", 1)  # cache-hit, no network
+    try:
+        assert _prefetch_cited(drafts) == 1
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_prefetch_cited_extracts_urls_from_json_shaped_findings() -> None:
+    """oMLX/qwen models emit findings as a fenced JSON object
+    (```json {"RESEARCH_FINDING": {"URL": ...}}```) instead of plain 'URL:' lines —
+    the old prefetch only scanned plain lines, so a JSON-only citation was never
+    prefetched and stayed ungrounded even when genuinely fetchable."""
+    from studio import tools
+    from studio.runner import _prefetch_cited
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://json.example/p|"] = ("p", 1)  # cache-hit, no network
+    drafts = ['```json\n{"RESEARCH_FINDING": {"URL": "https://json.example/p"}}\n```']
+    try:
+        assert _prefetch_cited(drafts) == 1
     finally:
         tools._fetch_cache.clear()
 
@@ -983,6 +1204,43 @@ def test_verified_urls_in_cache_counts_search_and_fetch() -> None:
     assert "https://other.example" not in out      # cached but not cited in text
 
 
+def test_runner_verified_urls_from_cache_rechecks_final_text(tmp_path, monkeypatch) -> None:
+    from studio.runner import _verified_urls_from_cache
+
+    monkeypatch.chdir(tmp_path)
+    Path(".web_cache.json").write_text(json.dumps({
+        "fetch:https://before.example:None": {"content": "..."},
+        "fetch:https://after.example:None": {"content": "..."},
+    }))
+
+    out = _verified_urls_from_cache("Final report cites https://after.example.")
+
+    assert out == ["https://after.example"]
+
+
+def test_prune_resolved_weaknesses_drops_stale_final_lints() -> None:
+    doc = """# Final
+
+## Evidence and Analysis
+
+This section now cites evidence clearly (https://example.com/source).
+
+## References
+
+- https://example.com/source
+"""
+    weaknesses = [
+        "[document] Placeholder text remains in report: no specific urls were provided",
+        "[Evidence and Analysis] Long evidence-bearing section has no citation URL.",
+        "[document] Inclusion of provided citations in the text: the final output contains no in-text citations or a populated References section.",
+        "[document] Keep this real scoring weakness",
+    ]
+
+    assert _prune_resolved_weaknesses(weaknesses, doc) == [
+        "[document] Keep this real scoring weakness"
+    ]
+
+
 def test_miner_prompt_has_completeness_fact_and_full_url_list() -> None:
     """P0: the miner prompt carries the deterministic completeness fact (so it cannot
     hallucinate truncation from a window edge) and ALL verified URLs, not just the first 20
@@ -1208,6 +1466,11 @@ def test_tool_loop_emits_tool_events(fake_client) -> None:
             self.calls = 0
 
         def chat(self, messages, tools=None) -> ChatResult:
+            # Run-scoped requirement extraction runs once before the phase loop on
+            # base_client; answer it out-of-band so it does not consume a scripted
+            # tool-call slot ("write a short note" states no explicit requirement).
+            if "You extract the EXPLICIT, CHECKABLE requirements" in str(messages):
+                return ChatResult(text="NONE", total_tokens=1)
             self.calls += 1
             if self.calls == 1:
                 return ChatResult(text="", total_tokens=3,
@@ -1233,6 +1496,36 @@ def test_tool_loop_emits_tool_events(fake_client) -> None:
     assert tool_calls and tool_calls[0].tool == "web_search"
     assert tool_calls[0].step_id  # attributed to the running phase
     assert tool_results and tool_results[0].n_results == 1
+    trace = [
+        json.loads(line)
+        for line in (session.last_run.agent_trace_jsonl or "").splitlines()
+    ]
+    checkpoints = [
+        json.loads(line)
+        for line in (session.last_run.checkpoints_jsonl or "").splitlines()
+    ]
+    assert trace and trace[0]["tool"] == "web_search"
+    assert trace[0]["status"] == "ok"
+    assert trace[0]["args_redacted"] == {"query": "q"}
+    assert isinstance(trace[0]["ts"], float)
+    assert checkpoints and checkpoints[-1]["phase_id"] == "final"
+    assert checkpoints[-2]["phase_id"] == "pre_validation"
+    assert checkpoints[-2]["publish_issue_count"] >= 0
+    assert checkpoints[-2]["loopdoctor_failure_count"] >= 0
+    assert trace[0]["id"] in checkpoints[-1]["observation_ids"]
+
+
+def test_tool_arg_redaction_clips_secrets() -> None:
+    redacted = Runner._redact_tool_args({
+        "query": "x",
+        "api_key": "sk-secret",
+        "nested": {"password": "pw", "body": "a" * 250},
+    })
+
+    assert redacted["query"] == "x"
+    assert redacted["api_key"] == "[redacted]"
+    assert redacted["nested"]["password"] == "[redacted]"
+    assert redacted["nested"]["body"].endswith("...[truncated]")
 
 
 def test_gemma_profile_limits_searches_in_runner_tool_loop(fake_client) -> None:
@@ -1244,6 +1537,10 @@ def test_gemma_profile_limits_searches_in_runner_tool_loop(fake_client) -> None:
             self.calls = 0
 
         def chat(self, messages, tools=None) -> ChatResult:
+            # Answer the pre-phase-loop requirement extraction out-of-band so it does
+            # not consume a scripted search slot (see _ToolClient above).
+            if "You extract the EXPLICIT, CHECKABLE requirements" in str(messages):
+                return ChatResult(text="NONE", total_tokens=1)
             self.calls += 1
             if self.calls == 1:
                 return ChatResult(
@@ -1426,6 +1723,227 @@ def test_publish_gate_emits_failure_for_report_without_sources(fake_client_facto
     assert "no source URL" in gates[0].detail
 
 
+def test_final_report_step_requires_synthesis_and_reflection() -> None:
+    prompt = _final_step_instruction(
+        "Write a research report about catalog management. Include citations.",
+        "Synthesize gathered intelligence.",
+        scoring_rules="- Citation integrity: cite fetched evidence.",
+        weaknesses=["[document] Missing limitations."],
+        evidence_dossier="- evidence/fetched-sources.json — manifest of fetched source files",
+    )
+
+    assert "final synthesis step for a research report" in prompt
+    assert "Use every relevant fetched finding" in prompt
+    assert "evidence-backed analysis" in prompt
+    assert "limitations, caveats, or reflection" in prompt
+    assert "Do not invent source URLs" in prompt
+    assert "FULL SCORING STANDARD" in prompt
+    assert "Citation integrity" in prompt
+    assert "UNRESOLVED WEAKNESSES" in prompt
+    assert "Missing limitations" in prompt
+    assert "FETCHED EVIDENCE FILES" in prompt
+    assert "use read_file" in prompt
+    assert "evidence/fetched-sources.json" in prompt
+
+
+def test_final_evidence_dossier_writes_workspace_paths(tmp_path) -> None:
+    from studio.tools import _fetch_cache
+
+    _fetch_cache.clear()
+    _fetch_cache["https://example.com/a|"] = ("Alpha fetched body", 18)
+    dossier = _final_evidence_dossier(
+        "Worker cited https://example.com/a",
+        workspace_dir=tmp_path,
+    )
+
+    assert "evidence/fetched-sources.json" in dossier
+    assert "evidence/source-001.md" in dossier
+    assert "Alpha fetched body" not in dossier
+    assert (tmp_path / "evidence" / "source-001.md").read_text() == (
+        "URL: https://example.com/a\n\nAlpha fetched body"
+    )
+    manifest = json.loads((tmp_path / "evidence" / "fetched-sources.json").read_text())
+    assert manifest == [
+        {"url": "https://example.com/a", "path": "evidence/source-001.md", "bytes": 18}
+    ]
+
+
+def test_cold_final_step_gets_scoring_weaknesses_and_evidence_paths(tmp_path, monkeypatch) -> None:
+    from agentkit.types import ChatResult
+    from studio.tools import _fetch_cache
+
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path))
+    _fetch_cache.clear()
+    _fetch_cache["https://example.com/a|"] = ("Cached page body only in source file", 36)
+
+    prompts: list[str] = []
+
+    class _CaptureClient:
+        def chat(self, messages, tools=None) -> ChatResult:
+            prompts.append(messages[-1]["content"])
+            return ChatResult(
+                text=(
+                    "RESEARCH_FINDING:\n"
+                    "ARTICLE_TITLE: Alpha\n"
+                    "URL: https://example.com/a\n"
+                    "PATCH_TARGET: ## Executive Summary\n"
+                    "QUOTE: Alpha quoted sentence\n"
+                    "WHY: Supports the report.\n"
+                ),
+                total_tokens=5,
+            )
+
+    session = _make_session()
+    session.tools_enabled = False
+    session.rubric_config = {}
+    session.weaknesses = ["[document] Missing limitations."]
+    events: list[StudioEvent] = []
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=lambda _on_usage: _CaptureClient(),
+        embedder=None,
+        workspace_root=tmp_path,
+    )
+
+    runner.run(
+        "1. Gather evidence about research report quality.\n"
+        "2. Write a research report about research report quality."
+    )
+
+    final_prompts = [
+        p for p in prompts
+        if "final synthesis step for a research report" in p
+    ]
+    assert final_prompts
+    final_prompt = final_prompts[-1]
+    assert "FULL SCORING STANDARD" in final_prompt
+    assert "Citation integrity" in final_prompt
+    assert "- (none for this assigned section)" not in final_prompt
+    assert "UNRESOLVED WEAKNESSES" in final_prompt
+    assert "Missing limitations" in final_prompt
+    assert "FETCHED EVIDENCE FILES" in final_prompt
+    assert "evidence/fetched-sources.json" in final_prompt
+    assert "evidence/source-001.md" in final_prompt
+    assert "Cached page body only in source file" not in final_prompt
+    assert (tmp_path / session.session_id / "evidence" / "source-001.md").is_file()
+    prompt_text = next(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / session.session_id / "io").glob("*.in.md")
+        if "final synthesis step for a research report" in path.read_text(encoding="utf-8")
+    )
+    assert "FULL SCORING STANDARD" in prompt_text
+    assert "Citation integrity" in prompt_text
+    assert "- (none for this assigned section)" not in prompt_text
+    assert "UNRESOLVED WEAKNESSES" in prompt_text
+    assert "FETCHED EVIDENCE FILES" in prompt_text
+    assert "evidence/fetched-sources.json" in prompt_text
+    assert "evidence/source-001.md" in prompt_text
+
+
+def test_seeded_final_step_gets_scoring_weaknesses_and_evidence_paths(tmp_path, monkeypatch) -> None:
+    from agentkit.types import ChatResult
+    from studio.rubric import DEFAULT_TEMPLATE, default_scoring_matrix
+    from studio.task_runs import TaskRun, TaskRunStore, base_identity, task_hash
+    from studio.tools import _fetch_cache
+
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path))
+    requirement = (
+        "1. Gather evidence about research report quality.\n"
+        f"2. Write a research report about research report quality. Run id: {tmp_path.name}."
+    )
+    thash = task_hash(base_identity(requirement))
+    TaskRunStore().record(TaskRun(
+        task_hash=thash,
+        session_id="prior",
+        version=1,
+        score=0.4,
+        weaknesses=["[document] Missing limitations."],
+        artifact_path="",
+        requirement=requirement,
+        result_text="# Seed Report\n\n## Executive Summary\nPrior sourced report.",
+        config={"auto_improve": True, "max_epochs": 1},
+    ))
+    _fetch_cache["https://example.com/a|"] = ("Cached page body only in source file", 36)
+
+    prompts: list[str] = []
+
+    class _CaptureClient:
+        def chat(self, messages, tools=None) -> ChatResult:
+            prompts.append(messages[-1]["content"])
+            return ChatResult(
+                text=(
+                    "RESEARCH_FINDING:\n"
+                    "ARTICLE_TITLE: Alpha\n"
+                    "URL: https://example.com/a\n"
+                    "PATCH_TARGET: ## Executive Summary\n"
+                    "QUOTE: Alpha quoted sentence\n"
+                    "WHY: Supports the report.\n"
+                ),
+                total_tokens=5,
+            )
+
+    session = _make_session()
+    session.tools_enabled = False
+    session.hill_climb_config = {"auto_improve": True, "max_epochs": 1}
+    session.rubric_config = {
+        "template": DEFAULT_TEMPLATE,
+        "scoring_template": DEFAULT_TEMPLATE,
+        "scoring_matrix": default_scoring_matrix("general", DEFAULT_TEMPLATE),
+    }
+    events: list[StudioEvent] = []
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=lambda _on_usage: _CaptureClient(),
+        embedder=None,
+        workspace_root=tmp_path,
+    )
+
+    runner.run(requirement)
+
+    seeded_final_prompts = [
+        p for p in prompts
+        if "research EXECUTOR improving an existing deliverable" in p
+    ]
+    assert seeded_final_prompts
+    final_prompt = seeded_final_prompts[-1]
+    assert "FULL SCORING STANDARD" in final_prompt
+    assert "Citation integrity" in final_prompt
+    assert "UNRESOLVED WEAKNESSES" in final_prompt
+    assert "Missing limitations" in final_prompt
+    assert "FETCHED EVIDENCE FILES" in final_prompt
+    assert "evidence/fetched-sources.json" in final_prompt
+    assert "evidence/source-001.md" in final_prompt
+    assert "Cached page body only in source file" not in final_prompt
+    assert (tmp_path / session.session_id / "evidence" / "source-001.md").is_file()
+    prompt_text = next(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / session.session_id / "io").glob("*.in.md")
+        if "research EXECUTOR improving an existing deliverable" in path.read_text(encoding="utf-8")
+    )
+    assert "FULL SCORING STANDARD" in prompt_text
+    assert "Citation integrity" in prompt_text
+    assert "UNRESOLVED WEAKNESSES" in prompt_text
+    assert "FETCHED EVIDENCE FILES" in prompt_text
+    assert "evidence/fetched-sources.json" in prompt_text
+    assert "evidence/source-001.md" in prompt_text
+
+
+def test_final_non_report_step_keeps_generic_artifact_contract() -> None:
+    prompt = _final_step_instruction(
+        "Compare redis and postgres.",
+        "Return a recommendation.",
+        scoring_rules="- Citation integrity",
+        weaknesses=["[document] Missing citations."],
+    )
+
+    assert "multi-step agent workflow" in prompt
+    assert "optionally refining" in prompt
+    assert "final synthesis step for a research report" not in prompt
+    assert "FULL SCORING STANDARD" not in prompt
+
+
 # --------------------------------------------------------------------------- #
 # §14.4 Epoch heartbeat — one Run auto-iterates to max_epochs                  #
 # --------------------------------------------------------------------------- #
@@ -1600,6 +2118,42 @@ def test_latest_with_content_falls_back_to_result_text(tmp_path, monkeypatch) ->
     assert prior.result_text == "# Good Report\nbody"
 
 
+def test_task_run_store_persists_evidence_rows(tmp_path, monkeypatch) -> None:
+    """Evidence extracted during finalization survives the task history store.
+
+    The reducer keeps using the full scoring/evidence context in-process, while later
+    inspection/export paths need the same typed evidence rows after restart.
+    """
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    from studio.task_runs import TaskRun, TaskRunStore, task_hash
+
+    store = TaskRunStore(db_path=tmp_path / "task_runs.db")
+    req = "compare agent frameworks"
+    th = task_hash(req)
+    evidence = [{
+        "id": "ev1",
+        "section": "## Findings",
+        "claim": "Framework A has built-in tracing",
+        "url": "https://example.com/framework-a",
+        "source": "Example",
+    }]
+    store.record(TaskRun(
+        task_hash=th, session_id="s1", version=1, score=0.7, weaknesses=[],
+        artifact_path="", requirement=req, result_text="# Report\nbody",
+        evidence=evidence,
+    ))
+
+    latest = store.latest(th)
+    best = store.best(th)
+    all_runs = store.all_runs(th)
+    seeded = store.latest_with_content(th, ws_root=tmp_path / "ws")
+
+    assert latest is not None and latest.evidence == evidence
+    assert best is not None and best.evidence == evidence
+    assert all_runs[0].evidence == evidence
+    assert seeded is not None and seeded.evidence == evidence
+
+
 def test_merge_creates_missing_sections_addresses_all_weaknesses() -> None:
     """Inject weaknesses (two required sections absent from the seed) and verify the
     merge ADDRESSES ALL of them (DESIGN §14.6). A seeded hill-climb run keeps the
@@ -1692,6 +2246,64 @@ def test_max_epochs_counts_per_run_not_cumulative_version(
     assert e2, phase_ids   # epoch 2 ALSO ran (before the fix it stopped after e1)
 
 
+def test_seed_path_only_seeds_first_epoch_not_every_epoch(
+    fake_client_factory, tmp_path, monkeypatch
+) -> None:
+    """hill_climb_config.seed_path must seed epoch 1 only. Epoch 2+ must carry
+    forward THIS RUN's own prior epoch (via TaskRunStore.latest_with_content,
+    which _store.record already persisted at the end of the prior epoch) — not
+    re-pin to the same static file every epoch. Bug: the seed_path branch had no
+    epoch guard, so a multi-epoch hill-climb discarded every epoch's own
+    progress and restarted from the same seed each time (verified live: both
+    epoch 1 and epoch 2 logged identical "seed via explicit seed_path (21899
+    chars)", epoch 1's grown 29931-char result was never seen by epoch 2).
+    """
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    import studio.runner as runner_mod
+    from studio.task_runs import TaskRunStore
+
+    seed_file = tmp_path / "seed.md"
+    seed_file.write_text("## Section\n\nseed body\n")
+
+    seed_calls: list[int] = []
+    orig_seed_from_path = runner_mod._seed_prior_from_path
+
+    def spy_seed_from_path(*args, **kwargs):
+        seed_calls.append(1)
+        return orig_seed_from_path(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "_seed_prior_from_path", spy_seed_from_path)
+
+    carry_forward_calls: list[int] = []
+    orig_latest = TaskRunStore.latest_with_content
+
+    def spy_latest(self, *args, **kwargs):
+        carry_forward_calls.append(1)
+        return orig_latest(self, *args, **kwargs)
+
+    monkeypatch.setattr(TaskRunStore, "latest_with_content", spy_latest)
+
+    req = "1. research widgets 2. write the report"
+    session = _make_session()
+    session.hill_climb_config = {
+        "auto_improve": True, "max_epochs": 2, "min_improvement": 0.0,
+        "seed_path": str(seed_file),
+    }
+    runner = Runner(
+        session, lambda _e: None, client_factory=fake_client_factory,
+        embedder=None, workspace_root=tmp_path,
+    )
+    runner.run(req)
+
+    assert len(seed_calls) == 1, (
+        f"seed_path must only be consulted on epoch 1, got {len(seed_calls)} calls"
+    )
+    assert carry_forward_calls, (
+        "epoch 2 must fall back to latest_with_content (this run's own prior "
+        "epoch), not re-seed from seed_path"
+    )
+
+
 def test_bad_mermaid_seed_reaches_reducer_with_repair_instruction(
     tmp_path, monkeypatch
 ) -> None:
@@ -1755,6 +2367,242 @@ def test_bad_mermaid_seed_reaches_reducer_with_repair_instruction(
     assert "repair" in blob.lower(), "reducer never told to repair"
     assert "Malformed mermaid edge" in blob, "the lint weakness never reached the model"
     assert "ToolSelector|Read|" in blob, "the exact bad line was not named for repair"
+
+
+class _ConstVectorEmbedder:
+    """Constant-vector embedder — every text maps to the same vector, so any two
+    requirements are maximally 'similar' (cosine=1.0). Used only to deterministically
+    force the R10 semantic seed-fallback path (studio.task_runs.similar_runs) in this
+    test; NOT a claim about real cosine behavior (the real calibration test in
+    tests/test_relevance.py is exactly why the LLM relevance check exists instead of
+    thresholding cosine — cosine could NOT separate the real contaminated case)."""
+
+    def embed(self, texts):
+        return [[1.0, 0.0] for _ in texts]
+
+
+def test_cross_task_seed_reaches_worker_with_relevance_repair_instruction(
+    tmp_path, monkeypatch
+) -> None:
+    """Cross-task R10 seed (a DIFFERENT task_hash, carried forward only via semantic
+    similarity) with an off-topic section must (a) get DETECTED by the binary LLM
+    relevance check and (b) get a NARROW repair-in-place exception injected into the
+    final-step worker prompt (mirrors test_bad_mermaid_seed_reaches_reducer_with_
+    repair_instruction's structure exactly, for the relevance repair-clause instead
+    of the lint repair-clause). A SAME-task continuation seed is covered separately —
+    this test pins the cross-task gate (_seed_cross_task) specifically."""
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
+    from studio.runner import Runner
+    from studio.task_runs import TaskRun, TaskRunStore, task_hash
+
+    req_current = "1. research widget benchmarking practices 2. write the report"
+    req_prior = "1. research catalog governance for agent skills 2. write the report"
+    prior_seed = (
+        "# Report\n\n"
+        "## Executive Summary\n\n"
+        + "This catalog management report examines skill registry governance "
+        "for agent loops. " * 12
+        + "\n\n"
+        "## Conclusion\n\n"
+        + "In conclusion, catalog lifecycle governance requires careful "
+        "curation. " * 12
+        + "\n"
+    )
+    assert len(prior_seed) >= 500  # clears _seed_carry_forward's _MIN_SEED_CHARS
+
+    # The runner's store lives at _db_path() == workspace_root().parent/task_runs.db
+    # (one level ABOVE STUDIO_WORKSPACE_ROOT=.../ws) — same convention as the mermaid
+    # test above. Record the prior under a DIFFERENT task_hash (req_prior != req_current)
+    # so the exact-hash lookup misses and the semantic (R10) path is exercised.
+    store = TaskRunStore(db_path=tmp_path / "task_runs.db")
+    store.record(TaskRun(
+        task_hash=task_hash(req_prior), session_id="s_prior_catalog", version=1,
+        score=0.4, weaknesses=[], artifact_path="", requirement=req_prior,
+        result_text=prior_seed,
+    ))
+
+    class _RelevanceAwareClient:
+        """Answers the binary relevance judge's distinctive prompt (mentions
+        'PARAGRAPH:' + 'VERDICT:') with IRRELEVANT whenever the section text
+        mentions 'catalog' — otherwise a generic filler reply for every other
+        prompt type (planner/hub/worker/reducer), mirroring _Capturing in the
+        mermaid test."""
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.n_calls = 0
+            self.total_tokens = 0
+
+        def chat(self, messages, tools=None):
+            from agentkit.types import ChatResult
+            self.n_calls += 1
+            self.total_tokens += 5
+            blob = str(messages)
+            self.prompts.append(blob)
+            if "PARAGRAPH:" in blob and "VERDICT:" in blob:
+                verdict = "IRRELEVANT" if "catalog" in blob.lower() else "RELEVANT"
+                return ChatResult(
+                    text=f"QUOTE: NONE\nVERDICT: {verdict}", total_tokens=5
+                )
+            return ChatResult(text="The answer is 42.", total_tokens=5)
+
+    cap = _RelevanceAwareClient()
+    session = _make_session()
+    session.hill_climb_config = {"auto_improve": True, "max_epochs": 1}
+    runner = Runner(
+        session, lambda _e: None, client_factory=lambda _o: cap,
+        embedder=_ConstVectorEmbedder(), workspace_root=tmp_path / "ws",
+    )
+    runner.run(req_current)
+
+    blob = "\n".join(cap.prompts)
+    assert "relevance-repair-in-place" in blob, "worker never told to repair relevance"
+    assert "unrelated to the current task" in blob, "the relevance issue never reached the model"
+    # Wording tightened (2026-07): "DROP the original then WRITE NEW" — an explicit
+    # two-step instruction beats the softer "REPLACE/adapt" that let the model just
+    # reword the same off-topic substance.
+    assert "DROP that content entirely" in blob
+    assert "WRITE NEW content addressing the CURRENT task" in blob
+
+
+def test_cold_start_phase1_gets_proactive_requirement_notice(
+    tmp_path,
+) -> None:
+    """A genuine COLD START (no prior seed) with a section template must (a) extract
+    the task's explicit requirements BEFORE the phase loop and (b) inject the full
+    proactive requirement list into phase 1's REDUCER prompt. This pins the earliest-
+    stage per-phase wiring on the very first run of a task (not just a hill-climb
+    continuation). Mirrors the mermaid/relevance integration tests' capturing-client
+    structure, for the cold-start proactive path instead of a seed repair-clause."""
+    from studio.runner import Runner
+
+    class _Capturing:
+        """Answers the requirement EXTRACTOR prompt with a two-item list; generic
+        filler for every other prompt (planner/hub/worker/reducer)."""
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.n_calls = 0
+            self.total_tokens = 0
+
+        def chat(self, messages, tools=None):
+            from agentkit.types import ChatResult
+            self.n_calls += 1
+            self.total_tokens += 5
+            blob = str(messages)
+            self.prompts.append(blob)
+            if "You extract the EXPLICIT, CHECKABLE requirements" in blob:
+                return ChatResult(
+                    text="include a diagram\ncite at least 3 sources", total_tokens=5
+                )
+            return ChatResult(text="The answer is 42.", total_tokens=5)
+
+    cap = _Capturing()
+    session = _make_session(mode="llm")
+    # A section template makes the cold-start skeleton bootstrap fire (§14.1), so the
+    # section-aware reducer runs every phase even with no prior artifact.
+    session.rubric_config = {
+        "weights": None,
+        "template": ["Executive Summary", "Source References"],
+    }
+    session.hill_climb_config = {"auto_improve": True, "max_epochs": 1}
+    runner = Runner(
+        session, lambda _e: None, client_factory=lambda _o: cap,
+        embedder=None, workspace_root=tmp_path,
+    )
+    runner.run("write a sourced report on agent loops")
+
+    # The extractor ran (before the phase loop) and the proactive notice — with the
+    # full requirement list — reached a reducer prompt on this cold-start epoch.
+    assert any("You extract the EXPLICIT" in p for p in cap.prompts), "extractor never ran"
+    blob = "\n".join(cap.prompts)
+    assert "STATED TASK REQUIREMENTS" in blob, "phase-1 proactive notice never injected"
+    assert "include a diagram" in blob
+    assert "cite at least 3 sources" in blob
+
+
+def test_cross_task_seed_injects_unconditional_adaptation_notice(
+    tmp_path, monkeypatch
+) -> None:
+    """Fix 1 (defense-in-depth): whenever a run is seeded from a cross-task R10 seed,
+    the worker/reducer prompt gets the UNCONDITIONAL 'CROSS-TASK SEED' adaptation notice
+    — independent of whether the LLM relevance classifier flagged any section. Here the
+    classifier votes RELEVANT for everything (never fires the conditional repair clause),
+    yet the unconditional notice must still appear. A NON-cross-task (cold-start) run must
+    NOT get it."""
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
+    from studio.runner import Runner
+    from studio.task_runs import TaskRun, TaskRunStore, task_hash
+
+    req_current = "1. research widget benchmarking practices 2. write the report"
+    req_prior = "1. research gadget calibration methods 2. write the report"
+    prior_seed = (
+        "# Report\n\n## Executive Summary\n\n"
+        + "This report covers benchmarking methodology in depth. " * 12
+        + "\n\n## Conclusion\n\n"
+        + "In conclusion the methodology is sound. " * 12
+        + "\n"
+    )
+    assert len(prior_seed) >= 500
+
+    store = TaskRunStore(db_path=tmp_path / "task_runs.db")
+    store.record(TaskRun(
+        task_hash=task_hash(req_prior), session_id="s_prior_gadget", version=1,
+        score=0.4, weaknesses=[], artifact_path="", requirement=req_prior,
+        result_text=prior_seed,
+    ))
+
+    class _AlwaysRelevantClient:
+        """Every relevance verdict is RELEVANT, so the conditional repair clause never
+        fires — isolating the unconditional notice."""
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.n_calls = 0
+            self.total_tokens = 0
+
+        def chat(self, messages, tools=None):
+            from agentkit.types import ChatResult
+            self.n_calls += 1
+            self.total_tokens += 5
+            blob = str(messages)
+            self.prompts.append(blob)
+            if "PARAGRAPH:" in blob and "VERDICT:" in blob:
+                return ChatResult(text="QUOTE: NONE\nVERDICT: RELEVANT", total_tokens=5)
+            return ChatResult(text="The answer is 42.", total_tokens=5)
+
+    cap = _AlwaysRelevantClient()
+    session = _make_session()
+    session.hill_climb_config = {"auto_improve": True, "max_epochs": 1}
+    runner = Runner(
+        session, lambda _e: None, client_factory=lambda _o: cap,
+        embedder=_ConstVectorEmbedder(), workspace_root=tmp_path / "ws",
+    )
+    runner.run(req_current)
+
+    blob = "\n".join(cap.prompts)
+    assert "CROSS-TASK SEED" in blob, "unconditional cross-task notice never reached the worker"
+    assert "relevance-repair-in-place" not in blob, "conditional clause should NOT fire when all sections are relevant"
+
+    # A cold-start run (empty store, nothing to seed from) must NOT get the notice.
+    # Use a FRESH parent dir so the store (workspace_root().parent/task_runs.db) is
+    # empty — the constant embedder would otherwise make the gadget prior look similar.
+    fresh_ws = tmp_path / "fresh" / "ws2"
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(fresh_ws))
+    fresh_ws.mkdir(parents=True, exist_ok=True)
+    cap2 = _AlwaysRelevantClient()
+    session2 = _make_session()
+    session2.hill_climb_config = {"auto_improve": True, "max_epochs": 1}
+    runner2 = Runner(
+        session2, lambda _e: None, client_factory=lambda _o: cap2,
+        embedder=_ConstVectorEmbedder(), workspace_root=fresh_ws,
+    )
+    runner2.run("1. research a wholly novel unrelated subject 2. write the report")
+    assert "CROSS-TASK SEED" not in "\n".join(cap2.prompts), (
+        "cold-start run must not get the cross-task adaptation notice"
+    )
 
 
 def test_step_ids_namespaced_across_epochs(
@@ -1839,3 +2687,1340 @@ def test_dedupe_plan_steps_collapses_duplicate_phases() -> None:
     # no-op when there are no duplicates (returns the plan unchanged)
     clean = _dedupe_plan_steps(Plan(task="t", steps=steps[:3]))
     assert len(clean.steps) == 3
+
+
+# --- semantic seed fallback: local/remote loop-seed carries forward a real prior ---
+
+def test_pick_seed_with_content_skips_empty_and_prefers_latest(tmp_path):
+    from studio.runner import _pick_seed_with_content
+    from types import SimpleNamespace as NS
+
+    sims = [
+        (NS(session_id="empty1", result_text="", score=0.0, task_hash="h1"), 0.98),
+        (NS(session_id="empty2", result_text="x", score=0.0, task_hash="h2"), 0.97),
+        (NS(session_id="old", result_text="C" * 800, score=0.92, task_hash="h3"), 0.94),
+        (NS(session_id="new", result_text="C" * 800, score=0.67, task_hash="h4"), 0.90),
+    ]
+    # no recency → closest-similarity that has content (skips the two empties)
+    r = _pick_seed_with_content(sims, tmp_path, 500)
+    assert r and r[0].session_id == "old"
+    # multiple content-bearing + recency → the LATEST wins
+    rec = {"old": 10, "new": 20}
+    r2 = _pick_seed_with_content(sims, tmp_path, 500, recency_fn=lambda s: rec.get(s, 0))
+    assert r2 and r2[0].session_id == "new"
+    # nothing has content → genuine cold start
+    assert _pick_seed_with_content(sims[:2], tmp_path, 500, recency_fn=lambda s: 0) is None
+
+
+def test_seed_prior_from_path_reads_file_and_falls_back(tmp_path):
+    from studio.runner import _seed_prior_from_path
+
+    seed = tmp_path / "seed.md"
+    seed.write_text("# Strong seed\n" + "content " * 100)
+    # explicit file → synthetic prior carrying the file body as result_text
+    p = _seed_prior_from_path(str(seed), "thash1", "req")
+    assert p is not None
+    assert p.task_hash == "thash1"
+    assert p.result_text.startswith("# Strong seed")
+    # session_id must NOT resolve to a real artifact.md → forces result_text seeding
+    assert p.session_id.startswith("__seedfile__")
+    # blank / missing / empty → None (caller falls back to DB seeding)
+    assert _seed_prior_from_path("", "t", "r") is None
+    assert _seed_prior_from_path(str(tmp_path / "nope.md"), "t", "r") is None
+    empty = tmp_path / "empty.md"; empty.write_text("   \n")
+    assert _seed_prior_from_path(str(empty), "t", "r") is None
+
+
+def test_seed_sync_writes_section_files_preserving_full_seed(tmp_path):
+    """Seeding must split the seed into section files, not just write artifact.md.
+
+    Regression: a 22K seed collapsed to ~5K in epoch 1 because the seed path
+    wrote artifact.md only and left the section files (the source of truth the
+    phase loop reassembles from) as stale scaffold. The first assemble then
+    silently gutted the seed. Guard the load-bearing property: sync + assemble
+    round-trips the FULL seed, including a heading absent from the template.
+    """
+    from studio.runner import _sync_section_workspace
+    from studio.section_workspace import assemble_artifact_from_sections, SECTIONS_DIR
+
+    session = _make_session(mode="llm")
+    # template covers only two of the seed's three sections; "Custom Deep Dive"
+    # is NOT in the template — it must still survive the split (no gutting).
+    session.rubric_config = {"active_template": ["Executive Summary", "References"]}
+
+    seed = (
+        "# Report\n\n"
+        "## Executive Summary\n\n" + "summary body. " * 40 + "\n\n"
+        "## Custom Deep Dive\n\n" + "deep analysis body. " * 40 + "\n\n"
+        "## References\n\n- [1] https://example.com\n"
+    )
+    (tmp_path / session.session_id).mkdir(parents=True)
+
+    _sync_section_workspace(session, tmp_path, seed)
+
+    # section files were actually written (the bug: they weren't)
+    assert (tmp_path / session.session_id / SECTIONS_DIR).is_dir()
+    assembled = assemble_artifact_from_sections(tmp_path / session.session_id)
+    # full seed preserved — no round-1 shrink, non-template section kept
+    assert "Custom Deep Dive" in assembled
+    assert "deep analysis body." in assembled
+    assert len(assembled) >= len(seed) - 50  # lossless (title/whitespace tolerance)
+
+
+def test_session_recency_returns_max_row_id(tmp_path):
+    from studio.task_runs import TaskRun, TaskRunStore
+    st = TaskRunStore(db_path=tmp_path / "tr.db")
+    st.record(TaskRun("h", "s1", 1, 0.5, [], "", "r", "body"))
+    st.record(TaskRun("h", "s2", 2, 0.6, [], "", "r", "body2"))
+    assert st.session_recency("s2") > st.session_recency("s1")
+    assert st.session_recency("nope") == 0
+
+
+# --- Editor phase (goal-aware final quality pass) ---------------------------
+
+_EDITOR_MARKER = "PENDING-DETAIL"
+_EDITOR_REPLACEMENT = "grounded detail with a citation https://x.test/e"
+
+
+def _editor_artifact_text() -> str:
+    return (
+        "# Agent Loops Report\n\n"
+        "## Executive Summary\n\n"
+        f"Summary body. {_EDITOR_MARKER}\n\n"
+        "## Key Findings\n\n"
+        "Findings body with detail.\n\n"
+        "## References\n\n"
+        "- https://x.test/e\n"
+    )
+
+
+def _editor_session():
+    session = _make_session()  # tools_enabled defaults True
+    session.rubric_config = {
+        "weights": None,
+        "template": ["Executive Summary", "Key Findings", "References"],
+        "scoring_template": ["Executive Summary", "Key Findings", "References"],
+        "scoring_matrix": [
+            {"category": "Scope", "points": 50, "signal": "structure"},
+            {"category": "Citation integrity", "points": 50, "signal": "verification"},
+        ],
+    }
+    return session
+
+
+def _build_editor_ws(tmp_path, session, text):
+    """Write artifact.md + sections/ (the pre-editor state), return (root, art_file)."""
+    from studio.section_workspace import write_section_workspace
+    root = tmp_path / session.session_id
+    root.mkdir(parents=True, exist_ok=True)
+    write_section_workspace(root, text, ["Executive Summary", "Key Findings", "References"])
+    return root, root / "artifact.md"
+
+
+class _EditorPatchClient:
+    """A base client that, once per pass, reads the artifact hash then applies ONE
+    patch_artifact find/replace. Subsequent turns are no-ops. Records the top-level
+    prompt of each turn so batching structure can be asserted.
+
+    ``prompts`` dedups by exact text across the WHOLE run (legacy "was this prompt
+    ever sent" checks). ``turn_prompts`` is run-length collapsed instead (a new
+    entry only when the text differs from the IMMEDIATELY PRECEDING one) — this
+    correctly counts one entry per ``_editor_drive_round`` turn even when a turn's
+    text is byte-identical across round 1 and round 2 (same outline/requirement),
+    since those two turns are never adjacent (other distinct turns run between).
+    """
+
+    def __init__(self, find=_EDITOR_MARKER, replace=_EDITOR_REPLACEMENT) -> None:
+        self.find, self.replace = find, replace
+        self.patched = False
+        self.prompts: list[str] = []
+        self.turn_prompts: list[str] = []
+
+    def chat(self, messages, tools=None):
+        from agentkit.types import ChatResult
+        first = messages[0].get("content") if messages else ""
+        if isinstance(first, str) and messages[-1].get("role") == "user":
+            if first not in self.prompts:
+                self.prompts.append(first)
+            if not self.turn_prompts or self.turn_prompts[-1] != first:
+                self.turn_prompts.append(first)
+        doc_hash = ""
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, str) and '"doc_hash"' in content:
+                try:
+                    doc_hash = json.loads(content).get("doc_hash", "")
+                except Exception:
+                    pass
+        if not self.patched and not doc_hash:
+            return ChatResult(text="", total_tokens=1, tool_calls=[("read_artifact", {})])
+        if not self.patched and doc_hash:
+            self.patched = True
+            return ChatResult(text="", total_tokens=1, tool_calls=[
+                ("patch_artifact", {"find": self.find, "replace": self.replace, "expected_hash": doc_hash})
+            ])
+        return ChatResult(text="done", total_tokens=1)
+
+
+def _run_editor(tmp_path, session, client, scores, monkeypatch):
+    """Invoke _run_editor_pass with a scripted _editor_scored_issues sequence.
+
+    NOTE on ``scores`` length: a round that ACCEPTS consumes 2 mocked calls (cur,
+    new). A round that REVERTS consumes 3 (cur, new, PLUS the fresh post-revert
+    recompute that feeds the emitted detail/feedback/returned weaknesses)."""
+    from studio import runner as _runner_mod
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    seq = iter(scores)
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=client,
+        scored_text=art_file.read_text(encoding="utf-8"),
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+    )
+    return root, art_file, final, weaknesses, events
+
+
+def test_editor_offers_six_file_tools(tmp_path, monkeypatch) -> None:
+    """The editor pass must offer exactly the 6-tool set: the original 4 plus the
+    two file primitives wired in this session (edit_file, glob)."""
+    from studio import runner as _runner_mod
+    captured: dict = {}
+    real_cls = _runner_mod.ToolAugmentedClient
+
+    def _spy(*args, **kwargs):
+        captured["offer_tools"] = kwargs.get("offer_tools")
+        return real_cls(*args, **kwargs)
+
+    monkeypatch.setattr(_runner_mod, "ToolAugmentedClient", _spy)
+    session = _editor_session()
+    # Empty issue list on the first score → loop breaks before any LLM turn, but
+    # the editor_client (and thus offer_tools) is still constructed.
+    _run_editor(tmp_path, session, _EditorPatchClient(), [(0.0, [])], monkeypatch)
+    assert captured["offer_tools"] == {
+        "read_file", "search_evidence", "read_artifact",
+        "patch_artifact", "edit_file", "glob",
+    }
+
+
+def test_editor_round1_improves_round2_still_runs_and_batches_turns(tmp_path, monkeypatch) -> None:
+    """Round 1 IMPROVES (score up AND fewer weaknesses — but only PARTIALLY: 4
+    issues -> 1, not all the way to zero) → accepted as the new baseline, NOT an
+    early stop. Round 2 still runs (budget remains, one issue remains) and keeps
+    improving. Within each round the issues are batched into small fix-turns plus
+    a ToC turn and a self-eval turn (weak-model batching)."""
+    session = _editor_session()
+    client = _EditorPatchClient()
+    # Round 1: 4 issues, _EDITOR_CHUNK == 3 → 2 fix-turns; partial improvement to 1
+    # issue (NOT zero) — proves "improved" only requires strictly-better-on-both-axes,
+    # not full clearance. Round 2: cur re-check sees the 1 remaining issue, drives
+    # ONE more fix-turn (+ ToC + self-eval), fully resolves it.
+    root, art_file, final, weaknesses, events = _run_editor(
+        tmp_path, session, client,
+        scores=[
+            (0.4, ["w1", "w2", "w3", "w4"]),  # round1 cur
+            (0.7, ["w4"]),                     # round1 new: partial improve, 1 left → accept
+            (0.7, ["w4"]),                     # round2 cur: re-derived from accepted baseline
+            (0.95, []),                        # round2 new: fully resolved → accept
+        ],
+        monkeypatch=monkeypatch,
+    )
+    fix_turns = [p for p in client.turn_prompts if "Fix ONLY these specific issues" in p]
+    toc_turns = [p for p in client.turn_prompts if "table of contents" in p]
+    eval_turns = [p for p in client.turn_prompts if "SCORING STANDARD" in p]
+    assert len(fix_turns) == 3  # round1: 2 batched fix-turns (4/3) + round2: 1 fix-turn
+    assert len(toc_turns) == 2 and len(eval_turns) == 2  # one ToC + one self-eval PER round
+    accepts = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "accept"]
+    assert len(accepts) == 2  # BOTH rounds ran and both accepted — no early stop on round-1 success
+    assert "round 1 improved" in accepts[0].detail
+    assert "round 2 improved" in accepts[1].detail
+    # No feedback text: round 1 was a success, not a revert, so nothing to ingest.
+    assert not any("PRIOR ROUND FEEDBACK" in p for p in client.turn_prompts)
+    # Returned weaknesses is the FRESH post-round-2 recompute (round2's "new_issues"),
+    # not round 1's stale partial list — round 1's ["w4"] was replaced, not merged.
+    assert weaknesses == []
+
+
+def test_editor_round1_reverts_feeds_forward_to_round2_then_hard_stops(tmp_path, monkeypatch) -> None:
+    """Round 1 CANNOT improve (regresses/flat) → full revert (artifact.md + every
+    section file + active_outline.json) + reject GateEvent, exactly as before —
+    but round 2 still runs (does NOT stop after the revert), with round 1's
+    failure ingested as feedback in round 2's fix-turn prompt so it isn't blindly
+    repeated. Round 2 ALSO cannot improve here → its own revert fires and the
+    hard round cap (2) ends the loop — no round 3 (only 6 scripted score-calls
+    exist; a round 3 attempt would raise StopIteration and fail the test). A
+    reverting round consumes 3 mocked calls (cur, new, PLUS the fresh post-revert
+    recompute) — never 2 — because weaknesses are ALWAYS freshly recomputed
+    against the actually-current (here: just-restored) state, never reused from
+    before the round ran."""
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    from studio.section_workspace import SECTIONS_DIR
+    sections_dir = root / SECTIONS_DIR
+    before_art = art_file.read_text(encoding="utf-8")
+    before_files = {p.name: p.read_text(encoding="utf-8") for p in sections_dir.iterdir() if p.is_file()}
+
+    from studio import runner as _runner_mod
+    client = _EditorPatchClient()
+    seq = iter([
+        (0.6, ["w1"]),               # round1 cur
+        (0.3, ["w1", "w2", "w3"]),   # round1 new: regression
+        (0.6, ["w1"]),               # round1 fresh post-revert recompute → feeds feedback
+        (0.6, ["w1"]),               # round2 cur: matches round1's post-revert state
+        (0.5, ["w1", "w2"]),         # round2 new: regression again
+        (0.6, ["w1"]),               # round2 fresh post-revert recompute → hard stop
+    ])
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=client,
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+    )
+
+    # Full revert (both rounds regressed): artifact.md, every section file, and
+    # active_outline.json all restored to the ORIGINAL pre-editor snapshot.
+    assert art_file.read_text(encoding="utf-8") == before_art
+    after_files = {p.name: p.read_text(encoding="utf-8") for p in sections_dir.iterdir() if p.is_file()}
+    assert after_files == before_files
+    assert _EDITOR_REPLACEMENT not in art_file.read_text(encoding="utf-8")
+    assert final == before_art
+    # Returned weaknesses is the FRESH recompute after round 2's revert (== ["w1"],
+    # matching the restored state) — never round 1's or round 2's stale pre-round list.
+    assert weaknesses == ["w1"]
+
+    rejects = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "reject"]
+    assert len(rejects) == 2  # round 1 AND round 2 both reverted — round 2 was reached
+    assert "reverted" in rejects[0].detail and "reverted" in rejects[1].detail
+    # Round 1's failure (its FRESH post-revert weaknesses + the score/weakness delta) was
+    # ingested into round 2's fix-turn prompt so round 2 doesn't blindly repeat the attempt.
+    feedback_turns = [p for p in client.turn_prompts if "PRIOR ROUND FEEDBACK" in p]
+    assert feedback_turns, "round 2 must see round 1's feedback"
+    assert "did NOT improve" in feedback_turns[0] and "w1" in feedback_turns[0]
+
+
+def test_editor_noop_when_no_issues(tmp_path, monkeypatch) -> None:
+    """No weaknesses and no lint issues → the loop breaks immediately: no LLM turn,
+    no gate event, artifact unchanged."""
+    session = _editor_session()
+    client = _EditorPatchClient()
+    root, art_file, final, weaknesses, events = _run_editor(
+        tmp_path, session, client,
+        scores=[(0.95, [])],  # cur has no issues → break before any editing
+        monkeypatch=monkeypatch,
+    )
+    assert client.prompts == []  # editor never called the model
+    assert not [e for e in events if getattr(e, "name", "") == "editor_round"]
+    assert final == art_file.read_text(encoding="utf-8")
+    assert _EDITOR_REPLACEMENT not in final
+    assert weaknesses == []  # fresh (empty) list, not None — the editor DID run and check
+
+
+def test_editor_round2_skipped_when_round1_resolves_everything(tmp_path, monkeypatch) -> None:
+    """Round 1 clears every weakness/lint issue (down to zero) → round 2's
+    top-of-loop "nothing left to do" check short-circuits it: no second drive
+    round, no second gate event, no LLM turns beyond round 1's."""
+    session = _editor_session()
+    client = _EditorPatchClient()
+    root, art_file, final, weaknesses, events = _run_editor(
+        tmp_path, session, client,
+        scores=[
+            (0.4, ["w1", "w2"]),  # round1 cur
+            (0.8, []),             # round1 new: fully resolved → accept
+            (0.8, []),             # round2 cur: zero issues → break, no round-2 drive
+        ],
+        monkeypatch=monkeypatch,
+    )
+    assert _EDITOR_REPLACEMENT in final
+    assert _EDITOR_REPLACEMENT in art_file.read_text(encoding="utf-8")
+    gates = [e for e in events if getattr(e, "name", "") == "editor_round"]
+    assert len(gates) == 1 and gates[0].outcome == "accept"  # round 2 never even started
+    assert weaknesses == []  # fresh recompute at round 2's top-of-loop, still empty
+
+
+def test_editor_skipped_without_scoring_matrix(tmp_path, monkeypatch) -> None:
+    """No rubric scoring_matrix → the editor is a no-op (nothing to optimize)."""
+    session = _make_session()  # no rubric_config
+    client = _EditorPatchClient()
+    from studio import runner as _runner_mod
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    # If it ran, this would raise (empty iterator) — proves the gate short-circuits.
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")))
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=client,
+        scored_text=art_file.read_text(encoding="utf-8"),
+        verified_urls=[],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write a report",
+        emit=lambda _e: None,
+        workspace_root=tmp_path,
+    )
+    assert client.prompts == []
+    assert final == art_file.read_text(encoding="utf-8")
+    assert weaknesses is None  # editor never ran → caller must leave its own list untouched
+
+
+# --- relevance check (studio.relevance): editor 4th action ------------------
+
+def test_editor_scored_issues_unions_extra_issues_without_new_llm_call() -> None:
+    """``extra_issues`` (studio.relevance, precomputed ONCE upstream per epoch)
+    unions into ``_editor_scored_issues``'s returned issue list exactly like
+    ``lint_artifact``'s output already does — a pure ADDITION, no re-derivation,
+    no new I/O inside this function (it must stay cheap: called several times
+    per editor round)."""
+    from studio.runner import _editor_scored_issues
+    session = _editor_session()
+    text = _editor_artifact_text()
+    extra = ["section 'Executive Summary' appears unrelated to the current task (relevance check: NO)"]
+    _, issues_without = _editor_scored_issues(session, text, ["https://x.test/e"])
+    _, issues_with = _editor_scored_issues(session, text, ["https://x.test/e"], extra_issues=extra)
+    assert extra[0] in issues_with
+    assert extra[0] not in issues_without
+    # dedup: an issue already present (mined by rubric/lint) is not duplicated.
+    _, issues_dup = _editor_scored_issues(
+        session, text, ["https://x.test/e"], extra_issues=issues_with[:1]
+    )
+    assert issues_dup.count(issues_with[0]) == 1
+
+
+def test_editor_pass_threads_relevance_extra_issues_into_every_round_call(
+    tmp_path, monkeypatch
+) -> None:
+    """The relevance issues/penalty computed ONCE per epoch upstream (in
+    _run_phase_loop, studio.relevance) must reach EVERY ``_editor_scored_issues``
+    call inside a round — confirming the 4th weakness type flows into the round
+    loop as a pure union. Round mechanics (<=2 rounds, revert-on-regression,
+    fresh-recompute) are already pinned by test_editor_round1_*; this test only
+    verifies the NEW threading, mirroring the existing scripted-sequence mocking
+    style used throughout this file."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    client = _EditorPatchClient()
+    calls: list[tuple] = []
+    seq = iter([
+        (0.4, ["w1", "relevance issue"]),  # round1 cur
+        (0.9, []),                          # round1 new: fully resolved → accept
+        (0.9, []),                          # round2 cur: zero issues → break, no round-2 drive
+    ])
+
+    def _spy(*a, **k):
+        calls.append(a)
+        return next(seq)
+
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", _spy)
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    my_extra = [
+        "section 'Executive Summary' appears unrelated to the current task (relevance check: NO)"
+    ]
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=client,
+        scored_text=art_file.read_text(encoding="utf-8"),
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=lambda _e: None,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        extra_issues=my_extra,
+        relevance_penalty=0.5,
+    )
+    assert calls, "editor never scored"
+    for c in calls:
+        # positional call shape: (session, text, verified_urls, extra_issues, relevance_penalty)
+        assert c[3] == my_extra
+        assert c[4] == 0.5
+
+
+# --- soft quality-opportunity tie-breaker (studio.requirement_compliance) ----
+
+def test_editor_soft_opportunity_accept_keeps_flat_round_that_added_the_alternative(
+    tmp_path, monkeypatch
+) -> None:
+    """A round with a FLAT hard score (no rubric/weakness improvement) that would
+    normally be reverted is KEPT when it strictly reduced the outstanding OR-sibling
+    opportunity count (e.g. it added the optional diagram). This is the narrow
+    accept-path Codex asked for so a successfully-added requested visual is not
+    discarded purely because the hard score did not move."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    # Flat score AND flat weakness count round-over-round → normal gate reverts.
+    seq = iter([
+        (0.5, ["w1"]),  # round1 cur
+        (0.5, ["w1"]),  # round1 new: flat score, flat weaknesses → normal REVERT trigger
+        (0.9, []),      # round2 cur: nothing left → break
+    ])
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    # Opportunity present pre-round (count 1); the edit adds the alternative, so the
+    # patched text (which contains _EDITOR_REPLACEMENT) recounts to 0.
+    recount = lambda t: 0 if _EDITOR_REPLACEMENT in t else 1
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=_EditorPatchClient(),
+        scored_text=art_file.read_text(encoding="utf-8"),
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: include a cost-benefit analysis"],
+        opportunity_recount=recount,
+    )
+    # KEPT, not reverted: the round-1 edit survives in the final artifact.
+    assert _EDITOR_REPLACEMENT in final
+    assert _EDITOR_REPLACEMENT in art_file.read_text(encoding="utf-8")
+    accepts = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "accept"]
+    rejects = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "reject"]
+    assert len(accepts) == 1 and not rejects
+    assert "reduced optional opportunities" in accepts[0].detail
+
+
+def test_editor_flat_round_still_reverts_when_no_opportunity_reduced(
+    tmp_path, monkeypatch
+) -> None:
+    """Negative control: identical flat-score round, but the opportunity count does
+    NOT drop → the soft accept-path does NOT fire and the existing
+    revert-on-regression protection stands. Proves the tie-breaker did not weaken
+    the hard gate — it only rescues rounds that genuinely reduced opportunities."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    seq = iter([
+        (0.5, ["w1"]),  # round1 cur
+        (0.5, ["w1"]),  # round1 new: flat → REVERT
+        (0.5, ["w1"]),  # round1 fresh post-revert recompute
+        (0.6, []),      # round2 cur: nothing left → break
+    ])
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    recount = lambda t: 1  # opportunity count never drops → no soft accept
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=_EditorPatchClient(),
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: include a cost-benefit analysis"],
+        opportunity_recount=recount,
+    )
+    # Reverted: the round-1 edit is gone, artifact restored to the pre-editor snapshot.
+    assert _EDITOR_REPLACEMENT not in final
+    assert final == before_art
+    rejects = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "reject"]
+    assert len(rejects) == 1
+
+
+def test_recount_returns_none_when_compliance_check_fail_opens(monkeypatch) -> None:
+    """Bug 1: a FAILED compliance re-check (client down / LLM error / unparseable
+    reply) must surface as UNKNOWN (None), not a spurious 0. Otherwise the
+    tie-breaker reads "0 opportunities remaining" as "the opportunity was fulfilled"
+    and soft-accepts a round nothing actually verified. The recount wrapper now
+    calls ``requirement_compliance_issues(strict=True)``, which raises on the
+    fail-open paths instead of returning ``(0.0, [], [])``."""
+    import types as _types
+    from agentkit.types import ChatResult
+    from studio.runner import Runner
+
+    class _FailOpenClient:
+        # A reply with NO parseable "REQUIREMENT n: SATISFIED/NOT" verdicts →
+        # requirement_compliance_issues would normally fail-open to (0.0, [], []).
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(text="the model said something unparseable", total_tokens=1)
+
+    fake_self = _types.SimpleNamespace(_task_requirements=["include code || include a diagram"])
+    recount = Runner._make_opportunity_recount(fake_self, _FailOpenClient())
+    # UNKNOWN, not 0 — the empty opportunity list a fail-open would have produced must
+    # NEVER be read as a real "zero remaining".
+    assert recount("some candidate artifact text with real content") is None
+
+
+def test_editor_soft_accept_does_not_fire_when_recount_fail_opens(
+    tmp_path, monkeypatch
+) -> None:
+    """Bug 1 end-to-end: when the opportunity recount is UNAVAILABLE (returns None
+    because the compliance re-check fail-opened), a flat-score round that would be
+    reverted stays reverted — the soft accept-path must NOT fire on an unknown
+    recount, or a silently-failed verification gets misread as success."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    seq = iter([
+        (0.5, ["w1"]),  # round1 cur
+        (0.5, ["w1"]),  # round1 new: flat → REVERT unless soft-accept rescues it
+        (0.5, ["w1"]),  # round1 fresh post-revert recompute
+        (0.6, []),      # round2 cur: nothing left → break
+    ])
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    recount = lambda t: None  # compliance re-check unavailable → UNKNOWN for every text
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=_EditorPatchClient(),
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: include a cost-benefit analysis"],
+        opportunity_recount=recount,
+    )
+    # Reverted, NOT soft-accepted: an unknown recount can never manufacture success.
+    assert _EDITOR_REPLACEMENT not in final
+    assert final == before_art
+    rejects = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "reject"]
+    accepts = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "accept"]
+    assert len(rejects) == 1 and not accepts
+
+
+def test_editor_soft_accept_does_not_fire_on_partial_parse_recount(
+    tmp_path, monkeypatch
+) -> None:
+    """Bug 3 end-to-end: the recount's verifier RESPONDS but omits a per-branch
+    verdict line (a genuine PARTIAL parse — not a total failure, not a complete
+    reply). ``strict=True`` now raises on that partial parse, so
+    ``_make_opportunity_recount`` returns None (UNKNOWN) and the editor tie-breaker
+    must STILL refuse to soft-accept — closing the exact exploit Codex described,
+    where a dropped OR-sibling verdict fabricates a "0 opportunities remaining"
+    success. Distinct from ``..._when_recount_fail_opens`` (a WHOLE-response
+    failure): here the model answered, just incompletely."""
+    import types as _types
+    from agentkit.types import ChatResult
+    from studio import runner as _runner_mod
+    from studio.runner import Runner
+
+    class _PartialParseClient:
+        # The OR group has 2 branches; the verifier answers branch 1 only and DROPS
+        # branch 2 — a real partial parse (the reply is non-empty and parseable).
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(text="REQUIREMENT 1: SATISFIED", total_tokens=1)
+
+    fake_self = _types.SimpleNamespace(
+        _task_requirements=[["include code", "include a design architecture"]]
+    )
+    recount = Runner._make_opportunity_recount(fake_self, _PartialParseClient())
+    # Directly: the partial parse → strict raise → UNKNOWN (None), NOT a spurious 0.
+    assert recount("some candidate artifact text with real content") is None
+
+    # End-to-end through the editor pass: a flat-score round that would be reverted
+    # stays reverted — the UNKNOWN recount can never manufacture a soft accept.
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    seq = iter([
+        (0.5, ["w1"]),  # round1 cur
+        (0.5, ["w1"]),  # round1 new: flat → REVERT unless soft-accept rescues it
+        (0.5, ["w1"]),  # round1 fresh post-revert recompute
+        (0.6, []),      # round2 cur: nothing left → break
+    ])
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=_EditorPatchClient(),
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: include a cost-benefit analysis"],
+        opportunity_recount=recount,
+    )
+    # Reverted, NOT soft-accepted: a partial-parse recount is UNKNOWN, never success.
+    assert _EDITOR_REPLACEMENT not in final
+    assert final == before_art
+    rejects = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "reject"]
+    accepts = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "accept"]
+    assert len(rejects) == 1 and not accepts
+
+
+def test_editor_soft_accept_rejects_weakness_swap_at_equal_count(
+    tmp_path, monkeypatch
+) -> None:
+    """Bug 2: a round that removes one distinct weakness but introduces a DIFFERENT
+    new one keeps the count equal, reduces the opportunity count, and — under the
+    old count-only ``len(new) <= len(cur)`` check — would be soft-accepted, silently
+    admitting a net-new weakness. The check is now an IDENTITY comparison on
+    normalized weaknesses (no net-new distinct weakness allowed), so this round is
+    REVERTED even though the opportunity count dropped."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    seq = iter([
+        (0.5, ["w1"]),  # round1 cur
+        (0.5, ["w2"]),  # round1 new: SWAP — flat score, EQUAL count, but a distinct new weakness
+        (0.5, ["w1"]),  # round1 fresh post-revert recompute
+        (0.6, []),      # round2 cur: nothing left → break
+    ])
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    # The patched text (containing _EDITOR_REPLACEMENT) recounts to 0 < baseline 1 —
+    # so ONLY the weakness-identity check stands between this round and a false accept.
+    recount = lambda t: 0 if _EDITOR_REPLACEMENT in t else 1
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=_EditorPatchClient(),
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: include a cost-benefit analysis"],
+        opportunity_recount=recount,
+    )
+    # Reverted: the net-new weakness "w2" was never present before, so the round is
+    # rejected despite the opportunity-count drop.
+    assert _EDITOR_REPLACEMENT not in final
+    assert final == before_art
+    rejects = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "reject"]
+    accepts = [e for e in events if getattr(e, "name", "") == "editor_round" and e.outcome == "accept"]
+    assert len(rejects) == 1 and not accepts
+
+
+# --------------------------------------------------------------------------- #
+# Editor opportunity-turn prompt: STRUCTURAL gaps (a diagram/table/code example  #
+# the reducer can never produce) get genuine-attempt guidance; plain ones keep   #
+# the soft "only if cheap" qualifier. Pure string construction — no LLM.         #
+# --------------------------------------------------------------------------- #
+
+
+def test_editor_opportunity_prompt_encourages_attempt_for_structural_gaps():
+    from studio.runner import _editor_opportunity_prompt
+    structural = [
+        "Explicit alternative not included: add an architecture diagram",
+        "Include a mermaid flowchart of the tool-selection loop",
+        "Provide a comparison table of the two approaches",
+        "Add a summary matrix of the frameworks",
+        "Include a code example showing the retry wrapper",
+        "Add a visual of the pipeline stages",
+        "Include a graph of latency over time",
+        # Real observed case (session s_196ef7b0cd4b, task_hash 39ee3efddbd9): the
+        # task phrased its diagram alternative as "...or design architecture", and
+        # `extract_requirements` embeds that branch text VERBATIM — no "diagram"
+        # word anywhere. Without "architecture" in the keyword list, this exact
+        # opportunity — from the task that started this whole thread — would
+        # misclassify as plain and never reach the structural retry at all.
+        "Explicit alternative not included: design architecture",
+    ]
+    for opp in structural:
+        out = _editor_opportunity_prompt("write an agent loops report", [opp])
+        assert "STRUCTURAL CONTENT" in out, opp
+        assert "genuine attempt" in out, opp
+        assert "read_artifact" in out, opp  # told to ground in existing content first
+        assert opp in out
+        # Structural bullet must NOT be under the soft "only if cheap" header.
+        assert "OPTIONAL POLISH" not in out, opp
+
+
+def test_editor_opportunity_prompt_keeps_soft_qualifier_for_plain_gaps():
+    from studio.runner import _editor_opportunity_prompt
+    plain = [
+        "Explicit alternative not included: add a cost-benefit analysis section",
+        "Cover the security implications of the approach",
+        "Include a paragraph on rollback strategy",  # 'paragraph' must not trip \bgraph
+    ]
+    for opp in plain:
+        out = _editor_opportunity_prompt("write an agent loops report", [opp])
+        assert "OPTIONAL POLISH" in out, opp
+        assert "ONLY if" in out, opp  # soft "add only if cheap" qualifier retained
+        assert "STRUCTURAL CONTENT" not in out, opp
+        assert opp in out
+
+
+def test_editor_opportunity_prompt_partitions_mixed_opportunities():
+    """Both headers appear when a batch mixes structural and plain gaps, each
+    bullet routed under the header matching its own shape."""
+    from studio.runner import _editor_opportunity_prompt
+    struct = "Add an architecture diagram"
+    plain = "Add a cost-benefit analysis"
+    out = _editor_opportunity_prompt("t", [struct, plain])
+    assert "STRUCTURAL CONTENT" in out and "OPTIONAL POLISH" in out
+    assert out.index("STRUCTURAL CONTENT") < out.index(struct)
+    assert out.index("OPTIONAL POLISH") < out.index(plain)
+
+
+# --------------------------------------------------------------------------- #
+# Bounded structural-opportunity retry (HANDOFF-requirement-compliance-diagram- #
+# reliability.md's "best tradeoff" follow-up to entry 172): up to 3 candidate  #
+# attempts, each from the SAME pre-attempt snapshot, first non-regressing      #
+# candidate that strictly reduces the opportunity count wins.                  #
+# --------------------------------------------------------------------------- #
+
+
+class _StructuralRetryClient:
+    """Patches a mermaid block starting from the Nth EXTERNAL ``editor_client.
+    chat()`` call (1-indexed across the whole pass — fix/toc/selfeval turns each
+    count too); a no-op before that. Mirrors ``_EditorPatchClient``'s
+    read_artifact -> patch_artifact protocol but tracks external-call count via
+    the fresh-turn marker (no ``doc_hash`` yet in the message list)."""
+
+    def __init__(self, patch_on_call: int, find="References", replace=(
+        "References\n\n```mermaid\ngraph TD; A-->B\n```"
+    )) -> None:
+        self.patch_on_call = patch_on_call
+        self.find, self.replace = find, replace
+        self.call_count = 0
+        self.prompts: list[str] = []
+
+    def chat(self, messages, tools=None):
+        from agentkit.types import ChatResult
+        doc_hash = ""
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, str) and '"doc_hash"' in content:
+                try:
+                    doc_hash = json.loads(content).get("doc_hash", "")
+                except Exception:
+                    pass
+        if not doc_hash:
+            self.call_count += 1
+            first = messages[0].get("content") if messages else ""
+            if isinstance(first, str):
+                self.prompts.append(first)
+            return ChatResult(text="", total_tokens=1, tool_calls=[("read_artifact", {})])
+        if self.call_count == self.patch_on_call:
+            return ChatResult(text="", total_tokens=1, tool_calls=[
+                ("patch_artifact", {"find": self.find, "replace": self.replace, "expected_hash": doc_hash})
+            ])
+        return ChatResult(text="done", total_tokens=1)
+
+
+def test_editor_structural_retry_accepts_first_qualifying_attempt(tmp_path, monkeypatch) -> None:
+    """Attempt 1 patches nothing useful (opportunity count unchanged) -> rejected
+    and the snapshot is restored; attempt 2 adds the real mermaid block ->
+    accepted. Score/weaknesses never move (a realistic case — adding a diagram
+    doesn't touch the rubric's other issues) so ONLY the opportunity-count drop
+    justifies acceptance, exactly like the existing single-shot soft-accept path,
+    just with a second try available. Also pins the targeted retry-feedback text
+    reaching attempt 2's prompt but not attempt 1's."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    client = _StructuralRetryClient(patch_on_call=5)  # fix+toc+selfeval=1..3, retry attempt2=5
+    recount = lambda t: 0 if "mermaid" in t else 1
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=client,
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: add an architecture diagram"],
+        opportunity_recount=recount,
+        max_rounds=1,
+    )
+    assert "mermaid" in final
+    assert "mermaid" in art_file.read_text(encoding="utf-8")
+    assert weaknesses == ["w1"]
+    retry_events = [e for e in events if getattr(e, "name", "") == "editor_structural_retry"]
+    accepts = [e for e in retry_events if e.outcome == "accept"]
+    rejects = [e for e in retry_events if e.outcome == "reject"]
+    assert len(accepts) == 1 and len(rejects) == 1
+    assert "attempt 2/3" in accepts[0].detail
+    assert "attempt 1/3" in rejects[0].detail
+    retry_prompts = [p for p in client.prompts if "STRUCTURAL CONTENT" in p]
+    assert len(retry_prompts) == 2
+    assert "grounded structural block" not in retry_prompts[0]
+    assert "grounded structural block" in retry_prompts[1]  # feedback ingested after attempt 1
+
+
+def test_editor_structural_retry_restores_when_no_attempt_qualifies(tmp_path, monkeypatch) -> None:
+    """Every bounded attempt fails to reduce the opportunity count -> the artifact
+    is restored to the untouched pre-retry snapshot, not left mid-attempt."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    client = _StructuralRetryClient(patch_on_call=9999)  # never patches
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=client,
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: add an architecture diagram"],
+        opportunity_recount=lambda t: 1,  # never drops
+        max_rounds=1,
+    )
+    assert final == before_art
+    assert art_file.read_text(encoding="utf-8") == before_art
+    retry_events = [e for e in events if getattr(e, "name", "") == "editor_structural_retry"]
+    assert len([e for e in retry_events if e.outcome == "reject"]) == 3  # all 3 bounded attempts
+    assert not [e for e in retry_events if e.outcome == "accept"]
+
+
+def test_editor_structural_retry_skips_when_baseline_recount_unavailable_or_zero(
+    tmp_path, monkeypatch
+) -> None:
+    """A None (fail-open) or 0 (nothing outstanding) baseline recount must skip the
+    retry entirely — no LLM turn, no GateEvent, text untouched."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    for recount_fn in (lambda t: None, lambda t: 0):
+        client = _StructuralRetryClient(patch_on_call=9999)
+        events: list = []
+        final, _ = _runner_mod._run_editor_pass(
+            session=session,
+            base_client=client,
+            scored_text=before_art,
+            verified_urls=["https://x.test/e"],
+            effective_ws_root=tmp_path,
+            art_file=art_file,
+            original_requirement="write an agent loops report",
+            emit=events.append,
+            workspace_root=tmp_path,
+            step_id_getter=lambda: "editor",
+            quality_opportunities=["Explicit alternative not included: add an architecture diagram"],
+            opportunity_recount=recount_fn,
+            max_rounds=1,
+        )
+        assert final == before_art
+        assert not [e for e in events if getattr(e, "name", "") == "editor_structural_retry"]
+
+
+def test_editor_structural_retry_survives_raising_recount_after_mutation(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review finding: a custom ``opportunity_recount`` that RAISES (not the
+    production ``_make_opportunity_recount``, which already fail-opens
+    internally) must never skip the post-candidate restore. Attempt 1's patch
+    lands, then the recount raises on that candidate — the retry must swallow
+    it as UNKNOWN (treated like a None recount: reject + restore), NOT propagate
+    the exception and leave the mutated artifact.md behind."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    client = _StructuralRetryClient(patch_on_call=4)  # fix+toc+selfeval=1..3, retry attempt1=4
+    _recount_calls = {"n": 0}
+
+    def _raising_recount(text: str) -> int:
+        # First call is the BASE recount (must succeed so the retry proceeds to
+        # attempt 1); every call after that (the post-candidate recount, right
+        # after attempt 1's patch lands) raises.
+        _recount_calls["n"] += 1
+        if _recount_calls["n"] == 1:
+            return 1
+        raise RuntimeError("compliance backend unreachable")
+
+    events: list = []
+    final, weaknesses = _runner_mod._run_editor_pass(
+        session=session,
+        base_client=client,
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: add an architecture diagram"],
+        opportunity_recount=_raising_recount,
+        max_rounds=1,
+    )
+    # No exception propagated (the call above completing at all proves it), and the
+    # mutated candidate never leaked into the returned/on-disk state.
+    assert final == before_art
+    assert art_file.read_text(encoding="utf-8") == before_art
+    assert weaknesses == ["w1"]
+
+
+def test_editor_structural_retry_not_invoked_for_plain_only_opportunities(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression guard for the split itself: an opportunity list with NO
+    structural-shaped item must never reach ``_editor_structural_retry`` — this
+    is what keeps the existing plain-opportunity soft-accept tests (which pass
+    "include a cost-benefit analysis" — no structural keyword) behaving exactly
+    as before the retry was added."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    called = {"n": 0}
+
+    def _spy(*a, **k):
+        called["n"] += 1
+        return a[4] if len(a) > 4 else k.get("scored_text"), []  # unused: gate should skip entirely
+
+    monkeypatch.setattr(_runner_mod, "_editor_structural_retry", _spy)
+    client = _StructuralRetryClient(patch_on_call=9999)
+    _runner_mod._run_editor_pass(
+        session=session,
+        base_client=client,
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=lambda _e: None,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: include a cost-benefit analysis"],
+        opportunity_recount=lambda t: 1,
+        max_rounds=1,
+    )
+    assert called["n"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# LLM-fallback structural classification (`_classify_structural_opportunity` / #
+# `_is_structural_opportunity`) — a regex keyword list is whack-a-mole         #
+# ("blueprint", "wireframe", "topology map" all miss it no matter how many     #
+# keywords get added); the fallback asks the SAME base_client the genuinely    #
+# open-ended question a fixed vocabulary structurally cannot answer.           #
+# --------------------------------------------------------------------------- #
+
+class _ScriptedClassifyClient:
+    """Returns a fixed one-word verdict for every ``chat`` call; counts calls."""
+
+    def __init__(self, verdict: str) -> None:
+        self.verdict = verdict
+        self.calls = 0
+
+    def chat(self, messages, tools=None):
+        from agentkit.types import ChatResult
+        self.calls += 1
+        return ChatResult(text=self.verdict, total_tokens=1)
+
+
+def test_classify_structural_opportunity_prompt_is_hardened(monkeypatch):
+    """Codex design-review hardening: the opportunity text is delimited and
+    explicitly marked as untrusted data (not instructions to follow), and a
+    handful of few-shot examples anchor the verdict for a weak local model —
+    all real content the prompt must actually contain, not just described in
+    a comment."""
+    from studio.runner import _classify_structural_opportunity
+    captured: dict = {}
+
+    class _CaptureClient:
+        def chat(self, messages, tools=None):
+            from agentkit.types import ChatResult
+            captured["prompt"] = messages[0]["content"]
+            return ChatResult(text="PLAIN", total_tokens=1)
+
+    _classify_structural_opportunity(_CaptureClient(), "add a blueprint of the system")
+    prompt = captured["prompt"]
+    assert "untrusted data" in prompt
+    assert '"""add a blueprint of the system"""' in prompt
+    assert "blueprint" in prompt and "STRUCTURAL" in prompt  # few-shot example present
+    assert "PLAIN" in prompt
+
+
+def test_classify_structural_opportunity_true_on_structural_verdict():
+    from studio.runner import _classify_structural_opportunity
+    client = _ScriptedClassifyClient("STRUCTURAL")
+    assert _classify_structural_opportunity(client, "add a blueprint of the pipeline") is True
+
+
+def test_classify_structural_opportunity_false_on_plain_verdict():
+    from studio.runner import _classify_structural_opportunity
+    client = _ScriptedClassifyClient("PLAIN")
+    assert _classify_structural_opportunity(client, "cover the security tradeoffs") is False
+
+
+def test_classify_structural_opportunity_fails_open_on_client_error():
+    from studio.runner import _classify_structural_opportunity
+
+    class _RaisingClient:
+        def chat(self, messages, tools=None):
+            raise RuntimeError("backend unreachable")
+
+    assert _classify_structural_opportunity(_RaisingClient(), "add a wireframe") is False
+
+
+def test_classify_structural_opportunity_false_on_no_client_or_empty_text():
+    from studio.runner import _classify_structural_opportunity
+    assert _classify_structural_opportunity(None, "add a blueprint") is False
+    assert _classify_structural_opportunity(_ScriptedClassifyClient("STRUCTURAL"), "") is False
+
+
+def test_is_structural_opportunity_regex_fast_path_skips_llm_call():
+    """Cost consciousness: a keyword match must NOT spend an LLM call at all —
+    the fallback classifier is never even constructed a client call for it."""
+    from studio.runner import _is_structural_opportunity
+    client = _ScriptedClassifyClient("PLAIN")  # would say PLAIN if asked — must never be asked
+    assert _is_structural_opportunity(client, "add an architecture diagram") is True
+    assert client.calls == 0
+
+
+def test_is_structural_opportunity_llm_fallback_catches_non_keyword_phrasing():
+    """The actual generalization this fallback exists for: phrasings the fixed
+    keyword vocabulary was never going to enumerate ("blueprint", "topology
+    map", "wireframe") still classify correctly via genuine LLM judgment."""
+    from studio.runner import _is_structural_opportunity
+    for phrase in (
+        "add a blueprint of the retry pipeline",
+        "include a topology map of the services",
+        "provide a wireframe of the dashboard",
+    ):
+        client = _ScriptedClassifyClient("STRUCTURAL")
+        assert _is_structural_opportunity(client, phrase) is True, phrase
+        assert client.calls == 1
+
+
+def test_is_structural_opportunity_llm_fallback_stays_plain_when_llm_says_so():
+    from studio.runner import _is_structural_opportunity
+    client = _ScriptedClassifyClient("PLAIN")
+    assert _is_structural_opportunity(client, "expand on the cost tradeoffs") is False
+    assert client.calls == 1
+
+
+def test_editor_structural_retry_fires_for_non_keyword_opportunity_via_llm_classification(
+    tmp_path, monkeypatch
+) -> None:
+    """End-to-end: an opportunity with NO regex keyword ("blueprint") still
+    reaches `_editor_structural_retry` when the classification call says
+    STRUCTURAL — proving the fallback actually wires into the real split, not
+    just the two helper functions in isolation."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    captured: dict = {}
+
+    def _spy(*, structural_opportunities, scored_text, **_k):
+        captured["structural_opportunities"] = structural_opportunities
+        return scored_text, ["w1"]
+
+    monkeypatch.setattr(_runner_mod, "_editor_structural_retry", _spy)
+
+    class _ClassifyThenNoopClient:
+        """First call (the classification probe) says STRUCTURAL; every call
+        after that (fix/toc/selfeval turns) is a no-op read_artifact loop."""
+        def __init__(self):
+            self.n = 0
+
+        def chat(self, messages, tools=None):
+            from agentkit.types import ChatResult
+            self.n += 1
+            if self.n == 1:
+                return ChatResult(text="STRUCTURAL", total_tokens=1)
+            return ChatResult(text="done", total_tokens=1)
+
+    _runner_mod._run_editor_pass(
+        session=session,
+        base_client=_ClassifyThenNoopClient(),
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=lambda _e: None,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: add a blueprint of the pipeline"],
+        opportunity_recount=lambda t: 1,
+        max_rounds=1,
+    )
+    assert captured["structural_opportunities"] == [
+        "Explicit alternative not included: add a blueprint of the pipeline"
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Regression: the keep/discard gate must compare against the ACTUAL epoch seed #
+# (the "prior best to beat"), never against this epoch's own fresh output.     #
+# --------------------------------------------------------------------------- #
+
+
+def test_epoch_gate_baseline_is_the_seed_not_this_epochs_own_output(
+    tmp_path, monkeypatch
+) -> None:
+    """Fix 1: `_seed_text` (the Phase-1 keep/discard baseline) reaching
+    ``epoch_gate.accept_epoch`` must be the ACTUAL carried-forward seed that
+    started this epoch — not the current on-disk artifact.md, which by the last
+    phase already contains THIS epoch's freshly-generated findings. The old code
+    rebound `_seed_text` to that on-disk read mid-epoch, so the gate compared the
+    epoch's output against itself and could never reject a regression.
+
+    We seed a distinctive prior, drive a full run whose fresh output injects
+    content the seed never had, and capture the `prior_text` the gate actually
+    receives.
+    """
+    import studio.epoch_gate as _gate_mod
+    from agentkit.types import ChatResult
+    from studio.rubric import DEFAULT_TEMPLATE, default_scoring_matrix
+    from studio.task_runs import TaskRun, TaskRunStore, base_identity, task_hash
+    from studio.tools import _fetch_cache
+
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path))
+    requirement = (
+        "1. Gather evidence about report quality.\n"
+        f"2. Write a research report about report quality. Run id: {tmp_path.name}."
+    )
+    thash = task_hash(base_identity(requirement))
+    # Distinctive seed: SEED_SENTINEL only ever appears in the seed, never in the
+    # fresh epoch output below.
+    seed_text = (
+        "# Seed Report\n\n## Executive Summary\n"
+        "SEED_SENTINEL_PRIOR_BASELINE — the prior report body."
+    )
+    TaskRunStore().record(TaskRun(
+        task_hash=thash,
+        session_id="prior",
+        version=1,
+        score=0.4,
+        weaknesses=["[document] Missing limitations."],
+        artifact_path="",
+        requirement=requirement,
+        result_text=seed_text,
+        config={"auto_improve": True, "max_epochs": 1},
+    ))
+    # Ground the fresh finding so it survives the grounding guard and is folded
+    # into artifact.md DURING the run (before the last-phase seed read). Without
+    # this the finding is dropped as unfetched and the on-disk artifact never
+    # differs from the seed — so the clobber bug would not manifest.
+    _fetch_cache["https://example.com/fresh|"] = (
+        "FRESH_EPOCH_ONLY new sentence found on the page", 48
+    )
+
+    class _FreshFindingClient:
+        # Emits a finding whose content (FRESH_EPOCH_ONLY) the seed never contained,
+        # so it is folded into the on-disk artifact this epoch — the value the buggy
+        # code would have leaked to the gate.
+        def chat(self, messages, tools=None) -> ChatResult:
+            return ChatResult(
+                text=(
+                    "RESEARCH_FINDING:\n"
+                    "ARTICLE_TITLE: Fresh\n"
+                    "URL: https://example.com/fresh\n"
+                    "PATCH_TARGET: ## Executive Summary\n"
+                    "QUOTE: FRESH_EPOCH_ONLY new sentence\n"
+                    "WHY: Adds detail this epoch.\n"
+                ),
+                total_tokens=5,
+            )
+
+    captured: dict[str, str] = {}
+
+    def _spy_accept_epoch(new_text, prior_text, prefer):
+        captured["prior"] = prior_text
+        captured["new"] = new_text
+        return True  # accept — behavior of the gate is irrelevant to this assertion
+
+    monkeypatch.setattr(_gate_mod, "accept_epoch", _spy_accept_epoch)
+
+    session = _make_session()
+    session.tools_enabled = False
+    session.hill_climb_config = {"auto_improve": True, "max_epochs": 1}
+    session.rubric_config = {
+        "template": DEFAULT_TEMPLATE,
+        "scoring_template": DEFAULT_TEMPLATE,
+        "scoring_matrix": default_scoring_matrix("general", DEFAULT_TEMPLATE),
+    }
+    events: list[StudioEvent] = []
+    runner = Runner(
+        session,
+        events.append,
+        client_factory=lambda _on_usage: _FreshFindingClient(),
+        embedder=None,
+        workspace_root=tmp_path,
+    )
+    runner.run(requirement)
+
+    assert "prior" in captured, "keep/discard gate never ran on the seeded run"
+    # The baseline the gate compared against is the SEED, not this epoch's output.
+    assert "SEED_SENTINEL_PRIOR_BASELINE" in captured["prior"]
+    assert "FRESH_EPOCH_ONLY" not in captured["prior"]
+
+
+# --------------------------------------------------------------------------- #
+# Regression: post-loop patch-apply uses the section-granular accept_rewrite   #
+# guard, not a whole-doc length floor — a shorter-but-better rewrite is kept.  #
+# --------------------------------------------------------------------------- #
+
+
+def test_postloop_guard_accepts_shorter_but_improved_rewrite() -> None:
+    """Fix 2: the post-loop patch-apply path swapped its crude
+    ``len(new) >= len(seed)`` floor for ``accept_rewrite`` (the same guard the
+    per-phase writeback uses). This proves the behavioral change: a legitimately
+    shorter rewrite (dedup / synthesis replacing verbose quote-dumping) that keeps
+    every content-bearing section is now ACCEPTED, whereas the old length floor
+    would have REJECTED it purely for being shorter.
+    """
+    from agentkit.artifacts.sections import accept_rewrite
+
+    old = (
+        "# Report\n\n"
+        "## Findings\n"
+        "Redis is fast. Redis is fast. Redis is fast (verbose duplicated quote-dump).\n\n"
+        "## Recommendation\n"
+        "Use Redis for the cache tier because of its latency profile.\n"
+    )
+    # Dedup + synthesis: shorter, but no section is gutted — both headings keep content.
+    new = (
+        "# Report\n\n"
+        "## Findings\n"
+        "Redis is fast.\n\n"
+        "## Recommendation\n"
+        "Use Redis for the cache tier.\n"
+    )
+
+    assert len(new) < len(old)
+    # Old crude guard would have rejected the shorter doc:
+    assert not (len(new) >= len(old))
+    # New guard keeps it — no content-bearing section was deleted or gutted:
+    assert accept_rewrite(old, new) is True
+
+    # And it still blocks a real regression (a section gutted to its bare heading):
+    gutted = "# Report\n\n## Findings\nRedis is fast.\n\n## Recommendation\n"
+    assert accept_rewrite(old, gutted) is False

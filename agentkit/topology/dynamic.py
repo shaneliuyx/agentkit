@@ -30,6 +30,7 @@ control flow, no mutation of the input ``Plan``.
 
 from __future__ import annotations
 
+import contextvars
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -258,7 +259,12 @@ _DEFAULT_PEERS = 3
 # (which only bounds concurrency). Conflating the two was the 2026-06-27
 # gap-flood bug: a pool capped at 5 still spawned 18 spokes because the spoke
 # count came from ``_facets``/item-count, never from the pool size.
-_MAX_SPOKES: int | None = None
+#: Per-call, NOT a module global: two run_plan() calls on different threads (e.g.
+#: concurrent Studio sessions) each set their own value, so one run's sizing can't
+#: overwrite another's mid-run. A fresh thread starts with the default. See run_plan().
+_max_spokes_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "agentkit_max_spokes", default=None
+)
 
 
 def _spoke_cap() -> int:
@@ -268,7 +274,8 @@ def _spoke_cap() -> int:
     a facet is "just a prompt-steering nudge, not load-bearing logic" (see
     ``_facets``), so 3 nudges is a sane unbounded-caller default.
     """
-    return _MAX_SPOKES if _MAX_SPOKES is not None else _DEFAULT_PEERS
+    m = _max_spokes_var.get()
+    return m if m is not None else _DEFAULT_PEERS
 
 
 # Optional injected reducer for STAR fan-out: a callable taking the worker
@@ -277,7 +284,11 @@ def _spoke_cap() -> int:
 # consolidation — e.g. Studio's section-aware merge/refine/review against each
 # section's weakness list (DESIGN §4.5) — without agentkit core learning about
 # sections or weaknesses. The reducer is a black box from core's point of view.
-_REDUCER: Callable[[list[str]], tuple[str, int]] | None = None
+#: Per-call (contextvar, not module global — see _max_spokes_var): the injected
+#: STAR/fan-out reducer for THIS run_plan() call, isolated across concurrent threads.
+_reducer_var: contextvars.ContextVar[Callable[[list[str]], tuple[str, int]] | None] = (
+    contextvars.ContextVar("agentkit_reducer", default=None)
+)
 _PIPELINE_STAGES = ("Outline the approach.", "Develop the details.",
                     "Produce the final result.")
 
@@ -369,6 +380,7 @@ class SingleStrategy:
         prompt = _with_upstream(step.description, upstream)
         text, tok = _chat(client, prompt)
         agent_io = [_agent_record(prompt, text, tok)]
+        _REDUCER = _reducer_var.get()  # per-call reducer (finding 2)
         if _REDUCER is not None:
             # §4b SINGLE reducer = IDENTITY fold: route the lone draft through the shared
             # assemble+verify reducer (e.g. Studio's additive section merge + coverage check)
@@ -401,6 +413,7 @@ class StarStrategy:
             tokens += tok
             drafts.append(text)
             agent_io.append(_agent_record(f"{base}\n\nFocus specifically on: {facet}", text, tok))
+        _REDUCER = _reducer_var.get()  # per-call reducer (finding 2)
         if _REDUCER is not None:
             # Orchestrator-owned consolidation (§4.5: section-aware merge/refine/
             # review). Core stays domain-free — it just hands over the worker drafts.
@@ -461,6 +474,7 @@ class MeshStrategy:
             revised.append(text)
             agent_io.append(_agent_record(prompt, text, tok))
 
+        _REDUCER = _reducer_var.get()  # per-call reducer (finding 2)
         if _REDUCER is not None:
             # Orchestrator-owned consolidation (§4b: one shared assemble+verify reducer for
             # every fan-out topology, not STAR-only). The reducer sees the debated peer drafts.
@@ -494,6 +508,7 @@ class PipelineStrategy:
             _charge(budget, tok)
             tokens += tok
             agent_io.append(_agent_record(prompt, carry, tok))
+        _REDUCER = _reducer_var.get()  # per-call reducer (finding 2)
         if _REDUCER is not None:
             # §4b PIPELINE reducer = TERMINAL-STAGE CAPTURE: sequential stages can't
             # section-partition, so the contract is "capture the final stage + verify
@@ -516,6 +531,8 @@ class MapStrategy:
         self, client: LLMClient, step: PlanStep, upstream: str, *,
         budget: FanoutBudget | None,
     ) -> tuple[str, int, int, list[dict]]:
+        _REDUCER = _reducer_var.get()      # per-call reducer (finding 2)
+        _MAX_SPOKES = _max_spokes_var.get()  # per-call breadth cap (finding 2)
         items = _extract_items(upstream)
         if not items:
             foci = _worker_foci(step, _spoke_cap())
@@ -692,54 +709,65 @@ def run_plan(
     Raises:
         BudgetExceeded: if a ``budget`` ceiling is crossed mid-fan-out.
     """
-    global _POOL_WORKERS, _MAX_SPOKES, _REDUCER
-    _POOL_WORKERS = max_workers      # concurrency lever (thread pool size)
-    _MAX_SPOKES = max_agents         # breadth lever (spoke COUNT cap) — distinct
-    _REDUCER = reducer               # optional injected STAR consolidation (§4.5)
-    t0 = time.perf_counter()
-    outputs: dict[str, str] = {}
-    runs: list[StepRun] = []
-    total_tokens = 0
+    # Finding 2: this per-call config lives in contextvars, NOT module globals, so
+    # two run_plan() calls on different threads (concurrent Studio sessions) can't
+    # overwrite each other's sizing/reducer mid-run. reset() on exit restores the
+    # parent's values, making even nested calls on one thread safe.
+    _tok_pool = _pool_workers_var.set(max_workers)      # concurrency lever (pool size)
+    _tok_spokes = _max_spokes_var.set(max_agents)       # breadth lever (spoke COUNT cap)
+    _tok_reducer = _reducer_var.set(reducer)            # injected STAR consolidation (§4.5)
+    try:
+        t0 = time.perf_counter()
+        outputs: dict[str, str] = {}
+        runs: list[StepRun] = []
+        total_tokens = 0
 
-    # depends_on order: plan.steps is already topologically sorted by plan(),
-    # but we honour deps explicitly to be robust to any ordering.
-    for step in _topo_order(plan.steps):
-        upstream = "\n\n".join(
-            f"[{dep}] {outputs.get(dep, '')}" for dep in step.depends_on
-            if outputs.get(dep)
+        # depends_on order: plan.steps is already topologically sorted by plan(),
+        # but we honour deps explicitly to be robust to any ordering.
+        for step in _topo_order(plan.steps):
+            upstream = "\n\n".join(
+                f"[{dep}] {outputs.get(dep, '')}" for dep in step.depends_on
+                if outputs.get(dep)
+            )
+            topology = step.topology or SINGLE
+            strategy = _STRATEGIES.get(topology, _STRATEGIES[SINGLE])
+            st = time.perf_counter()
+            text, n_agents, tokens, agent_io = strategy.run(client, step, upstream, budget=budget)
+            outputs[step.id] = text
+            total_tokens += tokens
+            runs.append(StepRun(
+                step_id=step.id,
+                description=step.description,
+                topology=topology,
+                output=text,
+                n_agents=n_agents,
+                tokens=tokens,
+                wall_s=time.perf_counter() - st,
+                agent_io=tuple(agent_io),
+            ))
+
+        return DynamicPlanResult(
+            task=plan.task,
+            runs=tuple(runs),
+            total_tokens=total_tokens,
+            wall_s=time.perf_counter() - t0,
         )
-        topology = step.topology or SINGLE
-        strategy = _STRATEGIES.get(topology, _STRATEGIES[SINGLE])
-        st = time.perf_counter()
-        text, n_agents, tokens, agent_io = strategy.run(client, step, upstream, budget=budget)
-        outputs[step.id] = text
-        total_tokens += tokens
-        runs.append(StepRun(
-            step_id=step.id,
-            description=step.description,
-            topology=topology,
-            output=text,
-            n_agents=n_agents,
-            tokens=tokens,
-            wall_s=time.perf_counter() - st,
-            agent_io=tuple(agent_io),
-        ))
-
-    return DynamicPlanResult(
-        task=plan.task,
-        runs=tuple(runs),
-        total_tokens=total_tokens,
-        wall_s=time.perf_counter() - t0,
-    )
+    finally:
+        _pool_workers_var.reset(_tok_pool)
+        _max_spokes_var.reset(_tok_spokes)
+        _reducer_var.reset(_tok_reducer)
 
 
 # ---------------------------------------------------------------------------
 # -- helpers ----------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-#: Worker count for fan-out pools (set by run_plan; module-level so the small
-#: pure helpers don't need it threaded through every signature).
-_POOL_WORKERS = 4
+#: Worker count for fan-out pools (set per-call by run_plan via contextvar so the
+#: small pure helpers don't need it threaded through every signature, while staying
+#: isolated across concurrent run_plan() calls — finding 2). Default 4.
+_pool_workers_var: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "agentkit_pool_workers", default=4
+)
 
 
 def _with_upstream(description: str, upstream: str) -> str:
@@ -763,7 +791,7 @@ def _parallel_map(fn, items: list) -> list:
     """
     if len(items) <= 1:
         return [fn(x) for x in items]
-    with ThreadPoolExecutor(max_workers=min(_POOL_WORKERS, len(items))) as ex:
+    with ThreadPoolExecutor(max_workers=min(_pool_workers_var.get(), len(items))) as ex:
         return list(ex.map(fn, items))
 
 

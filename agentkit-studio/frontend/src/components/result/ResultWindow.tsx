@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { ReviewStatus, Scorecard100 } from "../../api/types";
 import { useRunStore } from "../../store/runStore";
 import "./result.css";
 
@@ -19,6 +20,48 @@ interface ChatMessage {
 
 const API = "/api";
 
+function fmtScore(value: number | undefined, max = 100) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(value % 1 ? 1 : 0)}/${max}`;
+}
+
+function ScorecardBlock({ scorecard }: { scorecard: Scorecard100 }) {
+  const max = scorecard.max_score || 100;
+  return (
+    <div className="chat-scorecard">
+      <div className="chat-scorecard-head mono">
+        Scorecard {fmtScore(scorecard.score, max)}
+        <span className="muted"> — base {fmtScore(scorecard.base_score * 100, 100)}</span>
+      </div>
+      <ul className="chat-scorecard-list">
+        {scorecard.categories.map((row) => (
+          <li key={row.category} className="chat-scorecard-row mono">
+            <span>{row.category}</span>
+            <span>{fmtScore(row.score, row.points)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ReviewBlock({ review }: { review: ReviewStatus }) {
+  if (!review.required) return null;
+  return (
+    <div className="chat-review">
+      <div className="chat-review-head mono">
+        {review.publish_decision.replace("_", " ")}
+        <span className="muted"> — not reviewed</span>
+      </div>
+      <ul className="chat-review-list">
+        {review.reasons.map((reason) => (
+          <li key={reason} className="mono">{reason}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function ResultWindow() {
   const status = useRunStore((s) => s.status);
   const result = useRunStore((s) => s.result);
@@ -26,6 +69,7 @@ export function ResultWindow() {
   const task = useRunStore((s) => s.task);
   const setContinue = useRunStore((s) => s.setContinue);
   const hillClimb = useRunStore((s) => s.hillClimb);
+  const evidence = useRunStore((s) => s.evidence);
   // Remaining weaknesses come from the latest hill-climb epoch event — rendered BELOW the
   // report as a separate block, never concatenated into result.result (the deliverable
   // document stays clean; these are next-epoch improvement targets, not report content).
@@ -174,6 +218,24 @@ export function ResultWindow() {
                 {result.result}
               </ReactMarkdown>
             </div>
+            {result.scorecard_100 && (
+              <ScorecardBlock scorecard={result.scorecard_100} />
+            )}
+            {result.review && (
+              <ReviewBlock review={result.review} />
+            )}
+            {evidence?.matrix && (
+              <div className="chat-evidence">
+                <div className="chat-evidence-head mono">
+                  Evidence matrix ({evidence.items.length})
+                </div>
+                <div className="chat-evidence-body markdown-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {evidence.matrix}
+                  </ReactMarkdown>
+                </div>
+              </div>
+            )}
             {remaining.length > 0 && (
               <div className="chat-weaknesses">
                 <div className="chat-weaknesses-head mono">

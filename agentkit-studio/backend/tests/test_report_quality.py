@@ -1,7 +1,10 @@
 from studio.report_quality import (
+    build_review_status,
     build_publish_revision_prompt,
     build_revision_evidence_text,
+    combined_publish_issues,
     evaluate_publish_readiness,
+    synthesis_depth_issues,
 )
 
 
@@ -10,6 +13,41 @@ def test_non_report_request_passes_publish_gate() -> None:
 
     assert result.publish_ready is True
     assert result.issues == ()
+
+
+def test_review_status_requires_review_for_high_impact_or_weak_evidence() -> None:
+    high = build_review_status(
+        "Write a policy research report about patient privacy compliance.",
+        evidence_count=0,
+        weak_evidence_count=1,
+        scorecard={"score": 70, "max_score": 100, "categories": []},
+        publish_issues=["[publish-gate] Final output has URLs but none were verified."],
+        loopdoctor_checks=[{"name": "safe_actions", "status": "pass"}],
+    )
+
+    assert high["required"] is True
+    assert high["status"] == "REVIEW_REQUIRED"
+    assert high["publish_decision"] == "REVIEW_REQUIRED"
+    assert "high-impact topic" in high["reasons"]
+    assert "no accepted evidence matrix rows" in high["reasons"]
+    assert "weak or uncorroborated evidence" in high["reasons"]
+    assert "publish/readiness issues" in high["reasons"]
+
+
+def test_review_status_does_not_block_low_risk_generic_tasks() -> None:
+    low = build_review_status(
+        "compare redis and postgres",
+        evidence_count=0,
+        scorecard={"score": 20, "max_score": 100, "categories": []},
+    )
+
+    assert low == {
+        "required": False,
+        "status": "NOT_REQUIRED",
+        "publish_decision": "PUBLISH_READY",
+        "reviewed": False,
+        "reasons": [],
+    }
 
 
 def test_report_without_requested_evidence_or_topic_fails() -> None:
@@ -62,6 +100,84 @@ preserving governance and rollback paths.
     )
 
     assert result.publish_ready is True
+
+
+def test_publish_gate_ignores_internal_structure_instruction_terms() -> None:
+    requirement = (
+        "Write a research report about catalog management for local and remote agent loops "
+        "and skills in a generic research report generator. Include citations, "
+        "implementation risks, and actionable recommendations.\n\n"
+        "Structure the deliverable with these sections (use them as top-level headings, "
+        "in order):\n- Executive Summary\n- References\n\n"
+        "Focus specifically on: ASSIGNED SECTIONS:\n- ## Executive Summary\n\n"
+        "Unified scoring requirements for this task:\n"
+        "- The original deterministic rubric signals are the base measurements.\n"
+        "- The frozen scoring matrix below defines the profile/template-specific scorecard.\n"
+        "- Scope and research framing (10.5 pts): satisfy via structure\n"
+        "- Citation integrity (14.7 pts): satisfy via verification"
+    )
+    text = """
+## Executive Summary
+
+Catalog management for local and remote agent loops needs versioned skill
+registries, implementable validation controls, and concrete recommendations for
+rollback and permissions. The report cites a fetched source for the central
+claim (https://example.com/catalog).
+In a generic research report generator, that catalog also needs to preserve
+which loop, skill, and source produced each section so reducers can verify the
+final report instead of trusting free-form prose.
+
+## Implementation Risks
+
+Implementation risks include stale remote skills, local permission drift,
+schema incompatibility, and missing audit records. Teams should validate imports,
+pin versions, and keep a rollback path for every catalog entry.
+Recommended next steps are to sign remote entries, keep local fallbacks for
+offline execution, and reject skills whose declared inputs or permissions do not
+match the selected report template.
+
+## References
+
+- https://example.com/catalog
+"""
+
+    result = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/catalog"],
+    )
+
+    assert result.publish_ready is True
+
+
+def test_combined_publish_issues_include_artifact_lints() -> None:
+    requirement = (
+        "Write a research report about catalog management for agent loops. "
+        "Use citations and fetched evidence."
+    )
+    long_uncited_section = " ".join(
+        f"catalog management evidence for agent loops statement {i}" for i in range(170)
+    )
+    text = f"""
+## Evidence and Analysis
+
+{long_uncited_section}
+
+## References
+
+- https://example.com/catalog
+"""
+
+    publish = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/catalog"],
+    )
+
+    issues = combined_publish_issues(publish, text)
+
+    assert publish.publish_ready is True
+    assert any("Long evidence-bearing section has no citation URL" in issue for issue in issues)
 
 
 def test_duplicate_report_sections_fail_publish_gate() -> None:
@@ -230,3 +346,67 @@ def test_revision_evidence_text_is_bounded() -> None:
     )
 
     assert evidence.endswith("[truncated]")
+
+
+def test_synthesis_depth_flags_citation_only_report() -> None:
+    evidence = """
+RESEARCH_FINDING:
+ARTICLE_TITLE: Agent Registry
+URL: https://example.com/registry
+QUOTE: Registry storage keeps agent metadata and capabilities.
+WHY: Explains the catalog management substrate.
+"""
+    text = """
+## Executive Summary
+
+Catalogs need a registry. Source: https://example.com/registry
+
+## References
+
+- https://example.com/registry
+"""
+
+    issues = synthesis_depth_issues(text, evidence)
+
+    assert any("lacks analysis" in issue for issue in issues)
+    assert any("lacks limitations" in issue for issue in issues)
+
+
+def test_combined_publish_issues_include_synthesis_depth() -> None:
+    text = """
+## Executive Summary
+
+Catalog management should track loop and skill entries using a registry. The registry source
+describes metadata and capabilities, so this report cites it as evidence for the catalog need.
+Additional prose keeps the artifact long enough to be structurally complete while still avoiding
+any real interpretation of what the evidence changes for implementation. https://example.com/registry
+
+## References
+
+- https://example.com/registry
+"""
+    publish = evaluate_publish_readiness(
+        "Write a concise research report about catalog management. Use fetched evidence.",
+        text,
+        verified_urls=["https://example.com/registry"],
+    )
+    evidence = "RESEARCH_FINDING:\nURL: https://example.com/registry\nQUOTE: metadata and capabilities"
+
+    issues = combined_publish_issues(publish, text, evidence)
+
+    assert any("lacks analysis" in issue for issue in issues)
+    assert any("lacks limitations" in issue for issue in issues)
+
+
+def test_publish_revision_prompt_requires_synthesis_and_reflection() -> None:
+    prompt = build_publish_revision_prompt(
+        "Write a report. Use fetched evidence.",
+        "Draft with https://example.com/source",
+        ["[publish-gate] Final report lacks analysis, implications, or recommendations."],
+        "RESEARCH_FINDING:\nURL: https://example.com/source\nQUOTE: useful detail",
+    )
+
+    assert "Evidence-Backed Analysis" in prompt
+    assert "trade-offs" in prompt
+    assert "Limitations, Caveats, or Reflection" in prompt
+    assert "Use every relevant fetched finding" in prompt

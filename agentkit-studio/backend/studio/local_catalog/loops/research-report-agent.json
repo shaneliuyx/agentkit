@@ -1,0 +1,28 @@
+{
+  "slug": "research-report-agent",
+  "source": "local",
+  "title": "Research Report Agent",
+  "description": "Plan, retrieve, verify, synthesize, review, and package an evidence-backed research report with citations, an evidence matrix, a quality scorecard, limitations, and a review checklist.",
+  "useWhen": "Use when the task is to produce a cited research report: technical deep dive, market or competitive analysis, policy brief, literature review, or an evidence-backed comparison or explainer.",
+  "category": {"slug": "research", "label": "Research"},
+  "keywords": [
+    "research", "report", "evidence", "citation", "citations", "sources",
+    "analysis", "limitations", "scorecard", "package", "literature review",
+    "comparison", "technical deep dive", "brief"
+  ],
+  "steps": [
+    "Intake and scope the topic, audience, purpose, constraints, and output format.",
+    "Draft the table of contents, research questions, source requirements, and deliverables.",
+    "Retrieve authoritative sources and record source notes.",
+    "Verify claims against fetched sources and build an evidence matrix.",
+    "Draft the report with analysis, tables, and diagrams or examples where useful.",
+    "Apply quality scoring and hard-fail publish checks.",
+    "Revise until the score and publish gate pass or the blockers are explicit.",
+    "Package the report, evidence matrix, scorecard, limitations, references, and review checklist."
+  ],
+  "verification": {
+    "title": "Cited, verified, packaged",
+    "detail": "Every major claim is backed by a verified source, limitations are stated, the scorecard passes the publish gate, and the run exports a complete research package."
+  },
+  "why": "Separating retrieval and verification from synthesis keeps evidence auditable and stops the model from citing unverified or fabricated sources."
+}

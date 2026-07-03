@@ -113,7 +113,8 @@ def test_seeded_decomposer_empty_falls_back() -> None:
 
 
 def test_load_degrades_on_fetch_failure(tmp_path: Path) -> None:
-    """A failing fetch with no cache yields an empty catalog, never raises."""
+    """A failing fetch with no cache never raises; remote loops degrade to empty while
+    bundled local loops stay available (resilient discovery)."""
 
     def boom(_url: str) -> str:
         raise RuntimeError("network down")
@@ -121,8 +122,11 @@ def test_load_degrades_on_fetch_failure(tmp_path: Path) -> None:
     client = CatalogClient.load(
         cache_path=tmp_path / "missing.json", fetcher=boom
     )
-    assert client.loops == []
-    assert client.find("anything") == []
+    # only bundled local loops survive; no remote loops
+    assert all(lp.get("source") == "local" for lp in client.loops)
+    assert client.get("research-report-agent") is not None
+    # a query matching no loop still returns nothing
+    assert client.find("zzz nonexistent topic qqq") == []
 
 
 def test_load_uses_injected_fetcher(tmp_path: Path) -> None:
@@ -132,3 +136,26 @@ def test_load_uses_injected_fetcher(tmp_path: Path) -> None:
     client = CatalogClient.load(cache_path=tmp_path / "c.json", fetcher=lambda _u: payload)
     assert client.get("x") is not None
     assert (tmp_path / "c.json").exists()  # cached
+
+
+# --- Workstream I: local research-report loop is discoverable + seedable ---
+
+def test_find_research_report_local_loop():
+    from studio.loops import CatalogClient
+    c = CatalogClient(data={"loops": []})
+    assert c.get("research-report-agent") is not None
+    matches = c.find("write a cited research report with sources, analysis, and limitations")
+    assert any(m.id == "research-report-agent" for m in matches)
+
+
+def test_seed_research_report_loop_builds_valid_plan():
+    from studio.loops import CatalogClient
+    c = CatalogClient(data={"loops": []})
+    seed = c.adapt(c.get("research-report-agent"))
+    assert len(seed) == 8
+    assert all(str(s.get("description") or s.get("task") or s).strip() for s in seed)
+
+
+def test_include_local_false_excludes_local_loop():
+    from studio.loops import CatalogClient
+    assert CatalogClient(data={"loops": []}, include_local=False).get("research-report-agent") is None

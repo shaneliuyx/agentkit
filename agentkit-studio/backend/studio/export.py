@@ -18,6 +18,7 @@ This module is PURE: it serializes a ``RunSnapshot`` value and touches nothing.
 
 from __future__ import annotations
 
+import html
 import re
 from typing import Any
 
@@ -118,7 +119,7 @@ def run_to_loop(snapshot: RunSnapshot) -> dict[str, Any]:
         if bounded
         else " Set a token ceiling before publishing to bound fan-out spend."
     )
-    return {
+    loop = {
         "slug": _slugify(title),
         "title": title,
         "category": {"slug": "engineering", "label": "Engineering"},
@@ -141,3 +142,309 @@ def run_to_loop(snapshot: RunSnapshot) -> dict[str, Any]:
         ),
         "keywords": _keywords(requirement, steps),
     }
+    if snapshot.evidence_matrix:
+        loop["evidenceMatrix"] = snapshot.evidence_matrix
+    return loop
+
+
+def run_to_research_package(snapshot: RunSnapshot) -> dict[str, Any]:
+    """Serialize a finished run into the minimal research-report package.
+
+    JSON manifest + file contents first; ZIP can wait until the schema proves useful.
+    """
+    loop = run_to_loop(snapshot)
+    scorecard = snapshot.scorecard_100 or {}
+    evidence = snapshot.evidence_matrix or ""
+    evidence_rows = _evidence_rows_from_matrix(evidence)
+    files = {
+        "research_report.md": snapshot.result or "",
+        "research_report.html": _markdown_to_html(snapshot.result or ""),
+        "evidence_matrix.md": evidence,
+        "evidence_matrix.json": evidence_rows,
+        "scorecard.json": scorecard,
+        "metrics.json": snapshot.metrics or {},
+        "human_review_checklist.md": _human_review_checklist(snapshot, scorecard, evidence),
+        "run_manifest.json": {
+            "packageVersion": 1,
+            "requirement": snapshot.requirement,
+            "cancelled": snapshot.cancelled,
+            "budgetCeiling": snapshot.budget_ceiling,
+            "steps": snapshot.plan_steps,
+            "topology": snapshot.topology,
+            "loopdoctorChecks": snapshot.loopdoctor_checks,
+            "hasEvidenceMatrix": bool(evidence.strip()),
+            "evidenceCount": len(evidence_rows),
+            "hasScorecard": bool(scorecard),
+            "review": _review(snapshot),
+            "metrics": snapshot.metrics or {},
+            "stopReport": (snapshot.metrics or {}).get("stop_report", {}),
+            "rendererStatus": {
+                "html": "rendered",
+                "pdf": "unavailable",
+                "diagrams": "unavailable",
+            },
+            "exportedFiles": [],
+        },
+        "agent_trace.jsonl": snapshot.agent_trace_jsonl or "",
+        "checkpoints.jsonl": snapshot.checkpoints_jsonl or "",
+        "source_notes.json": _source_notes_from_evidence(evidence_rows),
+        "requirements.txt": "# No package-specific runtime dependencies are required.\n",
+        "research_agent_demo.py": _research_agent_demo_py(),
+        "research_agent_demo.pseudo": _research_agent_demo_pseudo(),
+        "research_agent_demo_output.txt": _research_agent_demo_output(snapshot, evidence_rows),
+        "loop.json": loop,
+    }
+    files["run_manifest.json"]["exportedFiles"] = list(files)
+    return {
+        "manifest": {
+            "title": loop["title"],
+            "packageVersion": 1,
+            "format": "research_package_json",
+            "review": _review(snapshot),
+            "rendererStatus": files["run_manifest.json"]["rendererStatus"],
+            "files": list(files),
+        },
+        "files": files,
+    }
+
+
+def _human_review_checklist(
+    snapshot: RunSnapshot, scorecard: dict[str, Any], evidence: str
+) -> str:
+    review = _review(snapshot)
+    checks = [
+        f"- [ ] Review final report against task: {snapshot.requirement.strip()}",
+        "- [ ] Confirm cited evidence supports every major claim.",
+    ]
+    if review.get("required"):
+        checks.append("- [ ] Complete required human review before publishing.")
+    if not evidence.strip():
+        checks.append("- [ ] Add or verify the evidence matrix before publishing.")
+    if scorecard:
+        checks.append("- [ ] Review low-scoring scorecard categories and unresolved weaknesses.")
+    if any(c.get("status") != "pass" for c in snapshot.loopdoctor_checks):
+        checks.append("- [ ] Resolve non-passing Loop Doctor checks.")
+    return "# Human Review Checklist\n\n" + "\n".join(checks) + "\n"
+
+
+def _review(snapshot: RunSnapshot) -> dict[str, Any]:
+    if snapshot.review:
+        return snapshot.review
+    from studio.report_quality import build_review_status
+
+    return build_review_status(
+        snapshot.requirement,
+        evidence_count=_markdown_table_row_count(snapshot.evidence_matrix),
+        scorecard=snapshot.scorecard_100,
+        loopdoctor_checks=snapshot.loopdoctor_checks,
+    )
+
+
+def _markdown_table_row_count(markdown: str) -> int:
+    rows = [
+        line for line in (markdown or "").splitlines()
+        if line.strip().startswith("|") and "---" not in line
+    ]
+    return max(0, len(rows) - 1)
+
+
+def _markdown_to_html(markdown: str) -> str:
+    """Render enough Markdown for an offline report bundle."""
+    lines = (markdown or "").splitlines()
+    out: list[str] = [
+        "<!doctype html>",
+        '<html lang="en">',
+        "<head>",
+        '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        "<title>Research Report</title>",
+        "<style>body{font-family:system-ui,-apple-system,sans-serif;line-height:1.5;max-width:960px;margin:32px auto;padding:0 20px}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #d0d7de;padding:6px 8px;text-align:left;vertical-align:top}pre{background:#f6f8fa;padding:12px;overflow:auto}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}</style>",
+        "</head>",
+        "<body>",
+    ]
+    paragraph: list[str] = []
+    list_open = False
+    fence_open = False
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            out.append(f"<p>{html.escape(' '.join(paragraph))}</p>")
+            paragraph.clear()
+
+    def close_list() -> None:
+        nonlocal list_open
+        if list_open:
+            out.append("</ul>")
+            list_open = False
+
+    table_lines: list[str] = []
+
+    def flush_table() -> None:
+        if not table_lines:
+            return
+        rows = [_split_table_row(line) for line in table_lines if "---" not in line]
+        if rows:
+            out.append("<table>")
+            header, *body = rows
+            out.append("<thead><tr>" + "".join(f"<th>{html.escape(cell)}</th>" for cell in header) + "</tr></thead>")
+            if body:
+                out.append("<tbody>")
+                for row in body:
+                    out.append("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>")
+                out.append("</tbody>")
+            out.append("</table>")
+        table_lines.clear()
+
+    for raw in lines:
+        line = raw.rstrip()
+        if line.startswith("```"):
+            flush_paragraph()
+            close_list()
+            flush_table()
+            if fence_open:
+                out.append("</code></pre>")
+                fence_open = False
+            else:
+                out.append("<pre><code>")
+                fence_open = True
+            continue
+        if fence_open:
+            out.append(html.escape(line))
+            continue
+        if line.strip().startswith("|"):
+            flush_paragraph()
+            close_list()
+            table_lines.append(line)
+            continue
+        flush_table()
+        if not line.strip():
+            flush_paragraph()
+            close_list()
+            continue
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading:
+            flush_paragraph()
+            close_list()
+            level = len(heading.group(1))
+            out.append(f"<h{level}>{html.escape(heading.group(2).strip())}</h{level}>")
+            continue
+        bullet = re.match(r"^[-*]\s+(.+)$", line)
+        if bullet:
+            flush_paragraph()
+            if not list_open:
+                out.append("<ul>")
+                list_open = True
+            out.append(f"<li>{html.escape(bullet.group(1).strip())}</li>")
+            continue
+        paragraph.append(line.strip())
+    flush_paragraph()
+    close_list()
+    flush_table()
+    if fence_open:
+        out.append("</code></pre>")
+    out.extend(["</body>", "</html>"])
+    return "\n".join(out)
+
+
+def _split_table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _evidence_rows_from_matrix(markdown: str) -> list[dict[str, str]]:
+    lines = [
+        line for line in (markdown or "").splitlines()
+        if line.strip().startswith("|") and "---" not in line
+    ]
+    if len(lines) < 2:
+        return []
+    headers = [re.sub(r"[^a-z0-9]+", "_", h.lower()).strip("_") for h in _split_table_row(lines[0])]
+    rows: list[dict[str, str]] = []
+    for line in lines[1:]:
+        cells = _split_table_row(line)
+        row = {headers[i]: cells[i] if i < len(cells) else "" for i in range(len(headers))}
+        rows.append(row)
+    return rows
+
+
+def _source_notes_from_evidence(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    notes: list[dict[str, str]] = []
+    for row in rows:
+        source = row.get("source", "")
+        url_match = re.search(r"\((https?://[^)]+)\)", source)
+        notes.append({
+            "claim": row.get("claim", ""),
+            "source": re.sub(r"^\[|\]\(https?://[^)]+\)$", "", source),
+            "url": url_match.group(1) if url_match else source if source.startswith("http") else "",
+            "status": row.get("status", ""),
+            "used_in": row.get("used_in", ""),
+            "caveats": row.get("caveats", ""),
+        })
+    return notes
+
+
+def _research_agent_demo_py() -> str:
+    return '''"""Offline miniature of the Studio research-report loop."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+
+def plan(topic: str) -> list[str]:
+    return ["scope", "collect evidence", "draft report", "validate", "package"]
+
+
+def observe(tool: str, summary: str) -> dict[str, str]:
+    return {"tool": tool, "status": "ok", "summary": summary}
+
+
+def validate(report: str, evidence: list[dict[str, str]]) -> list[str]:
+    issues = []
+    if not report.strip():
+        issues.append("empty report")
+    if not evidence:
+        issues.append("missing evidence")
+    return issues
+
+
+def run(topic: str, out_dir: str = "demo_output") -> dict[str, object]:
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    steps = plan(topic)
+    evidence = [{"claim": topic, "source": "provided input", "status": "demo"}]
+    report = "# Demo Research Report\\n\\n" + topic + "\\n"
+    trace = [observe("demo_source", "used provided topic as sample evidence")]
+    issues = validate(report, evidence)
+    (out / "research_report.md").write_text(report, encoding="utf-8")
+    (out / "source_notes.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+    (out / "agent_trace.jsonl").write_text(
+        "".join(json.dumps(row) + "\\n" for row in trace),
+        encoding="utf-8",
+    )
+    return {"steps": steps, "issues": issues, "files": sorted(p.name for p in out.iterdir())}
+
+
+if __name__ == "__main__":
+    print(json.dumps(run("sample research topic"), indent=2))
+'''
+
+
+def _research_agent_demo_pseudo() -> str:
+    return """PLAN topic into bounded steps.
+OBSERVE each allowed tool result as compact trace data.
+VALIDATE report text against available source notes.
+CHECKPOINT report, source notes, and trace files.
+PACKAGE the final markdown, evidence, metrics, and review checklist.
+"""
+
+
+def _research_agent_demo_output(snapshot: RunSnapshot, rows: list[dict[str, str]]) -> str:
+    title = _title(snapshot.requirement)
+    return (
+        "Demo run summary\n"
+        f"- topic: {title}\n"
+        "- steps: scope, collect evidence, draft report, validate, package\n"
+        f"- evidence_rows: {len(rows)}\n"
+        "- files: research_report.md, source_notes.json, agent_trace.jsonl\n"
+    )

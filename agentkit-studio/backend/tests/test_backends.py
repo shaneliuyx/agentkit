@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from studio.backends import (
+    build_embedder,
     list_embedders,
     list_profiles,
     resolve_backend,
@@ -50,3 +51,10 @@ def test_list_embedders_shape() -> None:
     embs = list_embedders()
     assert embs, "embedder menu must be non-empty"
     assert embs[0]["model"]
+
+
+def test_empty_embedder_spec_disables_embedding() -> None:
+    embedder, info = build_embedder({})
+
+    assert embedder is None
+    assert info["label"] == "none"
