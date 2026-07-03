@@ -202,12 +202,17 @@ def test_last_run_published_only_after_postrun(
 # ---------------------------------------------------------------------------
 
 def test_web_cache_available_distinguishes_missing(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # no .web_cache.json in this cwd
-    assert runner_mod._web_cache_available() is False          # couldn't check
-    Path(".web_cache.json").write_text('{"k": "v"}')
+    # P0-A: the primary path checks the load-once in-memory cache (how production fills it
+    # via web_search/web_fetch), not a mid-process disk write. The direct-read fallback and
+    # its whitespace/missing-file nuances are covered by
+    # test_runner_web_cache_available_fallback_matches_direct_read.
+    from web_toolkit import cache_store
+
+    monkeypatch.setenv("WEB_CACHE", "1")
+    monkeypatch.setenv("WEB_CACHE_PATH", str(tmp_path / ".web_cache.json"))
+    assert runner_mod._web_cache_available() is False          # nothing cached → couldn't check
+    cache_store("k", [{"url": "https://x"}])                   # a cached entry now exists
     assert runner_mod._web_cache_available() is True           # verification could run
-    Path(".web_cache.json").write_text("   ")
-    assert runner_mod._web_cache_available() is False          # empty/unreadable → couldn't check
 
 
 def test_neutralize_fail_open_preserved_but_verified_set_still_strips():

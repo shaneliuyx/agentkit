@@ -160,6 +160,12 @@ export interface PhaseDonePayload {
   tokens: number;
   wall_s: number;
   output: string;
+  /**
+   * T1 baseline instrumentation: per-stage wall-clock breakdown (seconds) for this
+   * phase — keys `spoke`/`reducer`/`prefetch`/`scorecard`. Additive; older backends
+   * omit it, so it is optional.
+   */
+  timing?: Record<string, number>;
 }
 
 export interface BudgetPayload {
@@ -250,6 +256,12 @@ export interface DonePayload {
   scorecard_100?: Scorecard100 | null;
   review?: ReviewStatus | null;
   metrics?: RunMetrics | null;
+  /**
+   * T1 baseline instrumentation: whole-run per-stage wall-clock breakdown (seconds) —
+   * keys `plan`/`topology`/`skeleton`/`editor`/`publish`/`postrun` (summed across
+   * epochs) + `total`. Additive; older backends omit it, so it is optional/nullable.
+   */
+  timing?: Record<string, number> | null;
 }
 
 export interface ErrorPayload {

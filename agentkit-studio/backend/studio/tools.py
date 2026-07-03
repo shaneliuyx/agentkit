@@ -203,6 +203,37 @@ def _url_in_cache(url: str) -> bool:
     return False
 
 
+def _fetch_page(url: str) -> tuple[str, tuple[str, int] | None]:
+    """Pure fetch for one URL → ``(cache_key, page | None)``; NEVER touches ``_fetch_cache``.
+
+    Extracted verbatim from ``prefetch_url`` so the serial (``prefetch_url``) and parallel
+    (``findings._prefetch_cited``) paths share ONE fetch implementation — same URL
+    normalization, ``f"{u}|"`` key, ok/empty-content handling, ``_MAX_FETCH_CHARS``
+    truncation, and non-fatal exception behavior. Cache access is the CALLER's job so
+    worker threads (which run under a fresh ``contextvars`` context) never read/write the
+    single-writer ``_fetch_cache``. ``page`` is None for a non-http, unreachable, empty,
+    or errored fetch (the caller drops it, keeping a fabricated citation ungrounded)."""
+    u = (url or "").strip().rstrip(".,)")
+    key = f"{u}|"
+    if not u.lower().startswith("http"):
+        return key, None
+    try:
+        from web_toolkit import web_fetch
+    except Exception:  # noqa: BLE001 — toolkit absent → cannot ground, drop stands
+        return key, None
+    try:
+        res = web_fetch(u, selector=None)
+    except Exception:  # noqa: BLE001 — network/backend failure is non-fatal
+        return key, None
+    if not getattr(res, "ok", False):
+        return key, None
+    content = getattr(res, "content", "") or ""
+    if not content:
+        return key, None
+    n_bytes = getattr(res, "bytes", 0) or len(content.encode("utf-8"))
+    return key, (content[:_MAX_FETCH_CHARS], n_bytes)
+
+
 def prefetch_url(url: str) -> bool:
     """Fetch ``url`` and store its page in the fetch cache (key ``"url|"``), grounding a
     finding that CITED a searched-but-unfetched URL. Returns True if the page is now
@@ -210,31 +241,16 @@ def prefetch_url(url: str) -> bool:
     call (so it is test-safe when the URL is pre-cached); a 404 / unreachable / non-http
     URL returns False and stays uncached — so a fabricated citation is still dropped.
 
-    Closes the fetch-density gap: spokes cite ~12 URLs/phase but fetch ~1, so the
-    grounding guard dropped 80-100% of real findings (instrumented). Fetching the cited
-    URL turns "cited from a snippet" into "actually fetched", and only genuinely
-    reachable pages survive."""
+    Serial wrapper: ``_fetch_page`` + a single-writer ``_fetch_cache`` store. The parallel
+    reducer path (``findings._prefetch_cited``) reuses the same ``_fetch_page`` and does
+    its own serial store, so both paths ground identically."""
     u = (url or "").strip().rstrip(".,)")
-    if not u.lower().startswith("http"):
+    if u.lower().startswith("http") and f"{u}|" in _fetch_cache:
+        return True  # cache hit, no network (test-safe)
+    key, page = _fetch_page(url)
+    if page is None:
         return False
-    key = f"{u}|"
-    if key in _fetch_cache:
-        return True
-    try:
-        from web_toolkit import web_fetch
-    except Exception:  # noqa: BLE001 — toolkit absent → cannot ground, drop stands
-        return False
-    try:
-        res = web_fetch(u, selector=None)
-    except Exception:  # noqa: BLE001 — network/backend failure is non-fatal
-        return False
-    if not getattr(res, "ok", False):
-        return False
-    content = getattr(res, "content", "") or ""
-    if not content:
-        return False
-    n_bytes = getattr(res, "bytes", 0) or len(content.encode("utf-8"))
-    _fetch_cache[key] = (content[:_MAX_FETCH_CHARS], n_bytes)
+    _fetch_cache[key] = page
     return True
 #: Detects "narration instead of execution" — the LLM describes its plan instead
 #: of calling the tool. The tool loop injects a forcing turn when this fires.

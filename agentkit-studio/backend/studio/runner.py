@@ -89,14 +89,27 @@ from studio.workspace import Workspace, workspace_root
 
 
 def _verified_urls_from_cache(text: str) -> list[str]:
-    """Return URLs in ``text`` that are present in the local web cache."""
+    """Return URLs in ``text`` that are present in the local web cache.
+
+    Primary path (P0-A): flush the load-once cache to close its debounce freshness
+    window, then verify against ``cache_snapshot()`` instead of re-parsing the whole
+    13.6MB file. Fail-open is preserved: if the cache API is unavailable we fall back
+    to the ORIGINAL direct ``.web_cache.json`` parse, so "cache module missing" still
+    means "verification fails open", never "no verified URLs".
+    """
     try:
         from studio.task_runs import verified_urls_in_cache
 
-        cache_path = Path(".web_cache.json")
-        if not cache_path.exists():
-            return []
-        return verified_urls_in_cache(_json.loads(cache_path.read_text()), text or "")
+        try:
+            from web_toolkit import cache_flush, cache_snapshot
+        except Exception:  # noqa: BLE001 - cache API unavailable → direct-parse fallback
+            cache_path = Path(".web_cache.json")
+            if not cache_path.exists():
+                return []
+            return verified_urls_in_cache(_json.loads(cache_path.read_text()), text or "")
+
+        cache_flush()
+        return verified_urls_in_cache(cache_snapshot(), text or "")
     except Exception:  # noqa: BLE001 - verification is best-effort; scoring fails open.
         return []
 
@@ -108,10 +121,17 @@ def _web_cache_available() -> bool:
     no sources were used" (legitimate) or "verification couldn't run" (cache missing
     after an outage / misconfig). In the second case fabricated URLs pass through the
     fail-open neutralizer silently. This lets the publish path emit a distinguishable
-    warning for the "couldn't check" case instead of treating it as clean."""
+    warning for the "couldn't check" case instead of treating it as clean.
+
+    P0-A: coarse "is there ANY cache" check → no flush needed (not freshness-sensitive).
+    Falls back to the original direct read if the cache API is unavailable (fail-open)."""
     try:
-        cache_path = Path(".web_cache.json")
-        return cache_path.exists() and bool(cache_path.read_text().strip())
+        try:
+            from web_toolkit import cache_snapshot
+        except Exception:  # noqa: BLE001 - cache API unavailable → direct-read fallback
+            cache_path = Path(".web_cache.json")
+            return cache_path.exists() and bool(cache_path.read_text().strip())
+        return bool(cache_snapshot())
     except Exception:  # noqa: BLE001
         return False
 
@@ -448,11 +468,18 @@ def _final_evidence_dossier(
     if not urls:
         return ""
 
+    # P0-A: informational dossier and a SECONDARY source behind the in-process
+    # _fetch_cache below → slight staleness is fine, so no cache_flush().
     cache: dict[str, Any] = {}
     try:
-        cache_path = Path(".web_cache.json")
-        if cache_path.exists():
-            cache = _json.loads(cache_path.read_text())
+        try:
+            from web_toolkit import cache_snapshot
+        except Exception:  # noqa: BLE001 - cache API unavailable → direct-parse fallback
+            cache_path = Path(".web_cache.json")
+            if cache_path.exists():
+                cache = _json.loads(cache_path.read_text())
+        else:
+            cache = cache_snapshot()
     except Exception:  # noqa: BLE001
         cache = {}
 
@@ -1499,6 +1526,16 @@ class Runner:
         #: Wall-clock start of the run, stamped in run(); the done frame reports
         #: real elapsed time (per-phase wall_s lives on phase_done).
         self._t0: float | None = None
+        #: T1 baseline instrumentation (PLAN §1): per-run, per-stage wall-clock
+        #: accumulator (seconds). Per-Runner-instance (a Runner is built per run),
+        #: so concurrent runs never clobber each other's timings. Reset in run();
+        #: summarized onto the terminal ``done`` event + one _dbg summary line.
+        self._stage_timings: dict[str, float] = {}
+        #: T1: the CURRENT phase's timing bucket (spoke/reducer/prefetch/scorecard).
+        #: Reset at the top of each phase iteration; snapshotted onto phase_done.
+        #: Instance-scoped (phases are sequential; the reducer runs synchronously
+        #: inside run_plan), mirroring the existing per-phase ``_phase_captured``.
+        self._phase_timing: dict[str, float] = {}
         #: Tokens captured via on_usage for the current phase (used to reconcile
         #: against run_plan's StepRun.tokens for non-StudioChatClient backends).
         self._phase_captured = 0
@@ -1545,6 +1582,25 @@ class Runner:
             UsageReport(input_tokens=0, output_tokens=remainder, estimated=True)
         )
 
+    # -- T1 baseline instrumentation --------------------------------------
+
+    def _stage_add(self, key: str, t0: float) -> None:
+        """Accumulate ``monotonic()-t0`` seconds into the per-run stage timer ``key``.
+
+        PURELY ADDITIVE (PLAN §1 T1): reads ``time.monotonic()`` and books the delta;
+        never affects control flow or output. Keys are summed so a stage that runs once
+        per epoch accumulates across the epoch loop.
+        """
+        self._stage_timings[key] = self._stage_timings.get(key, 0.0) + (time.monotonic() - t0)
+
+    def _phase_time_add(self, key: str, dt: float) -> None:
+        """T1: accumulate a wall-clock delta (seconds) into the CURRENT phase bucket.
+
+        The reduce/prefetch sink passed into ``_make_section_reducer`` — called
+        synchronously from inside ``run_plan`` within the active phase iteration.
+        """
+        self._phase_timing[key] = self._phase_timing.get(key, 0.0) + dt
+
     # -- the run -----------------------------------------------------------
 
     def run(self, requirement: str) -> None:
@@ -1557,6 +1613,7 @@ class Runner:
         runs, exactly as before. The terminal ``done`` is emitted once, after the loop.
         """
         self._t0 = time.perf_counter()
+        self._stage_timings = {}
         self._last_scorecard_100 = None
         self._last_evidence_matrix = ""
         self._last_evidence_count = 0
@@ -1780,6 +1837,7 @@ class Runner:
         # run). The goal still steers via the keep/discard gate + verification; it must not
         # become phase-splitting text. _base_requirement is also free of the
         # weakness/template bloat the epic planner already wanted to avoid.
+        _t_plan = time.monotonic()  # T1: plan-construction stage timer
         if seed_steps:
             plan_obj = plan(_plan_requirement, decomposer=make_seeded_decomposer(seed_steps))
             self._emit(LoopSeedEvent(loop_id=session.seed_loop_id, steps=seed_steps))
@@ -1790,6 +1848,7 @@ class Runner:
             )
         else:
             plan_obj = plan(_plan_requirement)
+        self._stage_add("plan", _t_plan)
         # Collapse duplicate phases regardless of which planner produced them (seeded,
         # epic-LLM, or deterministic): a goal listing several sub-tasks otherwise yields
         # the same phase twice in the DAG (the Pi/Craft run), doubling agents + tokens.
@@ -1833,10 +1892,12 @@ class Runner:
         # deterministic classifier remains the non-LLM fallback.
         from agentkit.topology.dynamic import assign_topologies_with_choices
         _topology_client = MaxTokensClient(base_client, _model_profile.topology_max_tokens)
+        _t_topo = time.monotonic()  # T1: topology-assignment stage timer
         if use_llm:
             plan_obj, _topo_choices = select_topologies_by_llm(plan_obj, _topology_client)
         else:
             plan_obj, _topo_choices = assign_topologies_with_choices(plan_obj)
+        self._stage_add("topology", _t_topo)
         _execution_topology = {
             GATEWAY: SINGLE,
             DURABLE_BOARD: SINGLE,
@@ -1922,6 +1983,7 @@ class Runner:
         # declares a deliverable section template, bootstrap a generic skeleton so
         # the phase loop fills it additively through the same section reducer used
         # for seeded improvement runs.
+        _t_skel = time.monotonic()  # T1: cold-start skeleton-bootstrap stage timer
         if not _artifact_copied and use_llm and _tmpl_sections:
             _eff_ws2 = _eff_ws2 or self._workspace_root or workspace_root()
             if _eff_ws2 is not None:
@@ -1933,6 +1995,7 @@ class Runner:
                 _sync_section_workspace(session, _eff_ws2, _skel)
                 _artifact_copied = True       # additive pipeline now has a base
                 _seed_len = len(_skel)        # may grow from here, never shrink below
+        self._stage_add("skeleton", _t_skel)
 
         # §14.6: a SEEDED run keeps the seed's section structure — the reducer
         # PATCHES existing headings, it never injects a missing one. So a rubric-
@@ -2082,6 +2145,7 @@ class Runner:
         # scoring still mutates the served artifact (URL neutralization, editor pass). A
         # client hitting /chat or /export in this window would get unvalidated output.
         # last_run is set only after _postrun_score_and_record() below, from the final text.
+        _t_postrun = time.monotonic()  # T1: postrun stage timer (spans editor + publish)
         _outcome, result_output = self._postrun_score_and_record(
             session=session,
             result_output=result_output,
@@ -2096,6 +2160,7 @@ class Runner:
             _hc_cfg=_hc_cfg,
             _outcome=_outcome,
         )
+        self._stage_add("postrun", _t_postrun)
         try:
             from studio.report_quality import build_review_status
 
@@ -2497,6 +2562,7 @@ class Runner:
 
             self._current_step_id = step.id
             self._phase_captured = 0
+            self._phase_timing = {}  # T1: fresh per-phase timing bucket
             # Planned fan-out (sizing cap + 1 reduce) so the DAG shows the agents
             # as RUNNING up front, not a default guess corrected only at phase_done.
             _planned_n = (_sizing_cfg.max_agents + 1) if _sizing_cfg is not None else None
@@ -2918,14 +2984,17 @@ class Runner:
                         _text, workspace_dir=_reducer_ws
                     ),
                     requirement_clause=_requirement_clause,
+                    timing_sink=self._phase_time_add,  # T1: reducer + prefetch timing
                 )
 
             try:
+                _t_spoke = time.monotonic()  # T1: spoke fan-out + reduce wall
                 result = run_plan(
                     sub_plan, client, budget=budget,
                     max_workers=_max_workers, max_agents=_max_agents,
                     reducer=_reducer,
                 )
+                self._phase_time_add("spoke", time.monotonic() - _t_spoke)
             except BudgetExceeded as exc:
                 self._emit(
                     BudgetEvent(spent=exc.spent, ceiling=session.budget_ceiling, exceeded=True)
@@ -3098,12 +3167,14 @@ class Runner:
                         scorecard_weaknesses,
                     )
                     _doc_after = _art_path.read_text()
+                    _t_score = time.monotonic()  # T1: per-phase rubric scorecard
                     _phase_scorecard = rubric_scorecard_100(
                         _doc_after,
                         required_sections=_scoring_template(session),
                         scoring_matrix=_full_scoring_matrix(session),
                         weights=_rc_phase.get("weights"),
                     )
+                    self._phase_time_add("scorecard", time.monotonic() - _t_score)
                     _remaining = remaining_scoring_matrix(_phase_scorecard)
                     _rc_phase["remaining_scoring_matrix"] = _remaining
                     _phase_weaknesses = scorecard_weaknesses(
@@ -3134,6 +3205,7 @@ class Runner:
                     tokens=sr.tokens,
                     wall_s=sr.wall_s,
                     output=sr.output,
+                    timing=dict(self._phase_timing),  # T1: per-phase breakdown snapshot
                 )
             )
             self._checkpoints.append({
@@ -3750,6 +3822,7 @@ class Runner:
             # but fail the user's report contract (for example no citations or topic drift).
             # It does not replace LLM planning; it only surfaces a final readiness verdict and
             # feeds failures into the existing weakness/adjusted-score path.
+            _t_pub = time.monotonic()  # T1: publish-revision stage timer
             try:
                 from studio.report_quality import (
                     build_publish_revision_prompt,
@@ -3868,6 +3941,7 @@ class Runner:
                     _weaknesses = [w for w in _residual_issues if w not in _seen_w] + _weaknesses
             except Exception:  # noqa: BLE001 — publish gate must never break recording
                 pass
+            self._stage_add("publish", _t_pub)
             # Finalization/revision can repair defects after the miner/linter already
             # recorded them. Prune resolved deterministic lint strings against the exact
             # artifact that will be scored and served, then run the existing false-weakness
@@ -3916,6 +3990,7 @@ class Runner:
             # reuses). Fixes weaknesses/lint via scoped patch_artifact tool calls
             # only (no whole-doc echo), <=2 rounds, FULL revert on regression
             # (artifact.md + sections/*.md + active_outline.json). Fail-open.
+            _t_editor = time.monotonic()  # T1: editor-pass stage timer
             try:
                 _edited, _editor_weaknesses = _run_editor_pass(
                     session=session,
@@ -3966,6 +4041,7 @@ class Runner:
                     _weaknesses = _editor_weaknesses
             except Exception:  # noqa: BLE001 — editor pass must never crash recording
                 pass
+            self._stage_add("editor", _t_editor)
             _evidence_rows: list[dict[str, Any]] = []
             try:
                 from studio.evidence import evidence_from_findings, render_evidence_matrix
@@ -4262,6 +4338,14 @@ class Runner:
 
     def _done_event(self, final_output: str, *, cancelled: bool) -> DoneEvent:
         elapsed = time.perf_counter() - self._t0 if self._t0 is not None else 0.0
+        # T1 baseline instrumentation (PLAN §1): whole-run per-stage summary + total.
+        # NOTE: these spans NEST, don't sum to `total` — `postrun` wraps editor+publish
+        # (runner.py:2148), and each phase's `spoke` wraps its reducer+prefetch (see the
+        # per-phase `timing` on phase_done events for that inner breakdown).
+        _timing = {**self._stage_timings, "total": elapsed}
+        _dbg("T1 stage timings (nested, not additive — see NOTE above) — " + ", ".join(
+            f"{k}={_timing[k]:.2f}s" for k in sorted(_timing)
+        ))
         return DoneEvent(
             total_tokens=self._acc.total_tokens,
             input=self._acc.total_input_tokens,
@@ -4274,6 +4358,7 @@ class Runner:
             scorecard_100=self._last_scorecard_100,
             review=self._last_review,
             metrics=self._last_metrics,
+            timing=_timing,
         )
 
     def _read_workspace_artifact(self) -> str:

@@ -975,6 +975,96 @@ def test_prefetch_cited_extracts_urls_from_json_shaped_findings() -> None:
         tools._fetch_cache.clear()
 
 
+def test_prefetch_parallel_matches_serial_and_grounds(monkeypatch) -> None:
+    """P0-B: parallel _prefetch_cited yields the SAME _fetch_cache as the serial
+    prefetch_url loop for a fixed draft set, and a cited URL is grounded (cached)
+    afterward. Workers run pure _fetch_page (no _fetch_cache access); the reducer
+    thread inserts serially — single-writer invariant preserved. An unreachable URL
+    (ok=False) is dropped by both paths, keeping fabricated citations ungrounded."""
+    import sys
+    import types
+
+    from studio import tools
+    from studio.findings import _cited_urls
+    from studio.runner import _prefetch_cited
+
+    pages = {
+        "https://a.example": "alpha body",
+        "https://b.example": "beta body",
+        "https://c.example": "gamma body",
+    }
+
+    def _fake_web_fetch(u, selector=None):
+        body = pages.get(u)
+        return types.SimpleNamespace(ok=body is not None, content=body or "", bytes=len(body or ""))
+
+    monkeypatch.setitem(sys.modules, "web_toolkit", types.SimpleNamespace(web_fetch=_fake_web_fetch))
+
+    drafts = [
+        "URL: https://a.example\nURL: https://b.example\n",
+        "URL: https://c.example\nURL: https://a.example\n",   # dup a
+        "URL: https://dead.example\n",                          # ok=False → dropped
+    ]
+    urls = _cited_urls(drafts)
+
+    def _snapshot() -> dict:
+        return {k: tools._fetch_cache[k] for k in tools._fetch_cache}
+
+    try:
+        # Serial baseline
+        tools._fetch_cache.clear()
+        for u in urls:
+            tools.prefetch_url(u)
+        serial = _snapshot()
+
+        # Parallel
+        tools._fetch_cache.clear()
+        n = _prefetch_cited(drafts)
+        parallel = _snapshot()
+
+        assert parallel == serial                        # identical contents serial vs parallel
+        assert "https://a.example|" in parallel          # cited URL grounded
+        assert "https://dead.example|" not in parallel   # unreachable dropped
+        assert n == 3                                    # a, b, c fetched; dead dropped
+    finally:
+        tools._fetch_cache.clear()
+
+
+def test_prefetch_grounds_cited_url_through_parse_findings(monkeypatch) -> None:
+    """entry-177 under parallel prefetch: a finding citing a URL the spoke only CITED
+    (never directly fetched) survives _parse_findings' grounding gate (findings.py:449)
+    ONLY because parallel _prefetch_cited fetched it. The cache is non-empty (cache_active
+    True) but the cited URL is uncached — the exact trap where the gate drops a real
+    finding — so this proves the parallel prefetch, not luck, is what grounds it."""
+    import sys
+    import types
+
+    from studio import tools
+    from studio.findings import _parse_findings, _prefetch_cited
+
+    def _fake_web_fetch(u, selector=None):
+        ok = u == "https://cited.example"
+        return types.SimpleNamespace(ok=ok, content="cited body" if ok else "", bytes=10)
+
+    monkeypatch.setitem(sys.modules, "web_toolkit", types.SimpleNamespace(web_fetch=_fake_web_fetch))
+
+    draft = "RESEARCH_FINDING\nURL: https://cited.example\nWHY: because\n"
+    try:
+        # Non-empty cache with an UNRELATED entry → cache_active True, cited URL uncached.
+        tools._fetch_cache.clear()
+        tools._fetch_cache["https://unrelated.example|"] = ("x", 1)
+        assert _parse_findings(draft) == []                       # dropped: cited-but-uncached
+
+        # Parallel prefetch grounds the cited URL → the finding now survives the gate.
+        _prefetch_cited([draft])
+        survived = _parse_findings(draft)
+        assert len(survived) == 1
+        assert survived[0].url == "https://cited.example"
+        assert survived[0].grounded is True
+    finally:
+        tools._fetch_cache.clear()
+
+
 def test_findings_to_patches_parses_bare_finding_without_heading() -> None:
     """Parse mismatch fix: the executor emits a BARE 'RESEARCH_FINDING:' (no '##'),
     which the old '##'-required regex never matched — so the deterministic patch-floor
@@ -1206,16 +1296,81 @@ def test_verified_urls_in_cache_counts_search_and_fetch() -> None:
 
 def test_runner_verified_urls_from_cache_rechecks_final_text(tmp_path, monkeypatch) -> None:
     from studio.runner import _verified_urls_from_cache
+    from web_toolkit import cache_flush, cache_store
 
     monkeypatch.chdir(tmp_path)
-    Path(".web_cache.json").write_text(json.dumps({
-        "fetch:https://before.example:None": {"content": "..."},
-        "fetch:https://after.example:None": {"content": "..."},
-    }))
+    monkeypatch.setenv("WEB_CACHE", "1")
+    monkeypatch.setenv("WEB_CACHE_PATH", str(tmp_path / ".web_cache.json"))
+    # P0-A primary path: entries are populated through the cache API (as web_fetch does),
+    # so cache_snapshot() sees them; the function's own cache_flush() persists them.
+    cache_store("fetch:https://before.example:None", {"content": "..."})
+    cache_store("fetch:https://after.example:None", {"content": "..."})
+    cache_flush()
 
     out = _verified_urls_from_cache("Final report cites https://after.example.")
 
     assert out == ["https://after.example"]
+
+
+def test_runner_verified_urls_fallback_matches_direct_parse(tmp_path, monkeypatch) -> None:
+    """Blocking codex requirement: when the web_toolkit cache API is unavailable, verification
+    falls back to the ORIGINAL direct .web_cache.json parse and behaves identically."""
+    import sys
+
+    from studio.runner import _verified_urls_from_cache
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "web_toolkit", None)  # force `from web_toolkit import ...` to fail
+
+    # (a) missing file → [] (fail-open)
+    assert _verified_urls_from_cache("cites https://x.example.") == []
+
+    # (b) present file → verified URLs, identical to the pre-P0-A direct parse
+    Path(".web_cache.json").write_text(json.dumps({
+        "fetch:https://after.example:None": {"content": "..."},
+    }))
+    assert _verified_urls_from_cache("Final cites https://after.example.") == ["https://after.example"]
+
+    # (c) corrupt file → [] (fail-open)
+    Path(".web_cache.json").write_text("{ not json")
+    assert _verified_urls_from_cache("cites https://after.example.") == []
+
+
+def test_runner_web_cache_available_fallback_matches_direct_read(tmp_path, monkeypatch) -> None:
+    """P0-A: when the cache API is unavailable, _web_cache_available falls back to the
+    ORIGINAL direct read and behaves identically (present-nonempty→True, missing/empty→False)."""
+    import sys
+
+    from studio.runner import _web_cache_available
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "web_toolkit", None)  # force cache API import to fail
+
+    assert _web_cache_available() is False                 # missing file
+    Path(".web_cache.json").write_text('{"k": "v"}')
+    assert _web_cache_available() is True                  # present, non-empty
+    Path(".web_cache.json").write_text("   ")
+    assert _web_cache_available() is False                 # present but whitespace-only
+
+
+def test_runner_final_dossier_fallback_matches_direct_parse(tmp_path, monkeypatch) -> None:
+    """P0-A: when the cache API is unavailable, _final_evidence_dossier falls back to the
+    ORIGINAL direct .web_cache.json parse — a cited URL cached only on disk still resolves."""
+    import sys
+
+    from studio.runner import _final_evidence_dossier
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(sys.modules, "web_toolkit", None)
+
+    Path(".web_cache.json").write_text(json.dumps({
+        "fetch:https://after.example:None": {"ok": True, "content": "DOSSIER_MARKER"},
+    }))
+    out = _final_evidence_dossier("report cites https://after.example.")
+    assert "DOSSIER_MARKER" in out and "https://after.example" in out
+
+    Path(".web_cache.json").write_text("{ not json")     # corrupt → no cached content
+    assert "DOSSIER_MARKER" not in _final_evidence_dossier("cites https://after.example.")
 
 
 def test_prune_resolved_weaknesses_drops_stale_final_lints() -> None:

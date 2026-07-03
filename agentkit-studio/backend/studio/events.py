@@ -169,6 +169,10 @@ class PhaseDoneEvent(StudioEvent):
     tokens: int = 0
     wall_s: float = 0.0
     output: str = ""
+    #: T1 baseline instrumentation (PLAN §1): per-stage wall-clock breakdown for
+    #: THIS phase — keys ``spoke``/``reducer``/``prefetch``/``scorecard`` (seconds).
+    #: Additive; empty on backends/paths that emit no reduce/scorecard work.
+    timing: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -364,6 +368,11 @@ class DoneEvent(StudioEvent):
     scorecard_100: dict[str, Any] | None = None
     review: dict[str, Any] | None = None
     metrics: dict[str, Any] | None = None
+    #: T1 baseline instrumentation (PLAN §1): whole-run wall-clock breakdown —
+    #: keys ``plan``/``topology``/``skeleton``/``editor``/``publish``/``postrun``
+    #: (summed across epochs) + ``total`` (seconds). ``None`` if timing was never
+    #: recorded (e.g. an error path that emits ``done`` before any stage ran).
+    timing: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)

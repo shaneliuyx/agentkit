@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json as _json
 import re as _re
+import time
 
 from studio.prompts import _today_note
 
@@ -106,9 +107,27 @@ def _prefetch_cited(drafts: list[str], limit: int = _PREFETCH_LIMIT) -> int:
     real URLs — prefetch is what puts them there. Bounded by ``limit`` to cap latency.
     Returns how many cited URLs are now cached."""
     from studio.runner import _dbg
-    from studio.tools import prefetch_url
+    from studio.tools import _fetch_cache, _fetch_page
     seen = _cited_urls(drafts)
-    fetched = sum(1 for u in seen[:limit] if prefetch_url(u))
+    urls = seen[:limit]
+    # Already-cached URLs need no fetch (mirrors prefetch_url's cache-hit fast path);
+    # _cited_urls already normalized each u, so the key is exactly f"{u}|".
+    todo = [u for u in urls if f"{u}|" not in _fetch_cache]
+    results: list[tuple[str, tuple[str, int] | None]] = []
+    if todo:
+        # P0-B: PURE fetches in parallel — worker threads call only _fetch_page and
+        # touch NO _fetch_cache (each runs under a fresh contextvars context). This
+        # reducer thread then inserts serially below, preserving the single-writer
+        # invariant _parse_findings' grounding gate depends on. ponytail: fixed pool of
+        # 8; bump only if a phase routinely cites >>8 uncached URLs and fetch dominates.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(_fetch_page, todo))
+    fetched = len(urls) - len(todo)  # cache-hits count as grounded (prefetch_url parity)
+    for key, page in results:
+        if page is not None:
+            _fetch_cache[key] = page
+            fetched += 1
     _dbg(f"prefetch cited={len(seen)} fetched_ok={fetched} (cap {limit})")
     return fetched
 
@@ -182,6 +201,7 @@ def _make_section_reducer(
     scoring_rules: str = "",
     evidence_fn=None,
     requirement_clause: str = "",
+    timing_sink=None,
 ):
     """Build the section-aware STAR reducer closure (DESIGN §4.5; Lever 3).
 
@@ -270,7 +290,10 @@ def _make_section_reducer(
             "Output ONLY:\nPATCHES:\n```json\n[ ... ]\n```\n"
             "Nothing else — no document, no preamble, no commentary."
         )
+        _t_red = time.monotonic()  # T1: reducer LLM inference (dominant reduce cost)
         res = client.chat([{"role": "user", "content": prompt}])
+        if timing_sink is not None:
+            timing_sink("reducer", time.monotonic() - _t_red)
         # Capture the reducer prompt+output so the runner can persist it to
         # io/<step>.reducer.in.md — otherwise the reducer stage is invisible and its
         # FULL SCORING RULES / weaknesses / FETCHED EVIDENCE injection can't be inspected.
@@ -287,7 +310,10 @@ def _make_section_reducer(
         # Fetch-density fix: spokes cite ~12 URLs/phase but fetch ~1, so the grounding
         # guard dropped 80-100% of real findings. Fetch the cited-but-uncached URLs now
         # so genuine sources survive grounding (a 404/fabricated URL still drops).
+        _t_pf = time.monotonic()  # T1: cited-URL prefetch (the P0-B parallelize target)
         _prefetch_cited(drafts)
+        if timing_sink is not None:
+            timing_sink("prefetch", time.monotonic() - _t_pf)
         findings: list = []
         raw_findings = 0
         for d in drafts:
