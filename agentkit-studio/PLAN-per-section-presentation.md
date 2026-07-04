@@ -174,3 +174,43 @@ generic labels (→ C3), short-acronym fall-open, whole-doc score flatlining on 
 **Revised build order:** C2 renderer edge-requirement (small, standalone, hardens #1) → §7 live prompt-
 test recording C9 fields → C1 local-debt gate + C5 one-diagram wiring + C8 caption → tests (§6 + C7
 reorder test) → live-validate → then #4 list/paragraph, #3 table.
+
+---
+
+## 11. MULTI-DIAGRAM COVERAGE (codex, 2026-07-04) — "2+ sections need diagrams"
+
+The C5 one-per-pass MVP is "best single diagram per pass," NOT coverage. How to VERIFY/handle a report
+where 2+ sections warrant a diagram:
+
+**M1 — total-debt TELEMETRY now (do this in the MVP, cheap).** Detection scans ALL H2s and ranks
+eligible sections; generation attempts only the top-ranked (C5). Emit
+`presentation_debt_total=N, attempted=1, satisfied_this_pass=1, remaining=N-1` so the MVP is HONEST
+about what it left on the table. This is the verification surface — you can SEE unmet multi-section
+debt without generating it. C1 stays local (chosen section 1→0); do NOT require whole-doc debt→0 in MVP.
+
+**M2 — do NOT rely on multi-epoch convergence** (1-per-pass × N epochs → all sections). It's
+opportunistic, not correctness. Grounded blockers: epoch stop is score-plateau-based, not debt-based; a
+diagram accepts on flat score yet a plateau can stop the loop early; **CRITICAL: `_run_editor_pass`
+(runner.py:790) `if not cur_issues: break` runs BEFORE the structural-retry point** — an otherwise-clean
+artifact never reaches diagram generation unless the new C1 path is allowed to run independent of rubric
+weaknesses. (Design implication: the per-section presentation pass must NOT be gated behind
+`cur_issues`; wire it as its own step that runs on presentation-debt even when the weakness list is
+empty.) Seed-carry + idempotency preserve accepted diagrams only IF another epoch actually enters the
+editor.
+
+**M3 — if coverage becomes a requirement:** bounded loop INSIDE one pass with C6 baseline-advance after
+every accept (compare each candidate against the CURRENT accepted artifact, never the pre-pass snapshot).
+Cap `max_diagrams_per_pass=2` or `3` (bound gemma latency/gate-thrash); report remaining debt; never
+"generate every diagram" on a weak model. Do NOT lift coverage onto epochs.
+
+**M4 — deterministic coverage test (no live multi-epoch):** 2-H2 artifact both warranting + a
+non-warranting summary; fake detector (both warranted, stable confidences) / generator (valid grounded
+mermaid per target) / scorer (flat, no new weakness) / local-debt (1 before, 0 after per target). Assert:
+(a) cap=1 → exactly 1 mermaid in highest-confidence section + telemetry `debt_total=2, satisfied=1,
+remaining=1`; (b) cap=2 → 2 mermaids, one per warranted section, none in the summary, second accept
+computed against the post-first-accept artifact (pins C6); (c) pre-existing mermaid in A → A skipped, B
+generated (idempotency).
+
+**Decision:** implement M1 telemetry in the MVP; keep one-diagram honest; add M3+M4 only when the
+success metric becomes "2 warranted → 2 diagrams." The `cur_issues` break (M2) is a wiring constraint the
+MVP must respect regardless of cap.
