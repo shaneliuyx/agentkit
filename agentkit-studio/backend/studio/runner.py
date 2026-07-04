@@ -1333,6 +1333,7 @@ def _run_editor_pass(
     quality_opportunities: list[str] | None = None,
     opportunity_recount: Callable[[str], int | None] | None = None,
     embedder: Any = None,
+    judge_client: "LLMClient | None" = None,
 ) -> tuple[str, list[str] | None]:
     """Goal-aware editor pass: <=2 rounds, FULL revert on regression.
 
@@ -1586,7 +1587,9 @@ def _run_editor_pass(
             _ps_base_score, _ps_base_issues = _editor_scored_issues(
                 session, scored_text, verified_urls, extra_issues, relevance_penalty
             )
-            _ps_new, _ps_heading, _ps_telem = section_presentation.plan_one(base_client, scored_text)
+            _ps_new, _ps_heading, _ps_telem = section_presentation.plan_one(
+                base_client, scored_text, judge_client=judge_client
+            )
             if _ps_new and _ps_heading:
                 _ps_snapshot = _editor_snapshot(art_file, sections_dir)
                 art_file.write_text(_ps_new, encoding="utf-8")
@@ -1656,7 +1659,7 @@ def _run_editor_pass(
                 session, scored_text, verified_urls, extra_issues, relevance_penalty
             )
             _cp_new, _cp_heading, _cp_telem = content_presentation.plan_presentation(
-                base_client, base_client, scored_text
+                judge_client or base_client, base_client, scored_text
             )
             if _cp_new:
                 _cp_snapshot = _editor_snapshot(art_file, sections_dir)
@@ -2109,6 +2112,9 @@ class Runner:
         # seed carry-forward so the coarse whole-doc seed-relevance gate can use
         # it (a cross-task R10 seed about a different subject is dropped there).
         base_client = self._build_client()
+        # Strong-model judge for presentation detection (built once per run; degrades to
+        # base_client in tests / when the judge backend is unavailable).
+        judge_client = self._build_judge_client(base_client)
         (
             requirement, _weaknesses_block, _artifact_copied, _eff_ws2,
             _seed_len, _seed_text, _seed_cross_task, _seed_topic,
@@ -4438,6 +4444,8 @@ class Runner:
                     # SEMANTIC fabrication guard; None → the guard falls open (accept
                     # gate is the backstop).
                     embedder=self._embedder,
+                    # Strong-model judge for presentation detection (form/diagram warrant).
+                    judge_client=judge_client,
                 )
                 if _edited and _edited != _scored_text:
                     _scored_text = _edited
@@ -4641,6 +4649,21 @@ class Runner:
         backend = resolve_backend(self._session.llm_spec)
         # session info may be filled lazily; ensure label/model present
         return build_chat_client(backend, self._on_usage)
+
+    def _build_judge_client(self, base_client: LLMClient) -> LLMClient:
+        """Strong-model JUDGE for presentation DETECTION (form/diagram warrant). The weak
+        generation model over-affirms "structure" on any section that names components, so
+        detection runs on a capable model (``session.judge_spec``, default ``haiku``) while
+        generation stays on the session's model. Test mode (an injected client factory) and
+        any resolve/build failure fall back to ``base_client`` so detection still runs,
+        degraded — never a crash, never a hard dependency on the judge backend."""
+        if self._client_factory is not None:
+            return base_client  # tests inject ONE client; do not build a real judge backend
+        spec = getattr(self._session, "judge_spec", None) or {"profile": "haiku"}
+        try:
+            return build_chat_client(resolve_backend(spec), self._on_usage, temperature=0.0)
+        except Exception:  # noqa: BLE001 — judge backend unavailable → degrade to generation model
+            return base_client
 
     def _maybe_tool_augment(
         self, client: LLMClient, *, artifact_path: Path | None = None

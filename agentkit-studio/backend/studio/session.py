@@ -71,6 +71,10 @@ class Session:
     embed_spec: dict[str, Any]
     llm_info: dict[str, Any]
     embed_info: dict[str, Any]
+    #: Strong-model JUDGE spec for presentation detection (form/diagram warrant). The weak
+    #: generation model over-affirms "structure", so detection runs on a capable model
+    #: (default 'haiku' when None). Same {profile|raw} shape as ``llm_spec``.
+    judge_spec: dict[str, Any] | None = None
     mode: str = "auto"
     budget_ceiling: float | None = None
     #: M7: web-search tool loop on/off (default on when web_toolkit importable).
@@ -145,6 +149,7 @@ class SessionRegistry:
         budget_ceiling: float | None,
         tools_enabled: bool = True,
         loop_config: LoopConfig | None = None,
+        judge_spec: dict[str, Any] | None = None,
     ) -> Session:
         """Register a new session and return it."""
         session = Session(
@@ -157,6 +162,7 @@ class SessionRegistry:
             budget_ceiling=budget_ceiling,
             tools_enabled=tools_enabled,
             loop_config=loop_config,
+            judge_spec=judge_spec,
         )
         with self._lock:
             self._sessions[session.session_id] = session

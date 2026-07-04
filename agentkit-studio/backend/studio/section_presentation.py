@@ -146,8 +146,14 @@ def section_has_visual(text: str, heading: str) -> bool:
     return False
 
 
-def plan_one(client, artifact_text: str) -> tuple[str | None, str | None, dict]:
+def plan_one(
+    client, artifact_text: str, *, judge_client=None
+) -> tuple[str | None, str | None, dict]:
     """Plan + render ONE diagram for the highest-ranked warranting section.
+
+    ``judge_client`` (default = ``client``) runs the DETECTION (does a section warrant a
+    diagram) — gemma over-affirms structure, so detection belongs on a capable model while
+    the diagram COMPONENT extraction stays on the generation ``client``.
 
     Returns ``(new_artifact_text | None, chosen_heading | None, telemetry)``. PURE —
     no file IO, no accept gate (the runner owns snapshot/score/accept/restore). Telemetry
@@ -155,7 +161,7 @@ def plan_one(client, artifact_text: str) -> tuple[str | None, str | None, dict]:
     sections, whether one was attempted, whether a renderable diagram was produced.
     ``new_text`` is None when nothing warrants a diagram or none renders."""
     sections = split_h2(artifact_text)
-    eligible = eligible_sections(client, sections)
+    eligible = eligible_sections(judge_client or client, sections)
     telem = {"debt_total": len(eligible), "attempted": 0, "satisfied": 0}
     for sec in eligible:  # highest-signal first; stop at the first that renders
         telem["attempted"] = 1

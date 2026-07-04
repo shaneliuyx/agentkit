@@ -98,10 +98,13 @@ def get_backends() -> dict[str, Any]:
 def post_session(body: dict[str, Any]) -> dict[str, str]:
     """Build a session: resolve the backend, runtime-check ``LLMClient``.
 
-    Body: ``{llm:{profile|raw}, embed:{...}, mode:'auto'|'llm', budget:{ceiling|null}}``.
+    Body: ``{llm:{profile|raw}, embed:{...}, mode:'auto'|'llm', budget:{ceiling|null},
+    judge_llm:{profile|raw}|null}``. ``judge_llm`` is the STRONG-model judge for
+    presentation detection (None → runner defaults to 'haiku').
     """
     llm_spec = body.get("llm") or {}
     embed_spec = body.get("embed") or {}
+    judge_spec = body.get("judge_llm") or None
     mode = body.get("mode", "auto")
     budget = (body.get("budget") or {}).get("ceiling")
     tools_enabled = bool(body.get("tools_enabled", True))
@@ -129,6 +132,7 @@ def post_session(body: dict[str, Any]) -> dict[str, str]:
         budget_ceiling=budget,
         tools_enabled=tools_enabled,
         loop_config=loop_config,
+        judge_spec=judge_spec,
     )
     from studio.rubric import DEFAULT_TEMPLATE, DEFAULT_WEIGHTS, default_scoring_matrix
 

@@ -111,6 +111,33 @@ def test_plan_one_returns_none_when_nothing_warrants() -> None:
     assert telem["debt_total"] == 0
 
 
+def test_plan_one_routes_detection_to_judge_generation_to_client() -> None:
+    """The judge_client decides warrant (gemma over-affirms structure → detection belongs
+    on a strong model); the generation client extracts components. Detection must NEVER hit
+    the generation client, and the judge's verdict is what selects the section."""
+    judge = _FakeClient(diagram_headings={"Architecture"})
+
+    class _GenOnly:
+        """Extraction-only: answers the components prompt, and would say PROSE for any
+        detection turn — so if detection wrongly routed here, no diagram would be chosen."""
+
+        def __init__(self) -> None:
+            self.detect_calls = 0
+
+        def chat(self, messages, tools=None):
+            content = messages[0]["content"] if messages else ""
+            if "=== REPORT ===" in content:
+                return _R(_COMPONENTS)
+            self.detect_calls += 1
+            return _R("PROSE")
+
+    gen = _GenOnly()
+    new_text, heading, telem = sp.plan_one(gen, _ARTIFACT, judge_client=judge)
+    assert heading == "## Architecture"          # judge detected it, not the gen client
+    assert new_text is not None and "```mermaid" in new_text
+    assert gen.detect_calls == 0                  # detection never routed to the generator
+
+
 def test_detect_diagram_fails_closed_on_error() -> None:
     class _Boom:
         def chat(self, messages, tools=None):
