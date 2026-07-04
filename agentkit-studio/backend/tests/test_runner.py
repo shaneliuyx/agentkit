@@ -4043,6 +4043,30 @@ def test_section_presentation_noop_when_nothing_warrants(tmp_path, monkeypatch) 
     assert not [e for e in events if getattr(e, "name", "") == "section_presentation"]
 
 
+def test_section_presentation_rolls_back_disk_on_midsync_failure(tmp_path, monkeypatch) -> None:
+    """codex [P2]: if section-sync raises AFTER the candidate diagram is written to disk,
+    the best-effort except must roll artifact.md back so on-disk state matches the returned
+    (old) scored_text — not leave a half-applied diagram for the next epoch to read."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _PS_ARTIFACT)
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+
+    def _boom(*a, **k):  # the write-through step fails mid-sync (IO / workspace error)
+        raise RuntimeError("section sync blew up")
+    monkeypatch.setattr(_runner_mod, "_write_artifact_through_sections", _boom)
+    client = _PSClient("Key Findings")
+    events: list = []
+    final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
+    # In-memory result is the old text AND disk was rolled back to match it byte-for-byte.
+    assert final == before_art
+    assert art_file.read_text(encoding="utf-8") == before_art
+    assert "mermaid" not in art_file.read_text(encoding="utf-8")
+    # A swallowed failure emits neither accept nor reject.
+    assert not [e for e in events if getattr(e, "name", "") == "section_presentation"]
+
+
 def test_editor_structural_retry_skips_when_baseline_recount_unavailable_or_zero(
     tmp_path, monkeypatch
 ) -> None:

@@ -1574,6 +1574,12 @@ def _run_editor_pass(
     # is the value gate (grounding is a trivial-pass, C3); telemetry surfaces remaining
     # unmet debt (M1). Best-effort: any failure leaves the editor result untouched.
     if base_client is not None:
+        # Held OUTSIDE the try so a failure AFTER the candidate is written to disk
+        # (e.g. _write_artifact_through_sections or the re-score raising) still rolls
+        # the on-disk artifact + section files back — the outer except returns the old
+        # in-memory scored_text, so disk must match it (codex review [P2]). None until a
+        # snapshot is taken; re-nulled once the disk state is final (accept or reject).
+        _ps_snapshot = None
         try:
             from studio import section_presentation  # noqa: PLC0415
             from studio.task_runs import _norm_weakness  # noqa: PLC0415
@@ -1598,6 +1604,7 @@ def _run_editor_pass(
                 _ps_remaining = max(_ps_telem["debt_total"] - 1, 0)
                 if _ps_cand_score >= _ps_base_score and _ps_no_new and _ps_debt_dropped:
                     scored_text, last_weaknesses = _ps_cand, _ps_cand_issues
+                    _ps_snapshot = None  # committed — disk == accepted candidate, no rollback
                     emit(GateEvent(
                         name="section_presentation", outcome="accept",
                         detail=(
@@ -1609,6 +1616,7 @@ def _run_editor_pass(
                     _dbg(f"section presentation ACCEPT {_ps_heading!r} remaining={_ps_remaining}")
                 else:
                     _editor_restore(art_file, sections_dir, _ps_snapshot)
+                    _ps_snapshot = None  # rolled back — nothing left to restore
                     emit(GateEvent(
                         name="section_presentation", outcome="reject",
                         detail=(
@@ -1620,7 +1628,13 @@ def _run_editor_pass(
                     ))
                     _dbg(f"section presentation REJECT {_ps_heading!r}")
         except Exception:  # noqa: BLE001 — presentation is best-effort, never breaks the editor
-            pass
+            # A mid-sync failure AFTER the candidate hit disk left _ps_snapshot set:
+            # roll the artifact + sections back so disk matches the returned scored_text.
+            if _ps_snapshot is not None:
+                try:
+                    _editor_restore(art_file, sections_dir, _ps_snapshot)
+                except Exception:  # noqa: BLE001 — restore is itself best-effort
+                    pass
     return scored_text, last_weaknesses
 
 
