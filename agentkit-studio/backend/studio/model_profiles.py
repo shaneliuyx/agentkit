@@ -23,6 +23,12 @@ class ModelProfile:
     section_window_chars: int = 12_000
     finding_batch_size: int = 8
     allowed_sections_from_profile: bool = True
+    #: >0 → after each web_search the tool loop deterministically fetches the top
+    #: N result pages and splices their content into the search result. Weak
+    #: models search but then cite fabricated URLs instead of fetching — this
+    #: guarantees real page text under real URLs reaches the model (and the
+    #: fetch cache, so grounding + the evidence dossier can verify citations).
+    auto_fetch_top_results: int = 0
 
 
 DEFAULT_MODEL_PROFILE = ModelProfile(name="default")
@@ -43,6 +49,10 @@ GEMMA_4_26B_PROFILE = ModelProfile(
     max_successful_fetches=6,
     section_window_chars=6_000,
     finding_batch_size=3,
+    # gemma searches but cites fabricated URLs instead of fetching (live runs
+    # 1523-1525: 21 searches, 1 fetch, 0 surviving citations) — fetch the top
+    # results for it so findings can quote real pages.
+    auto_fetch_top_results=2,
 )
 
 #: Strong hosted models (Claude haiku/sonnet/opus): 200K-token context with solid

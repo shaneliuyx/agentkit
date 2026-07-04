@@ -4795,6 +4795,7 @@ class Runner:
             max_iters=model_profile.max_tool_iters,
             max_searches=model_profile.max_searches,
             max_successful_fetches=model_profile.max_successful_fetches,
+            auto_fetch_top_results=model_profile.auto_fetch_top_results,
         )
 
     def _emit_tool_call(self, sid: str, tool: str, args: dict[str, Any]) -> None:

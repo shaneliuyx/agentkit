@@ -644,6 +644,7 @@ class ToolAugmentedClient:
         max_searches: int | None = None,
         max_successful_fetches: int | None = None,
         context_compact: bool = True,
+        auto_fetch_top_results: int = 0,
     ) -> None:
         self._inner = inner
         self._on_tool_call = on_tool_call
@@ -658,6 +659,7 @@ class ToolAugmentedClient:
         self._max_searches = max_searches
         self._max_successful_fetches = max_successful_fetches
         self._context_compact = context_compact
+        self._auto_fetch_top_results = max(0, int(auto_fetch_top_results))
         #: Per-instance registry — blocks concurrent threads from fetching the
         #: same URL simultaneously (dog-pile prevention within one run).
         self._in_flight = InFlightRegistry()
@@ -929,7 +931,17 @@ class ToolAugmentedClient:
                     step_id, name, self._max_successful_fetches, "successful fetches"
                 )
         if name == "web_search":
-            return self._run_search(step_id, args)
+            msg = self._run_search(step_id, args)
+            # Weak-model backstop (root cause of the uncited/shallow reports and
+            # the missing evidence/ dossier): gemma searches but then cites
+            # fabricated URLs instead of fetching the results — prefetch failure
+            # drops every citation. Deterministically fetch the top result pages
+            # HERE and splice their content into the search tool message, so the
+            # model's next turn holds real page text under real URLs (and the
+            # fetch cache lets grounding + the evidence dossier verify them).
+            if self._auto_fetch_top_results > 0:
+                msg = self._auto_fetch_after_search(step_id, msg, budget_state)
+            return msg
         if name == "web_fetch":
             msg = self._run_fetch(step_id, args)
             if budget_state is not None and self._tool_message_success(msg):
@@ -951,6 +963,57 @@ class ToolAugmentedClient:
             return self._run_patch_artifact(step_id, args)
         # Unknown tool: report it back so the model can recover.
         return self._tool_message(name, {"error": f"unknown tool {name!r}"})
+
+    def _auto_fetch_after_search(
+        self,
+        step_id: str,
+        search_msg: Message,
+        budget_state: dict[str, int] | None,
+    ) -> Message:
+        """Fetch the top N result pages of a web_search and splice the content
+        into the search tool message.
+
+        Runs through ``_run_fetch`` so every page is cached (grounding +
+        evidence dossier see it), emitted as a tool event (TOOLS panel), and
+        counted against the fetch budget. Fail-open per page."""
+        try:
+            payload = json.loads(str(search_msg.get("content") or "{}"))
+        except Exception:  # noqa: BLE001 - malformed search message → nothing to fetch
+            return search_msg
+        results = payload.get("results") or []
+        fetched: list[dict[str, str]] = []
+        for r in results[: self._auto_fetch_top_results]:
+            url = str((r or {}).get("url", "")).strip()
+            if not url:
+                continue
+            if (
+                budget_state is not None
+                and self._max_successful_fetches is not None
+                and budget_state["web_fetch_success"] >= self._max_successful_fetches
+            ):
+                break
+            if self._on_tool_call:
+                self._on_tool_call(step_id, "web_fetch", {"url": url, "auto": True})
+            msg = self._run_fetch(step_id, {"url": url})
+            if not self._tool_message_success(msg):
+                continue
+            if budget_state is not None:
+                budget_state["web_fetch_success"] += 1
+            try:
+                content = str(json.loads(str(msg.get("content") or "{}")).get("content", ""))
+            except Exception:  # noqa: BLE001
+                content = ""
+            if content:
+                fetched.append({"url": url, "content": content[:2500]})
+        if fetched:
+            payload["fetched_pages"] = fetched
+            payload["notice"] = (
+                (payload.get("notice") or "")
+                + " Top results were fetched for you — quote and cite ONLY these"
+                " fetched_pages URLs in your findings."
+            ).strip()
+            return self._tool_message("web_search", payload)
+        return search_msg
 
     def _budget_rejection(self, step_id: str, name: str, limit: int, label: str) -> Message:
         notice = (

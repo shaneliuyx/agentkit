@@ -1081,3 +1081,89 @@ def test_no_forcing_when_answer_cites_nothing() -> None:
     res = c.chat([{"role": "user", "content": "research"}])
     assert inner.calls == 1
     assert res.text == "No relevant findings."
+
+
+# --- auto-fetch of top search results (weak-model grounding backstop) --------
+# Live runs 1523-1525 (gemma): 21 searches, 1 fetch, 0 surviving citations —
+# gemma searches but then fabricates URLs instead of fetching results, so
+# grounding drops every citation and the evidence/ dossier stays empty. With
+# auto_fetch_top_results > 0 the loop fetches the top result pages itself and
+# splices their content into the search tool message.
+
+
+class _SearchThenFinal:
+    """Turn 1: web_search. Turn 2: final answer citing the fetched URL."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.tool_msgs: list[str] = []
+
+    def chat(self, messages, tools=None) -> ChatResult:
+        self.calls += 1
+        for m in messages:
+            if m.get("role") == "tool":
+                self.tool_msgs.append(str(m.get("content", "")))
+        if self.calls == 1:
+            return ChatResult(
+                text="", total_tokens=1,
+                tool_calls=[("web_search", {"query": "pi agent harness"})],
+            )
+        return ChatResult(
+            text="RESEARCH_FINDING:\nURL: https://x.test/q3\nQUOTE: released 2025.",
+            total_tokens=1,
+        )
+
+
+def test_auto_fetch_top_results_fetches_and_splices_content() -> None:
+    fetched: list[str] = []
+
+    def fetch(url: str, *, selector: str | None = None):
+        from web_toolkit import FetchResult
+        fetched.append(url)
+        return FetchResult(url=url, ok=True, content=f"real page text from {url}", bytes=30)
+
+    inner = _SearchThenFinal()
+    c = ToolAugmentedClient(
+        inner, search_fn=_fake_search, fetch_fn=fetch,
+        max_iters=6, auto_fetch_top_results=2, max_successful_fetches=6,
+    )
+    c.chat([{"role": "user", "content": "research pi"}])
+    # both top results fetched deterministically, no model cooperation needed
+    assert fetched == ["https://x.test/q3", "https://x.test/blog"]
+    # the search tool message the model sees carries the fetched page content
+    assert any("fetched_pages" in m and "real page text" in m for m in inner.tool_msgs)
+
+
+def test_auto_fetch_respects_fetch_budget() -> None:
+    fetched: list[str] = []
+
+    def fetch(url: str, *, selector: str | None = None):
+        from web_toolkit import FetchResult
+        fetched.append(url)
+        return FetchResult(url=url, ok=True, content="body", bytes=4)
+
+    inner = _SearchThenFinal()
+    c = ToolAugmentedClient(
+        inner, search_fn=_fake_search, fetch_fn=fetch,
+        max_iters=6, auto_fetch_top_results=2, max_successful_fetches=1,
+    )
+    c.chat([{"role": "user", "content": "research"}])
+    assert fetched == ["https://x.test/q3"]  # budget 1 → second result not fetched
+
+
+def test_auto_fetch_off_by_default_and_fail_open() -> None:
+    def broken_fetch(url: str, *, selector: str | None = None):
+        raise RuntimeError("network down")
+
+    inner = _SearchThenFinal()
+    c = ToolAugmentedClient(inner, search_fn=_fake_search, fetch_fn=broken_fetch, max_iters=6)
+    res = c.chat([{"role": "user", "content": "research"}])
+    assert "x.test" in res.text  # default 0 → no auto-fetch, loop unaffected
+
+    inner2 = _SearchThenFinal()
+    c2 = ToolAugmentedClient(
+        inner2, search_fn=_fake_search, fetch_fn=broken_fetch,
+        max_iters=6, auto_fetch_top_results=2,
+    )
+    res2 = c2.chat([{"role": "user", "content": "research"}])
+    assert res2.text  # failing fetches never break the loop
