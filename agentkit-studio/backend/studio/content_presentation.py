@@ -128,6 +128,20 @@ def _cell_grounded(cell: str, section_low: str) -> bool:
     return any(re.search(r"\b" + re.escape(t), section_low) for t in disc)
 
 
+def _item_grounded(item: str, section_low: str) -> bool:
+    """Stricter grounding for an LLM-authored LIST ITEM (a whole clause, not a short cell).
+    A clause can share ONE source token yet bolt on a fabricated claim ("caching leaks
+    customer secrets" off a section that only says caching cuts latency), so single-token
+    overlap (``_cell_grounded``) is too weak here (codex [P2]). Require a MAJORITY of the
+    item's discriminating tokens to literally appear — and at least two — so a faithful
+    rephrasing survives but an invented clause does not. Un-checkable items fall open."""
+    disc = [t for t in _significant_tokens(item) if t not in _GENERIC_LABELS]
+    if not disc:
+        return True  # numeric / generic-only → un-checkable
+    present = sum(1 for t in disc if re.search(r"\b" + re.escape(t), section_low))
+    return present >= 2 and present * 2 >= len(disc)
+
+
 def _header_is_generic(header: list[str]) -> bool:
     """True if NO header cell carries a discriminating (non-placeholder) token — a table
     that only says 'Item | Value | Category' has no comparison content (reject)."""
@@ -164,7 +178,15 @@ def render_grounded_table(reply_text: str, section_body: str) -> str | None:
     section_low = section_body.lower()
     if not _header_grounded(header, section_low):  # entity headers must be real (codex [P2])
         return None
-    kept = [r for r in data if all(_cell_grounded(c, section_low) for c in r)]
+    # A row survives if a MAJORITY of its cells are grounded — the DATA values must be real,
+    # but ONE inferred dimension label per row is allowed (e.g. a 'Speed'/'Price' row-label
+    # the model coins from 'faster'/'pricier' prose). All-cells-grounded made the broadened
+    # prose-comparison TABLE recommendation a no-op (codex [P2]); a fully fabricated row (no
+    # grounded cell) or a mostly-fabricated one is still dropped.
+    def _row_grounded(r: list[str]) -> bool:
+        g = sum(1 for c in r if _cell_grounded(c, section_low))
+        return g * 2 >= len(r) and g >= 1
+    kept = [r for r in data if _row_grounded(r)]
     if len(kept) < _MIN_TABLE_ROWS:
         return None
     ncol = len(header)
@@ -282,7 +304,7 @@ def render_grounded_list(reply_text: str, section_body: str, *, numbered: bool) 
         if not m:
             continue
         item = _clean_item(m.group(1))
-        if item and _cell_grounded(item, section_low):
+        if item and _item_grounded(item, section_low):
             kept.append(item)
     if len(kept) < 2:
         return None

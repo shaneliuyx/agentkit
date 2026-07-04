@@ -151,6 +151,40 @@ def test_render_grounded_list_keeps_grounded_drops_ungrounded() -> None:
     assert "teleportation" not in out  # ungrounded item dropped (fabrication guard)
 
 
+def test_render_grounded_list_drops_fabricated_clause_sharing_one_token() -> None:
+    """codex [P2]: an LLM list item that shares ONE source token but bolts on a fabricated
+    claim must be dropped — single-token overlap (_cell_grounded) is too weak for a clause.
+    '- caching leaks customer secrets' shares only 'caching' with the section, so it is a
+    fabrication and must not survive; the faithful items do."""
+    reply = (
+        "- caching cuts latency\n"
+        "- caching leaks customer secrets\n"  # shares 'caching' only — fabricated claim
+        "- structured logging audits runs"
+    )
+    out = cp.render_grounded_list(reply, _LIST_SECTION, numbered=False)
+    assert out is not None
+    assert "leaks customer secrets" not in out  # fabricated clause dropped
+    assert "caching cuts latency" in out and "structured logging" in out
+
+
+def test_render_grounded_table_allows_inferred_dimension_labels() -> None:
+    """codex [P2]: a prose comparison ('LangGraph faster/pricier, CrewAI slower/cheaper')
+    yields a table whose ROW-LABEL cells (Speed/Price) are inferred dimensions not literally
+    in the prose. The majority-grounded row rule keeps such rows (data cells are grounded)
+    so the broadened TABLE recommendation is not a no-op — but a fully/mostly fabricated row
+    is still dropped."""
+    sec = "LangGraph is faster but pricier, whereas CrewAI is slower but cheaper."
+    good = ("| Attribute | LangGraph | CrewAI |\n| --- | --- | --- |\n"
+            "| Speed | faster | slower |\n| Price | pricier | cheaper |")
+    out = cp.render_grounded_table(good, sec)
+    assert out is not None and "Speed" in out and "faster" in out  # inferred labels allowed
+
+    # a fabricated row (no grounded data) drops -> only 1 real row survives -> None
+    bad = ("| Attribute | LangGraph | CrewAI |\n| --- | --- | --- |\n"
+           "| Speed | faster | slower |\n| Warp | teleports | vanishes |")
+    assert cp.render_grounded_table(bad, sec) is None
+
+
 def test_render_grounded_list_rejects_below_two_grounded() -> None:
     section = "The system uses caching to reduce latency."
     reply = "- caching reduces latency\n- teleportation warp drive\n- quantum flux capacitor"
