@@ -999,3 +999,85 @@ def test_search_evidence_glob_widens_scope(tmp_path) -> None:
     assert wide["matches"]
     assert wide["matches"][0]["file"] == "sections/draft.md"
     assert wide["matches"][0]["url"] == "https://draft.test/s"
+
+
+# --- fabricated-citation grounding forcing turn ------------------------------
+# Real live evidence (agentkit-studio runs 1523/1524, gemma-4-26B): research
+# spokes with web_search/web_fetch offered emitted their FINAL answer on turn 1
+# — a patch citing a plausible URL they never fetched — with ZERO tool calls.
+# The narration forcing turn never fires (the text is a well-formed answer, not
+# a plan) and grounding later drops every invented URL, leaving an uncited
+# shallow report and no evidence/ dossier. The loop must force ONE research
+# round when a would-be final answer cites URLs while web_fetch_success == 0.
+
+
+class _FabricatingClient:
+    """Emits a URL-citing final on turn 1; searches only if pushed back."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def chat(self, messages, tools=None) -> ChatResult:
+        self.calls += 1
+        self.prompts.append(str(messages[-1].get("content", "")))
+        if self.calls == 1:
+            return ChatResult(
+                text=("RESEARCH_FINDING:\nURL: https://www.confluent.io/blog/kafka-vs-pulsar/\n"
+                      "QUOTE: Kafka is faster."),
+                total_tokens=5,
+            )
+        if self.calls == 2:
+            return ChatResult(
+                text="", total_tokens=5,
+                tool_calls=[("web_search", {"query": "kafka vs pulsar"})],
+            )
+        return ChatResult(
+            text="RESEARCH_FINDING:\nURL: https://x.test/q3\nQUOTE: released 2025.",
+            total_tokens=5,
+        )
+
+
+def test_fabricated_citation_forces_one_research_round() -> None:
+    inner = _FabricatingClient()
+    c = ToolAugmentedClient(inner, search_fn=_fake_search, max_iters=6)
+    res = c.chat([{"role": "user", "content": "research kafka vs pulsar"}])
+    forced = [p for p in inner.prompts if "never fetched" in p]
+    assert forced, "expected the grounding forcing turn after a URL-citing zero-fetch final"
+    assert inner.calls >= 3          # final -> forcing turn -> search -> re-final
+    assert "x.test" in res.text      # the re-emitted final is the accepted answer
+
+
+def test_fabricated_citation_forcing_fires_at_most_once() -> None:
+    """A model that STILL fabricates after the push-back is accepted (fail-open),
+    not looped forever."""
+
+    class _Stubborn(_FabricatingClient):
+        def chat(self, messages, tools=None) -> ChatResult:
+            self.calls += 1
+            self.prompts.append(str(messages[-1].get("content", "")))
+            return ChatResult(
+                text="URL: https://made.up/page\nQUOTE: whatever.", total_tokens=5,
+            )
+
+    inner = _Stubborn()
+    c = ToolAugmentedClient(inner, search_fn=_fake_search, max_iters=6)
+    res = c.chat([{"role": "user", "content": "research"}])
+    assert inner.calls == 2          # final -> forcing turn -> same final, accepted
+    assert "made.up" in res.text
+
+
+def test_no_forcing_when_answer_cites_nothing() -> None:
+    """A URL-free final answer (legit non-research reply) is accepted on turn 1."""
+
+    class _Plain(_FabricatingClient):
+        def chat(self, messages, tools=None) -> ChatResult:
+            self.calls += 1
+            self.prompts.append(str(messages[-1].get("content", "")))
+            return ChatResult(text="No relevant findings.", total_tokens=5)
+
+    inner = _Plain()
+    c = ToolAugmentedClient(inner, search_fn=_fake_search, max_iters=6)
+    res = c.chat([{"role": "user", "content": "research"}])
+    assert inner.calls == 1
+    assert res.text == "No relevant findings."

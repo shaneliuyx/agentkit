@@ -267,6 +267,11 @@ _PLANNING_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Detects a URL in a would-be final answer. A weak model (gemma) skips research
+#: entirely and emits a plausible-looking citation it never fetched — the loop
+#: injects a grounding-forcing turn (once) so it searches instead of fabricating.
+_CITED_URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
+
 
 def _is_rate_limit(exc: BaseException) -> bool:
     msg = str(exc).lower()
@@ -711,6 +716,7 @@ class ToolAugmentedClient:
         _write_names = names & _WRITE_TOOL_NAMES
         _read_only_streak = 0
         _force_threshold = max(2, self._max_iters // 2)
+        _forced_grounding = False  # the fabricated-citation forcing turn fires at most once
 
         for _ in range(self._max_iters):
             result = self._chat_inner(convo, merged_tools)
@@ -744,6 +750,32 @@ class ToolAugmentedClient:
                         "content": (
                             "Stop describing what you plan to do. "
                             "Execute NOW — call the appropriate tool immediately."
+                        ),
+                    })
+                    continue
+                # Fabricated-citation guard: a weak model (gemma) skips research and
+                # emits a final answer citing URLs it never fetched — every such
+                # citation is invented and later dropped by grounding, leaving an
+                # uncited shallow report (live runs 1523/1524: 0 tool calls, 0
+                # surviving URLs). Force ONE research round before accepting it.
+                if (
+                    text_so_far
+                    and not _forced_grounding
+                    and _ < self._max_iters - 1
+                    and ("web_search" in names or "web_fetch" in names)
+                    and budget_state["web_fetch_success"] == 0
+                    and _CITED_URL_RE.search(text_so_far)
+                ):
+                    _forced_grounding = True
+                    convo.append({"role": "assistant", "content": text_so_far})
+                    convo.append({
+                        "role": "user",
+                        "content": (
+                            "You cited a URL you never fetched — that citation is "
+                            "fabricated and your whole response will be DISCARDED. "
+                            "Call web_search now, then web_fetch the most relevant "
+                            "result, and re-emit your findings quoting ONLY pages "
+                            "you actually fetched."
                         ),
                     })
                     continue
