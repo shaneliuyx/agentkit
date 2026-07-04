@@ -147,6 +147,46 @@ def test_evidence_rows_reconstruct_round_trip() -> None:
     assert outputs_from_evidence_rows(evidence_rows_from_outputs({"w": "x" * 20000})) == {"w": "x" * 8000}
 
 
+def test_resume_walks_back_past_evidenceless_partial(tmp_path) -> None:
+    """codex P2: the NEWEST run for a task can be a ``failed_partial`` recorded WITHOUT
+    worker-output evidence. The resume lookup must walk newest->oldest and pick the newest
+    run that actually persisted worker_output rows — not stop at the empty partial and
+    hand depth-expansion nothing. Mirrors the runner's reversed(all_runs) walk (runner.py
+    ~4174)."""
+    from studio.task_runs import (
+        TaskRun,
+        TaskRunStore,
+        evidence_rows_from_outputs,
+        outputs_from_evidence_rows,
+        task_hash,
+    )
+
+    store = TaskRunStore(db_path=tmp_path / "t.db")
+    req = "compare agent frameworks"
+    th = task_hash(req)
+    rows = evidence_rows_from_outputs({"worker-1": "prior grounded body"})
+    # older: a completed run that persisted evidence
+    store.record(TaskRun(
+        task_hash=th, session_id="s1", version=1, score=0.6, weaknesses=[],
+        artifact_path="", requirement=req, evidence=rows, status="completed",
+    ))
+    # newer: a failed_partial recorded WITHOUT evidence — the masking row
+    store.record(TaskRun(
+        task_hash=th, session_id="s2", version=2, score=0.0, weaknesses=[],
+        artifact_path="", requirement=req, evidence=[], status="failed_partial",
+    ))
+
+    # naive latest() returns the evidenceless partial -> nothing to re-feed (the bug)
+    assert outputs_from_evidence_rows(store.latest(th).evidence) == {}
+    # the runner's walk-back recovers the older completed run's outputs
+    recovered: dict = {}
+    for pr in reversed(store.all_runs(th)):
+        recovered = outputs_from_evidence_rows(pr.evidence)
+        if recovered:
+            break
+    assert recovered == {"worker-1": "prior grounded body"}
+
+
 def test_resume_refeeds_prior_worker_outputs_to_expand() -> None:
     """Simulated resume: the current run produced NO worker outputs, but the prior run
     persisted worker_output evidence rows. The runner's reconstruct+merge (runner.py

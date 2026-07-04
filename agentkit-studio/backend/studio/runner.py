@@ -4171,11 +4171,15 @@ class Runner:
                     _exp_outputs = outputs
                     if len(outputs) < _RESUME_OUTPUT_FLOOR:
                         from studio.task_runs import outputs_from_evidence_rows
-                        _prior_run = _store.latest(_thash)
-                        _prior_outputs = (
-                            outputs_from_evidence_rows(_prior_run.evidence)
-                            if _prior_run is not None else {}
-                        )
+                        # Walk newest→oldest for the first run that actually persisted
+                        # worker-output evidence: the newest row can be a failed_partial
+                        # snapshot recorded WITHOUT evidence (codex P2), which would
+                        # otherwise mask an older completed run's usable outputs.
+                        _prior_outputs: dict[str, str] = {}
+                        for _pr in reversed(_store.all_runs(_thash)):
+                            _prior_outputs = outputs_from_evidence_rows(_pr.evidence)
+                            if _prior_outputs:
+                                break
                         if _prior_outputs:
                             _exp_outputs = {**_prior_outputs, **outputs}
                     _pre_exp = _scored_text or result_output or ""
