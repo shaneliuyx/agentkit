@@ -72,6 +72,16 @@ def test_render_grounded_table_rejects_single_data_row() -> None:
     assert cp.render_grounded_table(onerow, _SECTION) is None
 
 
+def test_render_grounded_table_rejects_fabricated_headers() -> None:
+    """codex [P2]: grounded DATA rows under INVENTED entity headers must still be rejected —
+    the header carries the entity names, so ungrounded headers = a fabricated comparison."""
+    fab = (
+        "| Attribute | Zorptron | Quixfoo |\n| --- | --- | --- |\n"
+        "| Latency | low | higher |\n| Durability | volatility | strong |\n"
+    )
+    assert cp.render_grounded_table(fab, _SECTION) is None
+
+
 def test_render_grounded_table_needs_a_separator() -> None:
     no_sep = "| Attribute | Redis | Postgres |\n| Latency | low | higher |\n"
     assert cp.render_grounded_table(no_sep, _SECTION) is None
@@ -84,6 +94,24 @@ def test_render_list_bulleted_from_comma_series() -> None:
     bl = cp.render_list(body, numbered=False)
     assert bl is not None and bl.startswith("- ")
     assert bl.count("\n") == 3  # 4 parallel items → 4 lines
+    # Intro clause and trailing modifier stripped → clean items, not sentence fragments.
+    assert bl == "- Python\n- JavaScript\n- Go\n- Rust"
+    assert "stack" not in bl and "services" not in bl
+
+
+def test_render_list_strips_intro_and_trailing_modifier() -> None:
+    """codex [P2]: 'X uses A, B, and C for Y' → items A/B/C, not 'X uses A'/'C for Y'."""
+    body = "The pipeline includes ingestion, ranking, and delivery for each request."
+    bl = cp.render_list(body, numbered=False)
+    assert bl == "- ingestion\n- ranking\n- delivery"
+
+
+def test_render_list_bails_on_clause_fragments() -> None:
+    """A comma series whose fragments are still clauses (not short parallel items) yields
+    no list — a missing list beats a malformed one."""
+    body = ("The system works because it caches aggressively, and it also retries failed "
+            "calls, and it logs everything that happens during a run.")
+    assert cp.render_list(body, numbered=False) is None
 
 
 def test_render_list_numbered_from_sequence() -> None:

@@ -137,6 +137,19 @@ def _header_is_generic(header: list[str]) -> bool:
     return True
 
 
+def _header_grounded(header: list[str], section_low: str) -> bool:
+    """Every DISCRIMINATING header token (an entity/attribute name, not a placeholder like
+    'Attribute'/'Item') must literally appear in the section — the header carries the entity
+    names, so an ungrounded header is a fabricated comparison even when the data rows happen
+    to be grounded (codex review [P2]). Placeholder/short header cells fall open, so a real
+    row-label column header ('Attribute') is not itself required to appear in the prose."""
+    for c in header:
+        disc = [t for t in _significant_tokens(c) if t not in _GENERIC_HEADERS]
+        if disc and not any(re.search(r"\b" + re.escape(t), section_low) for t in disc):
+            return False
+    return True
+
+
 def render_grounded_table(reply_text: str, section_body: str) -> str | None:
     """Parse the model's markdown table and return a normalized one, or ``None`` if it is
     not a grounded comparison: reject <2 columns, generic-only headers, or fewer than 2
@@ -149,6 +162,8 @@ def render_grounded_table(reply_text: str, section_body: str) -> str | None:
     if len(header) < _MIN_TABLE_COLS or _header_is_generic(header):
         return None
     section_low = section_body.lower()
+    if not _header_grounded(header, section_low):  # entity headers must be real (codex [P2])
+        return None
     kept = [r for r in data if all(_cell_grounded(c, section_low) for c in r)]
     if len(kept) < _MIN_TABLE_ROWS:
         return None
@@ -166,16 +181,45 @@ def _clean_item(part: str) -> str:
     return part.strip().rstrip(".").strip()
 
 
+#: A clean parallel list item is a short noun phrase. Longer fragments mean the split
+#: caught sentence structure (an intro clause or a subordinate clause), not a list item.
+_MAX_ITEM_WORDS = 5
+#: Lead-in that precedes the items in "X uses/includes/are: A, B, C and D" — stripped from
+#: the FIRST fragment so the intro clause ("The stack uses") is not itself an item.
+_SERIES_LEADIN_RE = re.compile(
+    r"(?i)^.*?\b(?:uses?|includes?|comprises?|contains?|are|were|is|was|"
+    r"such as|like|namely|following|consists? of|features?|offers?)\b\s*:?\s*|^[^:]*:\s*"
+)
+#: Trailing modifier after the final item in "... and D for/to/in Y" — stripped from the
+#: LAST fragment so "Rust for its services" reduces to "Rust".
+_SERIES_TAIL_RE = re.compile(
+    r"(?i)\s+\b(?:for|to|in|of|with|on|at|as|by|that|which|when|where|during|because|so)\b.*$"
+)
+
+
 def _series_items(text: str) -> list[str]:
     """Items of the largest 'A, B, C, and D' enumeration — the extraction counterpart of
-    ``presentation_classifier._inline_series_len`` (same >=3-coordinated-parts notion)."""
+    ``presentation_classifier._inline_series_len``. The naive split catches the sentence's
+    intro clause as the first fragment and a trailing modifier on the last (codex [P2]), so
+    strip both and REQUIRE every item to be a short parallel phrase — a fragment that still
+    reads as a clause means this is prose, not a clean list, and we emit nothing (a missing
+    list beats a malformed one; the section stays prose for a later pass)."""
     best: list[str] = []
     for sent in re.split(r"(?<=[.!?])\s+", text):
-        if re.search(r"\b(and|or)\b", sent):
-            parts = [_clean_item(p) for p in re.split(r"[;,]|\band\b|\bor\b", sent) if p.strip()]
-            parts = [p for p in parts if p]
-            if len(parts) >= pc._MIN_LIST_ITEMS and len(parts) > len(best):
-                best = parts
+        if not re.search(r"\b(and|or)\b", sent):
+            continue
+        raw = [p.strip() for p in re.split(r"[;,]|\band\b|\bor\b", sent) if p.strip()]
+        if len(raw) < pc._MIN_LIST_ITEMS:
+            continue
+        raw[0] = (_SERIES_LEADIN_RE.sub("", raw[0]).strip() or raw[0])
+        raw[-1] = (_SERIES_TAIL_RE.sub("", raw[-1]).strip() or raw[-1])
+        items = [it for it in (_clean_item(p) for p in raw) if it]
+        if (
+            len(items) >= pc._MIN_LIST_ITEMS
+            and all(1 <= len(it.split()) <= _MAX_ITEM_WORDS for it in items)
+            and len(items) > len(best)
+        ):
+            best = items
     return best
 
 
