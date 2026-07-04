@@ -1,11 +1,12 @@
 # Architecture — Document-Generation Pipeline (studio.runner and collaborators)
 
-**Date:** 2026-07-03
-**Scope:** `backend/studio/runner.py` (~3419 lines when originally traced; **4352 lines** as of
-2026-07-03 after WORKLOG entries 157-165 and then 166/176/177 landed — see §10's drift note) +
-immediate collaborators (`epoch_gate.py`, `section_workspace.py`, `tools.py`, `task_runs.py`,
-`rubric.py`, `artifact_lint.py`, `findings.py`, `prompts.py`, `report_quality.py`, `relevance.py`,
-`requirement_compliance.py`, `markdown_format.py`).
+**Date:** 2026-07-04
+**Scope:** `backend/studio/runner.py` (~3419 lines when originally traced; **4985 lines** as of
+2026-07-04 after WORKLOG entries 157-165, 166/176/177, and the 2026-07-04 wave landed — see §10's
+drift note) + immediate collaborators (`epoch_gate.py`, `section_workspace.py`, `tools.py`,
+`task_runs.py`, `rubric.py`, `artifact_lint.py`, `findings.py`, `prompts.py`, `report_quality.py`,
+`relevance.py`, `requirement_compliance.py`, `markdown_format.py`, `client.py`,
+`model_profiles.py`).
 **Purpose:** a detailed, code-traced process map for review — accuracy over polish.
 Every box cites `file.py:line` so you can jump to the real code.
 
@@ -16,6 +17,18 @@ Every box cites `file.py:line` so you can jump to the real code.
 > and **entry 177** (`_prefetch_cited` cross-thread grounding recovery). Line cites inside boxes
 > NOT touched by these three waves were not individually re-walked and remain subject to §10's
 > drift note.
+
+> **2026-07-04 revision — the cold-start grounding + client-layer wave** (new §9.5, plus §3/§5/§7
+> touch-ups): the skeleton bootstrap is **un-gated from `use_llm`** (was the root cause of
+> uncited/shallow cold-start auto runs — reducer (a) and the whole citation/evidence machinery never
+> engaged), the editor pass was resurrected from two stacked dead-gate bugs (cold-start artifact
+> materialization + an extraction-scope `NameError` swallowed by fail-open), the spoke tool loop
+> gained **deterministic auto-fetch after search** and a **fabricated-citation forcing turn**,
+> `StudioChatClient` gained a 240s timeout / `max_retries=0` / **deterministic context compaction on
+> every LLM call**, planning moved to the strong judge model (hybrid runs), model profiles grew a
+> strong-Claude tier, and the planner's bare-`and` decomposer no longer shreds compound noun phrases
+> ("Pi and Craft"). All 2026-07-04 line cites verified against source at 4985/1462/252 lines
+> (runner/tools/client).
 
 > **Concurrent-work caveat.** This was traced off the `build-research-report-generator-plan`
 > branch while a separate agent is mid-edit on the *relevance-refinement / publish-readiness*
@@ -225,19 +238,29 @@ flowchart TD
     C4 --> C6
     C5 --> C6["_dedupe_plan_steps + epoch-prefix step ids<br/>runner.py:1230-1247"]
     C6 --> C7["assign topologies + emit topology/graph/dag<br/>runner.py:1268-1327"]
-    C7 --> C8{"NOT copied AND use_llm<br/>AND template configured?<br/>runner.py:1359"}
-    C8 -->|yes| C9["_build_template_skeleton → artifact.md<br/>runner.py:562, 1362-1369<br/>_sync_section_workspace; _artifact_copied=True"]
+    C7 --> C8{"NOT copied AND<br/>template sections resolved?<br/>(use_llm NO LONGER gates this — 2026-07-04)<br/>runner.py:2370"}
+    C8 -->|yes| C9["_build_template_skeleton → artifact.md<br/>_sync_section_workspace; _artifact_copied=True"]
     C8 -->|no| C10["no skeleton (free-form)"]
-    C9 --> C11["_run_phase_loop fills skeleton additively<br/>runner.py:1841"]
+    C9 --> C11["_run_phase_loop fills skeleton additively"]
     C10 --> C11
 ```
 
 **Conditions that matter.**
-- The skeleton bootstrap (`runner.py:1359`) is what makes "create == improve": when a rubric
+- The skeleton bootstrap is what makes "create == improve": when a rubric
   **template** exists, a placeholder skeleton is written so the *same* additive section-reducer
   pipeline used for seeded runs has a base to grow. It flips `_artifact_copied=True` even on a cold
   start. Without a configured template, generation is free-form and the section pipeline is largely
   bypassed.
+- **✅ FIXED (2026-07-04) — the bootstrap was gated on `use_llm` and that gate was the root cause of
+  uncited/shallow cold-start auto runs.** In `mode="auto"` cold starts, `use_llm` was False → no
+  skeleton → `_artifact_copied` stayed False through the whole phase loop → the section-aware
+  reducer (a) injection at `runner.py:~3293` (`if _artifact_copied …`) never fired → agentkit's
+  generic "Synthesize" fallback prompt reduced the drafts and **stripped every citation** (a live
+  run went from 42 cited URLs in spoke drafts to 0 in the artifact) and `evidence/` was never
+  written. The gate is now `if not _artifact_copied and _tmpl_sections:` (`runner.py:2370`) —
+  template-skeleton bootstrap is independent of the generation mode. First verified live in
+  `s_5b8d971da47a` (reducer io transcripts + 9-file evidence dossier + 17 surviving citations on a
+  cold-start auto run).
 - Planning always runs on `_plan_requirement` (the goal-free base + template/scoring), never on the
   goal-injected `requirement` — see the duplicate-phase "Pi/Craft" comment at `runner.py:1210-1216`.
 
@@ -365,6 +388,24 @@ flowchart TD
   cache state — a non-empty cache seeded by the reducer's own `client.chat()` makes `cache_active`
   True without holding the spokes' real URLs, which is exactly the miss this fixes. A 404 or
   fabricated URL still fails to fetch and is still dropped.
+- **Deterministic auto-fetch after search (2026-07-04).** A weak model (gemma) climbed the whole
+  forcing-turn ladder (planning-narration forcing, read-only-streak forcing) and *still* fabricated
+  citations: it searched but never fetched, then cited URLs from memory. The fix stops relying on
+  the model choosing to fetch: after every `web_search`, `_auto_fetch_after_search`
+  (`tools.py:974`, dispatch guard `tools.py:949`) deterministically fetches the top
+  `auto_fetch_top_results` result pages via the normal `_run_fetch` path (cached, event-emitted,
+  budget-counted) and splices them into the search tool message as `fetched_pages` with a "quote
+  and cite ONLY these fetched_pages URLs" notice. The per-page slice is
+  `model_profile.section_window_chars` (6K gemma / 20K strong tier), NOT a tiny excerpt — a 2.5K
+  slice forced the model to paraphrase-stitch quotes that then died at the verbatim grounding gate
+  (full articles for citation, snippets only for triage). Profile-driven: gemma tier
+  `auto_fetch_top_results=2` (`model_profiles.py:55`), default tier 0 (off). Wired from the runner
+  at `runner.py:4811`.
+- **Fabricated-citation forcing turn (2026-07-04).** Belt to auto-fetch's braces, in the same
+  `ToolAugmentedClient.chat` loop: when the model's would-be-final text cites a URL
+  (`_CITED_URL_RE`), web tools are on offer, and `budget_state["web_fetch_success"] == 0`, a
+  one-shot forcing turn ("you cited a URL you never fetched…") pushes back instead of accepting
+  the answer (`tools.py:728/772/778`, `_forced_grounding` fires at most once per chat).
 
 **The `accept_rewrite` writeback ratchet (`runner.py:2270`).** This is the per-phase additive-only
 guard. `accept_rewrite(old, candidate)` (from `agentkit.artifacts.sections`) ACCEPTs a rewrite —
@@ -617,6 +658,24 @@ flowchart TD
   across retries without ever calling `patch_artifact`. Research spokes never hit it (no write tool
   offered → `_write_names` empty).
 
+> ### ✅ FIXED (2026-07-04) — the editor (and every presentation pass) was DEAD on cold-start auto
+> runs, killed by two STACKED bugs, each sufficient alone
+> 1. **`art_file.exists()` was False.** Cold-start auto runs never created `artifact.md`, so the E1
+>    gate always failed. Fixed twice over: `_pick_scored_source` (`runner.py:703`) prefers
+>    `artifact.md` but falls back to the largest heading-bearing workspace `.md` (never a shorter
+>    file over a longer return), and the post-run chain now **materializes** `artifact.md` through
+>    the section pipeline when it is missing but scored text exists (`runner.py:3946`,
+>    `_dbg("materialized artifact.md …")`).
+> 2. **A swallowed `NameError` on `judge_client`.** `_postrun_score_and_record` was extracted
+>    verbatim from `run()`'s body; the extraction orphaned `judge_client` as a free variable. The
+>    NameError raised during *call-argument evaluation* of the editor invocation and was eaten by
+>    the stage's fail-open `except` — a silently dead stage with a running wall-clock timer. Fixed
+>    with an explicit `judge_client=None` parameter (`runner.py:3848`, callers `runner.py:2545/4551`).
+>    Same extraction-scope disease found once more (`TaskRecord` import) — `uvx ruff check --select
+>    F821` is the cheap detector for this class; a 0.00s stage timer is the runtime symptom.
+> First live-verified in runs 1523/1524 (editor 150-165s, gates all-true, pass-inserted grounded
+> diagram with a `*Figure:` caption).
+
 ---
 
 ## 8. Role-disambiguation diagram (who sees what, who can write what)
@@ -744,16 +803,79 @@ flowchart LR
 
 ---
 
+## 9.5. 2026-07-04 wave — client layer, hybrid planning, model tiers, planner decomposer
+
+Changes that live BELOW or BESIDE the runner and were previously undocumented here.
+
+1. **LLM timeout 90s → 240s + `max_retries=0`** (`client.py:139/176-180`). Root-caused live: a
+   full-budget completion (8192 tokens at a measured ~112 tok/s through VibeProxy) takes ~73s of
+   decode alone; add prefill on a 50K+ spoke prompt and *honest* requests cross 90s. The old 90s
+   read timeout aborted work that would have finished, and the retry ladder regenerated from
+   scratch — compounded by openai-python's own **internal 2 retries multiplying** with
+   `_resilient`'s 7 (up to 21 socket attempts ≈ 35 min per call), a haiku run's phase ground for
+   hours with zero file writes. Diagnosis chain worth keeping: port-cycling cadence on the proxy
+   connection (~90s per source port) proved the timeout WAS firing; `py-spy dump` pinned the block
+   to `_receive_response_headers`; a silent-socket repro proved the timeout mechanism itself
+   worked. `_resilient` now solely owns retry policy.
+
+2. **Deterministic context compaction on EVERY studio LLM call** (`compact_messages`,
+   `client.py:52`, wired at the top of `StudioChatClient.chat`). Uses
+   `agentkit.context.compactor` (existed, was imported by NOTHING). The compactor's own cut keys
+   on user turns and therefore no-ops on tool loops (ONE user message, then assistant/tool
+   alternation) — exactly the conversations that balloon — so the wrapper does its own cut:
+   leading system + first user (the assignment) kept verbatim, a generous verbatim tail
+   (`STUDIO_COMPACT_TAIL_CHARS`, 50K — recent fetched pages must stay quotable for the grounding
+   gate), the old head summarized via `compact(head, keep=0)`. The tail never starts on an
+   orphaned `role=tool` message (API 400). Threshold `STUDIO_COMPACT_MAX_CHARS` (100K,
+   `client.py:35`); below it the list is returned untouched; fail-open on any compactor error.
+   `StudioChatClient.chat` is the single choke point — planner, spokes, reducer refine, judge,
+   editor all flow through it.
+
+3. **Hybrid planning — planner runs on the strong judge model** (`runner.py:2198`). Same rationale
+   as `_build_judge_client` (§6): a weak generation model shreds compound requirements and
+   under-specifies phase deliverables at planning time. `_planner_client` now wraps `judge_client`
+   (session `judge_llm` spec, default `haiku`) instead of `base_client`; generation stays on the
+   session model. Degrades to `base_client` when the judge backend is unavailable, and
+   test-injected client factories are unaffected (judge == base there). Combined with the existing
+   presentation-detection judge, a `gemma + judge_llm=haiku` session is now a true hybrid:
+   haiku plans and judges, gemma executes.
+
+4. **Model-profile tiers** (`model_profiles.py`): gemma tier raised to 3 searches / 6 fetches /
+   6 tool-iters + `auto_fetch_top_results=2` (`:36-55`); NEW `STRONG_CLAUDE_PROFILE` (`:64`,
+   matched on `claude`/`haiku`/`sonnet`/`opus` needles, gemma needles checked first) with
+   10 searches / 20 fetches / 12 iters / 200K context / 20K section window. Caution learned live:
+   count budgets multiply into wall-clock (8 spokes × 12 iters × one LLM round-trip each) — budget
+   knobs have no wall-clock companion cap yet; a pathological phase grinds instead of failing fast.
+
+5. **Planner bare-`and` decomposer fix** (`agentkit/planner/core.py:145-158`). Rule 2 split on a
+   bare `\s+and\s+`, shredding compound noun phrases — the live symptom was the requirement "Study
+   how to use Pi and Craft…" decomposing into a phase titled "Study how to use Pi" (an incomplete
+   sentence the user caught in `io/s1.in.md`). Now splits only on clause-boundary `(?:,|;)\s+and\s+`;
+   the sentence split uses lookbehind `(?<=\.)\s+` so terminating periods survive for exact-text
+   consumers. Pinned by `test_plan_bare_and_never_shreds_compound_noun_phrases`.
+
+**Open items observed on the same live runs (not yet fixed):** the `## References` template section
+is LLM-filled prose like any other section — the real bibliography lives inline + in `evidence/`,
+so References catches junk findings (a self-admittedly off-topic π-Wikipedia note, refusal filler);
+the right fix is a deterministic bibliography built from surviving cited URLs at finalization. The
+A2 diagram renderer is extractive by design — it can only re-encode relationships already stated in
+prose, so a "design architecture" deliverable needs an upstream synthesis section to render, not a
+better renderer. Requirement deliverables ("example code", "design architecture") do not yet become
+structural obligations (template sections / pass targets / scorer checks).
+
+---
+
 ## 10. Quick file:line index
 
-> **Line-number drift note (updated 2026-07-03).** `runner.py` grew from ~3419 lines (this doc's
-> original trace) to 3642 (entries 157-165) and now to **4352 lines** after entries 166/176/177
-> landed (partial-run persistence, `strip_unverified_lines`, diagram-compliance downgrade,
-> read-only-streak forcing, `_prefetch_cited`). Rows below and every §§1-9 box touched by the
-> 2026-07-03 revision were re-verified against the current source; §§1-9 inline mermaid citations
-> for code NOT touched by entries 157-177 were not individually re-walked and may be off by roughly
-> a ~900-line cumulative offset — treat this index (and the re-verified boxes) as the current source
-> of truth over an un-re-verified diagram citation if the two disagree.
+> **Line-number drift note (updated 2026-07-04).** `runner.py` grew from ~3419 lines (this doc's
+> original trace) to 3642 (entries 157-165), 4352 (entries 166/176/177), and now **4985 lines**
+> after the 2026-07-04 wave (skeleton un-gating, editor resurrection, auto-fetch, grounding forcing
+> turn, judge-model planning). `tools.py` is 1462 lines, `client.py` 252. Rows below and every box
+> touched by the 2026-07-04 revision (§3 C8, §5 spoke-loop bullets, §7 resurrection note, §9.5)
+> were verified against the current source; §§1-9 inline mermaid citations for code NOT touched by
+> the 2026-07-03/04 waves were not individually re-walked and may be off by a cumulative ~1500-line
+> offset — treat this index (and the re-verified boxes) as the current source of truth over an
+> un-re-verified diagram citation if the two disagree.
 
 | Concern | Entry point |
 |---|---|
@@ -789,3 +911,13 @@ flowchart LR
 | Diagram-shaped compliance downgrade (entry 176) | `requirement_compliance.py:81` (`_DIAGRAM_SHAPED_RE`), `84` (`_MERMAID_BLOCK_RE`), `308-313` (gate), `180` (annotation), `232` (`requirement_compliance_issues`); call site near `runner.py:3911` |
 | Read-only-streak forcing (entry 176) | `tools.py:665` (`ToolAugmentedClient.chat`), `695` (`_write_names`/`_WRITE_TOOL_NAMES` `502`), `696-697` (streak init/threshold), `737-741` (count), `768-782` (forcing turn) |
 | Cited-URL prefetch grounding recovery (entry 177) | `findings.py:71` (`_cited_urls`), `100` (`_prefetch_cited`), `68` (`_PREFETCH_LIMIT` 8→24), call site `findings.py:290`; grounding gate `findings.py:395/407` (`_parse_findings`, `cache_active`) |
+| Skeleton bootstrap un-gated from `use_llm` (2026-07-04) | `runner.py:2370` (`if not _artifact_copied and _tmpl_sections`) |
+| Cold-start artifact materialization + scored-source pick (2026-07-04) | `runner.py:703` (`_pick_scored_source`), `3946` (materialize + `_dbg`) |
+| Editor NameError fix — explicit `judge_client` param (2026-07-04) | `runner.py:3848` (`_postrun_score_and_record` signature), callers `2545`/`4551` |
+| Auto-fetch after search (2026-07-04) | `tools.py:974` (`_auto_fetch_after_search`), `949` (dispatch), `647/663` (ctor param); profile knob `model_profiles.py:31/55`; runner wiring `runner.py:4811` |
+| Fabricated-citation forcing turn (2026-07-04) | `tools.py:728` (`_forced_grounding`), `772-778` (fire-once gate) |
+| LLM timeout 240s + `max_retries=0` (2026-07-04) | `client.py:139` (`STUDIO_LLM_TIMEOUT_S` default), `176-180` (`with_options`) |
+| Context compaction on every LLM call (2026-07-04) | `client.py:52` (`compact_messages`), `35` (`STUDIO_COMPACT_MAX_CHARS`); wired at top of `StudioChatClient.chat`; lib `agentkit/context/compactor.py` |
+| Hybrid planning on judge model (2026-07-04) | `runner.py:2198` (`_planner_client = MaxTokensClient(judge_client, …)`) |
+| Model-profile tiers (2026-07-04) | `model_profiles.py:36` (`GEMMA_4_26B_PROFILE`), `64` (`STRONG_CLAUDE_PROFILE`), `75` (`_MODEL_PROFILE_MATCHES`, gemma-first order) |
+| Planner bare-`and` decomposer fix (2026-07-04) | `agentkit/planner/core.py:145-158` (clause-boundary split + lookbehind sentence split) |
