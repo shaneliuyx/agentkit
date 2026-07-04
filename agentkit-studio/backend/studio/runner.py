@@ -703,12 +703,25 @@ def _pick_scored_source(art_file: Path, result_output: str) -> str:
     string instead of the real report on disk. Never prefers a shorter file over
     a longer in-memory return."""
     try:
-        candidates = [art_file] if art_file.exists() else list(art_file.parent.glob("*.md"))
-        if candidates:
-            best = max(candidates, key=lambda p: p.stat().st_size)
-            file_text = best.read_text()
+        if art_file.exists():
+            file_text = art_file.read_text()
             if len(file_text.strip()) >= len((result_output or "").strip()):
                 return file_text
+            return result_output
+        # result.md is the per-epoch grounded-full ARCHIVE (written after recording),
+        # not the deliverable — a stale one from a prior epoch must never shadow the
+        # agent's report. A deliverable also has heading structure; size alone would
+        # let a heading-less scratch/notes dump win.
+        candidates = [
+            p for p in art_file.parent.glob("*.md") if p.name != "result.md"
+        ]
+        for p in sorted(candidates, key=lambda p: p.stat().st_size, reverse=True):
+            file_text = p.read_text()
+            if not _re.search(r"^#{1,3} ", file_text, _re.MULTILINE):
+                continue
+            if len(file_text.strip()) >= len((result_output or "").strip()):
+                return file_text
+            break  # largest report-like file is still shorter than the return
     except Exception:  # noqa: BLE001 - a read failure must not break recording
         pass
     return result_output

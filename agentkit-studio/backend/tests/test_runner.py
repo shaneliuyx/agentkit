@@ -297,6 +297,22 @@ def test_pick_scored_source_falls_back_to_agent_named_md(tmp_path) -> None:
     assert picked == report
 
 
+def test_pick_scored_source_skips_result_md_and_headingless_files(tmp_path) -> None:
+    """codex P2: with artifact.md absent, the largest-md fallback must not pick a
+    stale per-epoch result.md archive or a heading-less scratch dump over the
+    agent's actual (report-like) deliverable."""
+    from studio.runner import _pick_scored_source
+
+    ws = tmp_path / "s_x"
+    ws.mkdir()
+    report = "# RAG Serving Stack\n\n## Components\n" + "finding sentence. " * 100
+    (ws / "rag_serving_report.md").write_text(report)
+    (ws / "result.md").write_text("# Stale prior-epoch archive\n" + "old " * 2000)
+    (ws / "scratch.md").write_text("raw notes without any heading " * 500)
+    picked = _pick_scored_source(ws / "artifact.md", "done, see file")
+    assert picked == report
+
+
 def test_pick_scored_source_never_prefers_shorter_file(tmp_path) -> None:
     from studio.runner import _pick_scored_source
 
