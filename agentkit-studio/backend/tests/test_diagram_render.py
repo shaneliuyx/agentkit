@@ -57,7 +57,7 @@ def test_renderer_tolerates_malformed_and_stray_lines() -> None:
         "COMPONENT: Memory | persists state\n"
         "COMPONENT: Scorer | grades\n"
         "EDGE: Planner Executor\n"  # malformed (no ->) — skipped
-        "EDGE: Planner -> Executor\n"
+        "EDGE: Planner -> Memory\n"  # valid (both are exact component names)
     )
     body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None
@@ -92,6 +92,7 @@ def test_grounding_matches_inflected_forms() -> None:
         "COMPONENT: Produce | appears as 'produces'\n"
         "COMPONENT: Persist | appears as 'persists'\n"
         "COMPONENT: Grade | appears as 'grades'\n"
+        "EDGE: Loop -> Produce\n"  # one valid edge to clear _MIN_EDGES; grounding is what's under test
     )
     body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None and body.startswith("flowchart TD")
@@ -99,16 +100,27 @@ def test_grounding_matches_inflected_forms() -> None:
 
 def test_short_token_labels_fall_open() -> None:
     """Labels with no >=4-char token are un-checkable, so grounding falls open (keeps
-    them) — the accept gate is the backstop; grounding must not reject what it can't check."""
-    raw = "\n".join(f"COMPONENT: AI{i} | x" for i in range(5))
+    them) — the accept gate is the backstop; grounding must not reject what it can't check.
+    (An edge is included to clear the _MIN_EDGES floor — grounding, not edges, is the point.)"""
+    raw = "\n".join(f"COMPONENT: AI{i} | x" for i in range(5)) + "\nEDGE: AI0 -> AI1\n"
     body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None and body.startswith("flowchart TD")
+
+
+def test_edgeless_component_list_is_rejected() -> None:
+    """A grounded component list with NO valid edges is not a diagram (no relationships)
+    → None, even though all four nodes are grounded and >= _MIN_NODES (codex review C2)."""
+    raw = (
+        "COMPONENT: Planner | a\nCOMPONENT: Executor | b\n"
+        "COMPONENT: Memory | c\nCOMPONENT: Scorer | d\n"
+    )
+    assert dr.render_grounded_diagram(raw, _REPORT) is None
 
 
 def test_renderer_caps_node_count() -> None:
     """A runaway list is capped at _MAX_NODES rendered nodes (all grounded via the
     'Planner' token that is present in the report)."""
-    raw = "\n".join(f"COMPONENT: Planner {i} | role" for i in range(20))
+    raw = "\n".join(f"COMPONENT: Planner {i} | role" for i in range(20)) + "\nEDGE: Planner 0 -> Planner 1\n"
     body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None
     node_ids = set(re.findall(r"\bN\d+\b", body))

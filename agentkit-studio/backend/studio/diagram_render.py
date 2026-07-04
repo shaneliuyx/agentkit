@@ -63,6 +63,13 @@ _MAX_NODES = 15
 #: tokens are glue words / acronyms too generic to discriminate real from fabricated.
 _MIN_TOKEN_LEN = 4
 
+#: A diagram's whole value is RELATIONSHIPS: N boxes with zero edges is a (worse) bullet
+#: list, not a diagram — yet a grounded component list with no valid edge would otherwise
+#: render as a "diagram" and pass the accept gate (codex review C2). Require at least this
+#: many rendered edges or return None. ponytail: 1 is the correctness floor (0 = the defect);
+#: raise to 2 if sparse one-edge diagrams prove low-value in live testing.
+_MIN_EDGES = 1
+
 _COMPONENT_RE = re.compile(r"COMPONENT:\s*([^|]+?)\s*(?:\|.*)?$")
 #: EDGE endpoints are short labels containing no ``->``, so a non-greedy left side up
 #: to the FIRST ``->`` is unambiguous.
@@ -174,7 +181,13 @@ def render_grounded_diagram(raw: str, artifact_text: str) -> str | None:
     kept = _ground(comps, artifact_text)
     if len(kept) < _MIN_NODES:
         return None
-    return _render(kept, edges)
+    body = _render(kept, edges)
+    # Both rendered edge forms (``A --> B`` and ``A -->|"lab"| B``) contain ``-->``; node
+    # labels never do. So ``-->`` count == rendered-edge count — reject an edgeless
+    # component list (relationships are the point of a diagram; codex review C2).
+    if body.count("-->") < _MIN_EDGES:
+        return None
+    return body
 
 
 #: Section headings a diagram belongs under, most-specific first. The renderer places
@@ -241,9 +254,14 @@ def _demo() -> None:
     mixed = "COMPONENT: Planner | real\n" + fabricated
     assert render_grounded_diagram(mixed, report) is None
 
+    # Edgeless component list → not a diagram (no relationships) → None.
+    edgeless = "\n".join(f"COMPONENT: {n} | r" for n in ("Planner", "Executor", "Memory", "Scorer"))
+    assert render_grounded_diagram(edgeless, report) is None
+
     # Un-checkable short-token labels (no >=4-char token) fall open — grounding must
-    # not hard-reject what it cannot check; the accept gate is the backstop.
-    short = "\n".join(f"COMPONENT: AI{i} | x" for i in range(4))
+    # not hard-reject what it cannot check; the accept gate is the backstop. (Needs an
+    # edge to clear the _MIN_EDGES floor.)
+    short = "\n".join(f"COMPONENT: AI{i} | x" for i in range(4)) + "\nEDGE: AI0 -> AI1\n"
     assert render_grounded_diagram(short, report) is not None
 
     out = insert_diagram_block(report, body)
