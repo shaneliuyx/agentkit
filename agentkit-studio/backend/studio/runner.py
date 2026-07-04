@@ -1730,10 +1730,19 @@ class Runner:
                 self._done_event(self._last_result, cancelled=self._last_cancelled)
             )
         except Exception as exc:  # noqa: BLE001 - any failure becomes an error frame
+            # Log the full traceback to stderr (→ uvicorn.log) BEFORE swallowing the error
+            # into an ErrorEvent. Without this, a mid-run failure surfaces ONLY as ``str(exc)``
+            # (e.g. a bare "Connection error." from a transient oMLX drop) with no stack or
+            # exception type, making infra-vs-code failures undiagnosable from the log alone —
+            # cost a full browser-spelunk to root-cause an oMLX connection drop on 2026-07-04.
+            import traceback as _tb
+            _tb.print_exc()
             # entry 166: snapshot partial artifact state before surfacing the error, so a
             # mid-flight death carries its research forward instead of cold-starting next run.
             saved = self._persist_partial_run(requirement, exc)
-            msg = str(exc)
+            # Prefix the exception TYPE so the surfaced message distinguishes an infra failure
+            # (e.g. APIConnectionError) from a code failure even in the frontend, not just str().
+            msg = f"{type(exc).__name__}: {exc}" if str(exc).strip() else type(exc).__name__
             if saved:
                 msg += " (partial progress saved for carry-forward)"
             self._emit(ErrorEvent(message=msg, where="runner"))
