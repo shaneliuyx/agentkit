@@ -4067,6 +4067,151 @@ def test_section_presentation_rolls_back_disk_on_midsync_failure(tmp_path, monke
     assert not [e for e in events if getattr(e, "name", "") == "section_presentation"]
 
 
+# --------------------------------------------------------------------------- #
+# Content presentation pass (Phase 1): table / list / format-fix. Sibling of    #
+# the diagram pass, same gate + rollback contract. Runs after the round loop on  #
+# base_client (Phase 1: judge == generator).                                     #
+# --------------------------------------------------------------------------- #
+
+_CP_TABLE = (
+    "| Attribute | Redis | Postgres |\n| --- | --- | --- |\n"
+    "| Latency | low | high |\n| Durability | weak | strong |\n"
+)
+
+
+class _CPClient:
+    """Fake client for the content pass. The 5-way adjudicator prompt (has 'BULLETED_LIST'
+    + 'SECTION HEADING:') returns TABLE only for ``table_heading``; the table-generation
+    prompt ('comparison table' + '=== SECTION ===') returns fixed grounded rows. Every
+    other turn (incl. the diagram detector) is inert, so the diagram pass no-ops."""
+
+    def __init__(self, table_heading: str, table_md: str = _CP_TABLE) -> None:
+        self.table_heading = table_heading
+        self.table_md = table_md
+        self.saw_table_gen = False
+
+    def chat(self, messages, tools=None):
+        import re
+
+        from agentkit.types import ChatResult
+        content = messages[0].get("content", "") if messages else ""
+        if "comparison table" in content and "=== SECTION ===" in content:
+            self.saw_table_gen = True
+            return ChatResult(text=self.table_md, total_tokens=1)
+        if "BULLETED_LIST" in content and "SECTION HEADING:" in content:
+            m = re.search(r"SECTION HEADING: (.+)", content)
+            head = m.group(1).strip() if m else ""
+            return ChatResult(
+                text="TABLE" if self.table_heading in head else "PARAGRAPH", total_tokens=1
+            )
+        return ChatResult(text="", total_tokens=1)
+
+
+# A comparison section ("Compared to" + Redis/Postgres) deterministically recommends TABLE;
+# the grounded cells (latency/durability/volatile/strong) all appear in the body.
+_CP_COMPARE_ARTIFACT = (
+    "# Datastore Report\n\n"
+    "## Executive Summary\n\nA short narrative overview of the datastore study.\n\n"
+    "## Key Findings\n\nCompared to Redis, Postgres differs across latency and durability: "
+    "Redis offers low latency but weak durability, whereas Postgres has high latency but "
+    "strong durability.\n\n"
+    "## References\n\n- https://x.test/e\n"
+)
+
+
+def test_content_presentation_adds_table_to_comparison_section(tmp_path, monkeypatch) -> None:
+    """A comparison section (prose that should be a table) gets a grounded markdown table
+    via the post-loop content pass, kept on score/weakness non-regression + realized form."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _CP_COMPARE_ARTIFACT)
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    client = _CPClient("Key Findings")
+    events: list = []
+    final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
+    assert client.saw_table_gen  # the table prompt actually fired
+    assert "| Redis | Postgres |" in final and "*Table:" in final  # table + caption landed
+    assert "| Redis | Postgres |" in art_file.read_text(encoding="utf-8")  # persisted
+    accepts = [
+        e for e in events
+        if getattr(e, "name", "") == "content_presentation" and e.outcome == "accept"
+    ]
+    assert len(accepts) == 1 and "table added to" in accepts[0].detail
+
+
+def test_content_presentation_reverts_on_score_regression(tmp_path, monkeypatch) -> None:
+    """A table that drops the score is reverted; artifact byte-identical; reject emitted."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _CP_COMPARE_ARTIFACT)
+    before_art = art_file.read_text(encoding="utf-8")
+
+    def _scored(session_, text, *a, **k):
+        return (0.3, []) if "| Redis | Postgres |" in text else (0.5, [])
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", _scored)
+    client = _CPClient("Key Findings")
+    events: list = []
+    final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
+    assert "| Redis | Postgres |" not in final and final == before_art
+    assert art_file.read_text(encoding="utf-8") == before_art
+    cp = [e for e in events if getattr(e, "name", "") == "content_presentation"]
+    assert any(e.outcome == "reject" for e in cp)
+    assert not [e for e in cp if e.outcome == "accept"]
+
+
+def test_content_presentation_repairs_format_defect(tmp_path, monkeypatch) -> None:
+    """An unclosed code fence (no form change) is repaired deterministically and kept via
+    the same gate — a format-only accept (heading None)."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    broken = (
+        "# R\n\n## Executive Summary\n\nOverview.\n\n"
+        "## Key Findings\n\n```python\n\nprose that the unclosed fence swallows as code\n\n"
+        "## References\n\n- https://x.test/e\n"
+    )
+    root, art_file = _build_editor_ws(tmp_path, session, broken)
+    before_art = art_file.read_text(encoding="utf-8")
+    assert before_art.count("```") == 1  # genuinely unclosed
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    client = _CPClient("__none__")  # adjudicator says PARAGRAPH everywhere → no form change
+    events: list = []
+    final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
+    assert final.count("```") == 2  # fence now closed
+    assert art_file.read_text(encoding="utf-8").count("```") == 2  # persisted
+    accepts = [
+        e for e in events
+        if getattr(e, "name", "") == "content_presentation" and e.outcome == "accept"
+    ]
+    assert len(accepts) == 1 and "format defects repaired" in accepts[0].detail
+
+
+def test_content_presentation_rolls_back_disk_on_midsync_failure(tmp_path, monkeypatch) -> None:
+    """codex-[P2] parity for the content pass: a mid-sync failure after the candidate hit
+    disk rolls artifact.md back so disk matches the returned (old) scored_text."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _CP_COMPARE_ARTIFACT)
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    _orig = _runner_mod._write_artifact_through_sections
+    calls = {"n": 0}
+
+    def _boom_on_content(session_, ws_root, text, req, *a, **k):
+        # The diagram pass runs first (no-op here → never syncs); fail the content sync.
+        if "| Redis | Postgres |" in text:
+            raise RuntimeError("content sync blew up")
+        return _orig(session_, ws_root, text, req, *a, **k)
+    monkeypatch.setattr(_runner_mod, "_write_artifact_through_sections", _boom_on_content)
+    client = _CPClient("Key Findings")
+    events: list = []
+    final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
+    assert final == before_art
+    assert art_file.read_text(encoding="utf-8") == before_art
+    assert "| Redis | Postgres |" not in art_file.read_text(encoding="utf-8")
+    assert not [e for e in events if getattr(e, "name", "") == "content_presentation"]
+
+
 def test_editor_structural_retry_skips_when_baseline_recount_unavailable_or_zero(
     tmp_path, monkeypatch
 ) -> None:

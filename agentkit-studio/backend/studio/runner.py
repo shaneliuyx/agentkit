@@ -1635,6 +1635,86 @@ def _run_editor_pass(
                     _editor_restore(art_file, sections_dir, _ps_snapshot)
                 except Exception:  # noqa: BLE001 — restore is itself best-effort
                     pass
+
+    # --- Content presentation pass (Phase 1: table / list / format-fix) -----------
+    # Sibling of the diagram pass above for the OTHER under-presentation forms the
+    # classifier flags — a PARAGRAPH that should be a TABLE (entities × attributes) or a
+    # LIST (>=3 parallel/ordered items) — plus deterministic code-fence repair. Same gate
+    # + rollback contract as the diagram block: keep only on score/weakness non-regression
+    # AND a realized local improvement (the section now carries the target form after
+    # round-trip), with [P2] on-disk rollback on any post-write failure. Table cells are
+    # literal-token grounded (fabrication guard); lists are deterministic. Format defects
+    # are repaired unconditionally (a defect, not a model choice) and ride the same gate.
+    # Phase 1 uses base_client as BOTH judge and generator; Phase 2 supplies a strong judge.
+    if base_client is not None:
+        _cp_snapshot = None
+        try:
+            from studio import content_presentation  # noqa: PLC0415
+            from studio.presentation_classifier import Form  # noqa: PLC0415
+            from studio.task_runs import _norm_weakness  # noqa: PLC0415
+            _cp_base_score, _cp_base_issues = _editor_scored_issues(
+                session, scored_text, verified_urls, extra_issues, relevance_penalty
+            )
+            _cp_new, _cp_heading, _cp_telem = content_presentation.plan_presentation(
+                base_client, base_client, scored_text
+            )
+            if _cp_new:
+                _cp_snapshot = _editor_snapshot(art_file, sections_dir)
+                art_file.write_text(_cp_new, encoding="utf-8")
+                _cp_cand = _write_artifact_through_sections(
+                    session, effective_ws_root, _cp_new, original_requirement
+                )
+                _cp_cand_score, _cp_cand_issues = _editor_scored_issues(
+                    session, _cp_cand, verified_urls, extra_issues, relevance_penalty
+                )
+                _cp_no_new = not (
+                    {_norm_weakness(w) for w in _cp_cand_issues}
+                    - {_norm_weakness(w) for w in _cp_base_issues}
+                )
+                # A form improvement must show its target form in the section after the
+                # section round-trip; a format-only fix (no heading) is realized by build.
+                if _cp_heading and _cp_telem["kind"]:
+                    _cp_form = {"table": Form.TABLE, "list": Form.BULLETED_LIST}[_cp_telem["kind"]]
+                    _cp_realized = content_presentation.improvement_realized(
+                        _cp_cand, _cp_heading, _cp_form
+                    )
+                else:
+                    _cp_realized = True
+                _cp_what = (
+                    f"{_cp_telem['kind']} added to {_cp_heading!r}"
+                    if _cp_heading else "format defects repaired"
+                )
+                if _cp_cand_score >= _cp_base_score and _cp_no_new and _cp_realized:
+                    scored_text, last_weaknesses = _cp_cand, _cp_cand_issues
+                    _cp_snapshot = None  # committed — disk == accepted candidate
+                    emit(GateEvent(
+                        name="content_presentation", outcome="accept",
+                        detail=(
+                            f"{_cp_what} (format_fixed={_cp_telem['format_fixed']}, "
+                            f"form_debt={_cp_telem['form_debt_total']}, satisfied={_cp_telem['satisfied']})"
+                        ),
+                        sandboxed=True,
+                    ))
+                    _dbg(f"content presentation ACCEPT {_cp_what}")
+                else:
+                    _editor_restore(art_file, sections_dir, _cp_snapshot)
+                    _cp_snapshot = None  # rolled back — nothing left to restore
+                    emit(GateEvent(
+                        name="content_presentation", outcome="reject",
+                        detail=(
+                            f"{_cp_what} not kept (score {_cp_base_score:.3f}->"
+                            f"{_cp_cand_score:.3f}, no_new_weakness={_cp_no_new}, "
+                            f"realized={_cp_realized})"
+                        ),
+                        sandboxed=True,
+                    ))
+                    _dbg(f"content presentation REJECT {_cp_what}")
+        except Exception:  # noqa: BLE001 — presentation is best-effort, never breaks the editor
+            if _cp_snapshot is not None:
+                try:
+                    _editor_restore(art_file, sections_dir, _cp_snapshot)
+                except Exception:  # noqa: BLE001 — restore is itself best-effort
+                    pass
     return scored_text, last_weaknesses
 
 
