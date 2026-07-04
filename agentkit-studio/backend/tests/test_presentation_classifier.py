@@ -117,3 +117,34 @@ def test_no_false_improvement_on_correct_prose() -> None:
     """A flowing-argument section already in prose is never flagged (no over-listing)."""
     report = f"# R\n\n## Why This Matters\n\n{_PARAGRAPH}\n"
     assert analyze_report(report) == []
+
+
+# --- FIX 2: prose-comparison sections adjudicated as TABLE ------------------------- #
+
+class _R:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _PromptAwareJudge:
+    """Contract-fake for the loosened adjudicator prompt: returns TABLE only when the prompt
+    teaches that a comparison 'written as prose sentences' is a table — otherwise its OLD
+    behavior of pulling entity-rich comparison sections to DIAGRAM. This makes the test RED
+    before the prompt loosening (judge sees no such instruction -> DIAGRAM) and GREEN after."""
+
+    def chat(self, messages, tools=None):
+        content = messages[0]["content"] if messages else ""
+        if "written as prose sentences" in content:
+            return _R("TABLE")
+        return _R("DIAGRAM")
+
+
+def test_analyze_report_recommends_table_for_prose_comparison() -> None:
+    section = (
+        "Redis is fast but volatile, whereas Postgres is durable but slower; the two "
+        "databases trade latency for durability across the same attributes."
+    )
+    report = f"# R\n\n## Datastore Tradeoffs\n\n{section}\n"
+    imps = analyze_report(report, _PromptAwareJudge())
+    assert len(imps) == 1
+    assert imps[0].recommended is Form.TABLE

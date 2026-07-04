@@ -143,3 +143,36 @@ def test_detect_diagram_fails_closed_on_error() -> None:
         def chat(self, messages, tools=None):
             raise RuntimeError("detector down")
     assert sp.detect_diagram(_Boom(), "## Architecture", "The Planner calls the Executor.") is False
+
+
+# --- FIX 3: compositional/hierarchical structure warrants a diagram ---------------- #
+
+_LAYERED = (
+    "# R\n\n## Platform Layers\n\nThe Gateway sits in the Edge layer. The Planner and "
+    "Executor belong to the Core layer. The Memory store is grouped into the State layer, "
+    "which the Core layer is built upon.\n"
+)
+_LAYERED_COMPONENTS = (
+    "COMPONENT: Gateway | edge\nCOMPONENT: Planner | core\nCOMPONENT: Executor | core\n"
+    "COMPONENT: Memory | state\nEDGE: Gateway -> Planner\nEDGE: Planner -> Memory\n"
+)
+
+
+class _PromptAwareClient:
+    """Contract-fake for the loosened detect_diagram prompt: warrants DIAGRAM only when the
+    prompt carries the broadened 'composition/hierarchy/layering' criterion — otherwise its
+    OLD flow/calls-only behavior of calling a layered section PROSE. RED before the loosening
+    (no such criterion -> PROSE -> no diagram), GREEN after. Component extraction is fixed."""
+
+    def chat(self, messages, tools=None):
+        content = messages[0]["content"] if messages else ""
+        if "=== REPORT ===" in content:
+            return _R(_LAYERED_COMPONENTS)
+        return _R("DIAGRAM" if "composition/hierarchy/layering" in content else "PROSE")
+
+
+def test_plan_one_warrants_diagram_for_compositional_structure() -> None:
+    new_text, heading, telem = sp.plan_one(_PromptAwareClient(), _LAYERED)
+    assert heading == "## Platform Layers"
+    assert new_text is not None and "```mermaid" in new_text and "flowchart TD" in new_text
+    assert telem["satisfied"] == 1

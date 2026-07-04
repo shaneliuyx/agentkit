@@ -126,6 +126,55 @@ def test_render_list_returns_none_below_three_items() -> None:
     assert cp.render_list("Python and Go are supported.", numbered=False) is None
 
 
+# LLM-assisted grounded list fallback (mirrors the table path) --------------------
+
+# Prose whose points are clause fragments (>5 words each) — deterministic render_list bails,
+# so the LLM fallback is the only path. Every real point's tokens appear literally in it.
+_LIST_SECTION = (
+    "The framework provides caching to cut latency, retry logic to survive failures, "
+    "and structured logging to make every run auditable."
+)
+
+
+def test_render_grounded_list_keeps_grounded_drops_ungrounded() -> None:
+    """A model list whose items are token-grounded in the section survives; an item whose
+    tokens are absent (a fabrication) is dropped — the same guard render_grounded_table uses."""
+    assert cp.render_list(_LIST_SECTION, numbered=False) is None  # deterministic can't extract
+    reply = (
+        "- caching cuts latency\n- retry logic survives failures\n"
+        "- structured logging audits runs\n- teleportation warp drive"
+    )
+    out = cp.render_grounded_list(reply, _LIST_SECTION, numbered=False)
+    assert out is not None
+    assert out.count("\n") == 2  # 3 grounded items kept, 1 ungrounded dropped
+    assert "caching" in out and "retry" in out and "logging" in out
+    assert "teleportation" not in out  # ungrounded item dropped (fabrication guard)
+
+
+def test_render_grounded_list_rejects_below_two_grounded() -> None:
+    section = "The system uses caching to reduce latency."
+    reply = "- caching reduces latency\n- teleportation warp drive\n- quantum flux capacitor"
+    assert cp.render_grounded_list(reply, section, numbered=False) is None  # only 1 grounded
+
+
+def test_plan_presentation_list_uses_llm_fallback_when_deterministic_bails() -> None:
+    """End-to-end: a list-recommended section deterministic render_list can't parse falls
+    through to the grounded LLM fallback, and the block lands in the section."""
+    report = f"# R\n\n## Capabilities\n\n{_LIST_SECTION}\n\n## Intro\n\nAn overview paragraph.\n"
+
+    class _ListGen:
+        def chat(self, messages, tools=None):
+            return _R(
+                "- caching cuts latency\n- retry logic survives failures\n"
+                "- structured logging audits runs"
+            )
+
+    new_text, heading, telem = cp.plan_presentation(None, _ListGen(), report)
+    assert heading == "## Capabilities" and new_text is not None
+    assert telem["kind"] == "list" and telem["satisfied"] == 1
+    assert "- caching cuts latency" in new_text
+
+
 # ------------------------------------------------------------------------ format
 
 def test_fix_format_errors_closes_unclosed_fence() -> None:
