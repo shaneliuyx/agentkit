@@ -89,9 +89,24 @@ def test_plan_deterministic_single_sentence_gives_one_step():
 
 @pytest.mark.unit
 def test_plan_deterministic_and_conjunction_splits():
-    """Tasks with ' and ' should decompose into at least 2 steps."""
-    p = plan("research the topic and write a summary")
+    """Clause-boundary ', and ' decomposes; the clauses stay intact."""
+    p = plan("research the topic, and write a summary")
     assert len(p.steps) >= 2
+
+
+@pytest.mark.unit
+def test_plan_bare_and_never_shreds_compound_noun_phrases():
+    """Regression: a bare ' and ' split turned 'use Pi and Craft to develop
+    agents' into step 1 = 'Study how to use Pi' — a nonsense fragment the whole
+    run then researched. Bare 'and' joins noun phrases; only ',/; and ' marks
+    independent clauses."""
+    task = ("Study how to use Pi and Craft to develop agents and create a research "
+            "report, need to include example code and design architecture.")
+    p = plan(task)
+    for step in p.steps:
+        assert step.description != "Study how to use Pi"
+    # the compound subject survives in the first step
+    assert "Pi and Craft" in p.steps[0].description
 
 
 @pytest.mark.unit

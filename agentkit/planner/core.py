@@ -142,8 +142,12 @@ def _deterministic_decompose(task: str) -> list[dict[str, Any]]:
     if len(numbered) >= 2:
         return _linear_steps(numbered)
 
-    # 2. ' and ' conjunction
-    parts_and = [p.strip() for p in re.split(r"\s+and\s+", task, flags=re.IGNORECASE)
+    # 2. ', and ' / '; and ' clause-boundary conjunction. A bare ' and ' split
+    # shreds compound noun phrases — "use Pi and Craft to develop agents" became
+    # step 1 = "use Pi" (a nonsense fragment the whole run then researched).
+    # Only a comma/semicolon before 'and' reliably marks independent clauses.
+    parts_and = [p.strip() for p in
+                 re.split(r"(?:,|;)\s+and\s+", task, flags=re.IGNORECASE)
                  if p.strip()]
     if len(parts_and) >= 2:
         return _linear_steps(parts_and)
@@ -300,10 +304,13 @@ def _demo() -> None:
     assert p.steps[2].depends_on == ("s2",)
     print("OK: numbered-list decomposition")
 
-    # 2. Deterministic decomposer — 'and' split
-    p2 = plan("research the topic and write a summary")
+    # 2. Deterministic decomposer — clause-boundary ', and ' split
+    p2 = plan("research the topic, and write a summary")
     assert len(p2.steps) >= 2
-    print("OK: 'and' conjunction split")
+    # bare ' and ' joins noun phrases — must NOT shred them into fragments
+    p2b = plan("use Pi and Craft to develop agents")
+    assert len(p2b.steps) == 1
+    print("OK: ', and ' conjunction split (bare 'and' kept intact)")
 
     # 3. Single-step fallback
     p3 = plan("rename a variable")
