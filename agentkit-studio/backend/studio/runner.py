@@ -2362,7 +2362,15 @@ class Runner:
         # the phase loop fills it additively through the same section reducer used
         # for seeded improvement runs.
         _t_skel = time.monotonic()  # T1: cold-start skeleton-bootstrap stage timer
-        if not _artifact_copied and use_llm and _tmpl_sections:
+        # NOT gated on use_llm (root cause of uncited/shallow cold-start runs,
+        # 2026-07-04): without this skeleton, _artifact_copied stays False for the
+        # WHOLE phase loop in default "auto" mode, which silently disables the
+        # section-aware reducer injection (citation contract + _prefetch_cited +
+        # evidence/ dossier), the artifact OCC tools, and the additive writeback —
+        # every phase reduced through the generic synthesis prompt and stripped
+        # all 42 worker-cited URLs (live run s_891b68ae6c35). create == improve
+        # applies to every generation mode.
+        if not _artifact_copied and _tmpl_sections:
             _eff_ws2 = _eff_ws2 or self._workspace_root or workspace_root()
             if _eff_ws2 is not None:
                 _skel = _build_template_skeleton(_tmpl_sections)

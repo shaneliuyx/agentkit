@@ -203,12 +203,19 @@ def test_section_assignment_queue_fetches_all_files_despite_agent_cap(
     io_dir = tmp_path / session.session_id / "io"
     first = (io_dir / "s1.spoke0.in.md").read_text(encoding="utf-8")
     second = (io_dir / "s1.spoke1.in.md").read_text(encoding="utf-8")
+    # Cold-start runs now bootstrap the template skeleton (create == improve), so
+    # every spoke prompt legitimately carries ALL section headings in the target-
+    # doc body. Assignment ISOLATION lives in the ASSIGNMENT QUEUE FETCH block:
+    # each agent's fetch names only its own section.
+    def _assignment_block(prompt: str) -> str:
+        return prompt.split("ASSIGNMENT QUEUE FETCH:", 1)[1]
+
     assert "ASSIGNMENT QUEUE FETCH:" in first
-    assert "## Executive Summary" in first
-    assert "## References" not in first
+    assert "## Executive Summary" in _assignment_block(first)
+    assert "## References" not in _assignment_block(first)
     assert "ASSIGNMENT QUEUE FETCH:" in second
-    assert "## References" in second
-    assert "## Executive Summary" not in second
+    assert "## References" in _assignment_block(second)
+    assert "## Executive Summary" not in _assignment_block(second)
     queue = tmp_path / session.session_id / "sections" / "assignment_queue.json"
     assert queue.read_text(encoding="utf-8").strip() == "[]"
 
