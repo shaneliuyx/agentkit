@@ -27,12 +27,19 @@ interface BackendPanelProps {
 }
 
 const RAW = "__raw__";
+/** Judge sentinel → send nothing so the backend applies its haiku default. */
+export const JUDGE_DEFAULT = "__default__";
 
 function selectionFor(profileName: string, raw: RawOverride): BackendSelection {
   if (profileName === RAW) {
     return { raw: { base_url: raw.baseUrl, model: raw.model, api_key: raw.apiKey } };
   }
   return { profile: profileName };
+}
+
+/** Judge selection for the request body; undefined when left on the default sentinel. */
+export function judgeSelection(judgeProfile: string): BackendSelection | undefined {
+  return judgeProfile === JUDGE_DEFAULT ? undefined : { profile: judgeProfile };
 }
 
 interface RawOverride {
@@ -50,6 +57,7 @@ export const BackendPanel = forwardRef<BackendPanelHandle, BackendPanelProps>(
   const [embedders, setEmbedders] = useState<BackendProfile[]>([]);
   const [llmProfile, setLlmProfile] = useState<string>("");
   const [embedProfile, setEmbedProfile] = useState<string>("");
+  const [judgeProfile, setJudgeProfile] = useState<string>(JUDGE_DEFAULT);
   const [ceiling, setCeiling] = useState<string>("");
   const [raw, setRaw] = useState<RawOverride>({ baseUrl: "", model: "", apiKey: "" });
   const [error, setError] = useState<string | null>(null);
@@ -67,6 +75,9 @@ export const BackendPanel = forwardRef<BackendPanelHandle, BackendPanelProps>(
         setEmbedders(res.embedders);
         setLlmProfile(res.profiles[0]?.name ?? RAW);
         setEmbedProfile(res.embedders[0]?.name ?? RAW);
+        setJudgeProfile(
+          res.profiles.some((p) => p.name === "haiku") ? "haiku" : JUDGE_DEFAULT,
+        );
       })
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : "Failed to load backends");
@@ -80,6 +91,7 @@ export const BackendPanel = forwardRef<BackendPanelHandle, BackendPanelProps>(
       const res = await createSession({
         llm: selectionFor(llmProfile, raw),
         embed: selectionFor(embedProfile, raw),
+        judge_llm: judgeSelection(judgeProfile),
         mode,
         budget: { ceiling: ceiling ? Number(ceiling) : null },
       });
@@ -101,6 +113,7 @@ export const BackendPanel = forwardRef<BackendPanelHandle, BackendPanelProps>(
   useImperativeHandle(ref, () => ({ connect: doConnect }), [
     llmProfile,
     embedProfile,
+    judgeProfile,
     ceiling,
     raw,
     mode,
@@ -126,6 +139,30 @@ export const BackendPanel = forwardRef<BackendPanelHandle, BackendPanelProps>(
           ))}
           <option value={RAW}>Raw override…</option>
         </select>
+      </div>
+
+      <div className="field">
+        <label htmlFor="judge-profile">Judge model</label>
+        <select
+          id="judge-profile"
+          value={judgeProfile}
+          onChange={(e) => {
+            setJudgeProfile(e.target.value);
+            onDirty();
+          }}
+          disabled={disabled}
+        >
+          <option value={JUDGE_DEFAULT}>Default (haiku)</option>
+          {profiles.map((p) => (
+            <option key={p.name} value={p.name}>
+              {p.label} — {p.model}
+            </option>
+          ))}
+        </select>
+        <p className="loop-config-hint">
+          Strong model that judges presentation quality (tables, diagrams,
+          format repairs). Defaults to haiku when left on Default.
+        </p>
       </div>
 
       <div className="field">

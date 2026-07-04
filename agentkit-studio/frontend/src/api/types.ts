@@ -467,6 +467,8 @@ export type BackendSelection =
 export interface SessionRequest {
   llm: BackendSelection;
   embed: BackendSelection;
+  /** Strong-model judge for presentation detection; omit/null → backend haiku default. */
+  judge_llm?: BackendSelection | null;
   mode: RunMode;
   budget: { ceiling: number | null };
 }
