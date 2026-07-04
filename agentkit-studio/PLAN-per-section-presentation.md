@@ -109,6 +109,31 @@ backend :8770). On the real v9 artifact (`backend/tmp/studio-workspaces/s_791e2d
    component list is grounded (literal-token) in that section. Only then implement §3.
 Scratch harness in `backend/` (delete after, like the #1 `a2_*` scratch — do NOT commit).
 
+### §7 RESULT — live prompt-test PASSED (2026-07-04, gemma-4-26B-A4B-it-heretic-4bit)
+
+Ran the candidate §4 detector + `diagram_render` extraction on all 8 H2 sections of the real v9
+artifact (`s_791e2db70e88`). Verdicts: Executive Summary→PROSE ✓, Scope→PROSE ✓, **Background and
+Context→DIAGRAM (9 comp / 6 edges)** ✓, Key Findings→DIAGRAM (has_block already → idempotency skips),
+Evidence and Analysis→DIAGRAM (6/4), Implications→PROSE ✓, Limitations→PROSE ✓, References→PROSE ✓.
+
+**Two confirmed findings:**
+1. **Detector fixes the old failure** — Executive Summary + Scope (whole-doc detector false-positived
+   these as `architecture`) now correctly PROSE. The text-first, no-`<placeholder>` prompt works. KEEP it.
+2. **C3 trivial-pass CONFIRMED live** — the PROSE sections (Exec Summary, Implications, Limitations) ALSO
+   yield grounded components WITH edges that render=YES (gemma echoes section nouns → literal grounding
+   passes → edges render). So grounding + edge-count do NOT gate diagram-WORTHINESS; the **detector is the
+   sole value gate**. Never lean on grounding for "should this be a diagram."
+
+**MVP is safe despite 2 detector leaks** (Key Findings, Evidence and Analysis): under C5 confidence-
+ranking + one-diagram cap, the top-ranked section is Background and Context (9c/6e, the genuine
+architecture) — the leaks rank below and are never drawn. Idempotency covers Key Findings (has_block).
+**Detector-tightening TODO (post-MVP, low priority):** add a "results/evidence/findings sections describing
+WHAT was found are PROSE unless they describe a system's structure" clause to trim the 2 leaks.
+
+Detector prompt that worked (from `psp_prompt_test.py`, now deleted — reproduce in the wiring): text-first
+materiality bar (≥3 distinct named components with REAL relationships/flow, not a narrative/meta/findings/
+citations section), untrusted-data framing, one-word DIAGRAM/PROSE answer, temp 0.0.
+
 ## 8. Sequencing
 
 MVP diagram (§3, gate §2(A)) → live-validate a diagram LANDS per-section via the production path →
