@@ -31,8 +31,12 @@ scaffolding fragments + orphaned analysis in References + an unclosed code fence
    pure narrative). **The model is the ceiling, not the prompt.**
 3. **A/B (haiku): single-shot 4/6 == multi-round cascade 4/6, single-shot 4x cheaper.** Multi-round
    (user's "one by one" idea) only helps a WEAK model that can't hold 5 options; a capable model doesn't
-   need it. → adopt single-shot on a strong model. (The two arms have COMPLEMENTARY misses — an ensemble
-   could reach ~5-6/6 if ever justified, but not worth the cost now.)
+   need it. → adopt single-shot on a strong model.
+3b. **FEW-SHOT is the settled adjudicator (committed `16dd8ac`).** Web research (EMNLP-2025 hierarchical
+   classification: top-down cascades error-accumulate; Wei-2022: CoT hurts small models) pointed to
+   in-context examples over cascades/CoT. Measured: few-shot lifted **gemma 1→4/6, haiku 4→5/6**, and
+   flipped gemma from over-affirming to conservative. Baked into `_adjudicate_prompt` (generic examples,
+   no hardcoding). haiku few-shot 5/6 is the ceiling — the one miss (Key Findings) is a soft/borderline case.
 4. **Classification accuracy is capped by INPUT QUALITY.** Residual haiku misses are (a) genuinely
    borderline sections (Key Findings straddles — it says "packages that layer on top of each other") and
    (b) report DEFECTS (References→DIAGRAM because it's polluted with orphaned analysis paragraphs). So
