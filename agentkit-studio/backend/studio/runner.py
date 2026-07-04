@@ -136,6 +136,52 @@ def _web_cache_available() -> bool:
         return False
 
 
+_PUB_REV_URL_RE = _re.compile(r"https?://[^\s)>\]\"'`]+")
+
+
+def _publish_revision_regressed(
+    pre_text: str,
+    rev_text: str,
+    *,
+    required_sections: list[str] | tuple[str, ...] | None,
+    verified_pre: list[str] | None,
+    verified_rev: list[str] | None,
+) -> list[str]:
+    """Guard the publish-revision accept point (PLAN §9 step 1). A publish
+    revision may only FIX cited defects — never shrink or de-cite. Returns the
+    list of regression reasons (empty == accept-ok). The measured failure
+    (session s_0a3669434b76): a gemma whole-doc rewrite condensed 21.4KB→9.5KB
+    and dropped URL density, yet passed the publish-readiness checks and was
+    accepted wholesale. These guards reject that class DIRECTLY, independent of
+    whether the rewrite happens to be publish-clean.
+
+    Fail-CLOSED: any error returns a single ``gate-error`` reason so the caller
+    NO-OPs (keeps the pre-revision text). Fail-OPEN would accept an unvetted
+    rewrite — wrong outside the epoch gate (PLAN §9 risk 4)."""
+    try:
+        from studio.rubric import rubric_score  # noqa: PLC0415
+
+        pre, rev = pre_text or "", rev_text or ""
+        reasons: list[str] = []
+        if len(rev.split()) < 0.9 * len(pre.split()):
+            reasons.append("shrink-words")
+        if len(rev.encode("utf-8")) < 0.9 * len(pre.encode("utf-8")):
+            reasons.append("shrink-bytes")
+        pre_urls = {u.rstrip(".,;:)") for u in _PUB_REV_URL_RE.findall(pre)}
+        rev_urls = {u.rstrip(".,;:)") for u in _PUB_REV_URL_RE.findall(rev)}
+        if len(rev_urls) < len(pre_urls):
+            reasons.append("de-cite-urls")
+        if len(verified_rev or []) < len(verified_pre or []):
+            reasons.append("de-cite-verified")
+        rev_score = rubric_score(rev, verified_urls=verified_rev or None, required_sections=required_sections)
+        pre_score = rubric_score(pre, verified_urls=verified_pre or None, required_sections=required_sections)
+        if rev_score < pre_score - 1e-3:
+            reasons.append("score-regress")
+        return reasons
+    except Exception:  # noqa: BLE001 — gate error → NO-OP (keep pre-revision), never fail-open-accept (§9 risk 4)
+        return ["gate-error"]
+
+
 def _prune_resolved_weaknesses(weaknesses: list[str], text: str) -> list[str]:
     """Drop stale deterministic weaknesses that the final artifact no longer has."""
     if not weaknesses:
@@ -1025,6 +1071,32 @@ def _editor_drive_round(
             pass
 
 
+# Mermaid Safe Mode / Comment-First Protocol (EugeneJian/Mermaid_Safe_Mode, MIT).
+# On gemma-class models the live run produced 0 mermaid across 6 structural-retry
+# attempts (session s_0a3669434b76). The MVP harness measured this exact prompt
+# body at 0/4 valid+grounded, and the CFP block below at 4/4 (13 grounded nodes),
+# on the real v9 artifact. The protocol converts diagram generation from
+# probabilistic reasoning to pattern-matching: comment the node's shape/id first,
+# then transcribe it. Constraints that make it work: <=15 nodes, NO styling
+# (classDef/linkStyle is the single biggest error source), all labels quoted.
+# FALLBACK (not yet in prod): if CFP still misses on gemma, switch to the
+# components-list -> deterministic-renderer path (harness A2, also 4/4) — the
+# model emits `COMPONENT:`/`EDGE:` lines and our code renders safe mermaid, so
+# validity is guaranteed and grounding is checked on the plain list.
+_MERMAID_SAFE_MODE = (
+    "RULE: MERMAID SAFE MODE — if the structural content you add is a diagram, "
+    "emit ONE mermaid flowchart following this EXACTLY:\n"
+    "- First line: `flowchart TD`.\n"
+    "- Before EVERY node write a comment `%% Type: <shape> <ID>`, then transcribe "
+    "that exact ID into the node.\n"
+    "- Maximum 15 nodes; every node label wrapped in double quotes, e.g. A[\"Planner\"].\n"
+    "- NO styling: no classDef, linkStyle, style, click, or subgraph.\n"
+    "- Edges only as `A --> B` or `A -->|\"label\"| B`.\n"
+    "- Ground EVERY node ONLY in entities/relations that already appear in the "
+    "report's own prose — never invent nodes or relationships."
+)
+
+
 def _editor_structural_retry_prompt(
     requirement: str, opportunities: list[str], feedback: str = ""
 ) -> str:
@@ -1033,6 +1105,8 @@ def _editor_structural_retry_prompt(
         f"{_EDITOR_PERSONA}\n\nTask: {requirement}\n"
         f"{feedback_block}\n"
         + _structural_opportunity_block(opportunities)
+        + "\n\n"
+        + _MERMAID_SAFE_MODE
     )
 
 
@@ -3822,14 +3896,54 @@ class Runner:
             # but fail the user's report contract (for example no citations or topic drift).
             # It does not replace LLM planning; it only surfaces a final readiness verdict and
             # feeds failures into the existing weakness/adjusted-score path.
+            # §9 step 5: grow depth from under-used grounded evidence BEFORE the
+            # publish gate. Guarded + no-op-safe (studio.expand_sections) — zero
+            # LLM calls when no section is under the word floor, so healthy reports
+            # pay nothing. On accept it persists through the SAME section machinery
+            # the publish-accept path uses, so the served artifact stays consistent.
+            if use_llm:
+                try:
+                    from studio.expand_sections import expand_underdeveloped_sections
+                    from studio.rubric import rubric_score as _exp_rubric
+
+                    _pre_exp = _scored_text or result_output or ""
+                    _exp_text, _exp_stats = expand_underdeveloped_sections(
+                        text=_pre_exp,
+                        requirement=_original_requirement,
+                        evidence_outputs=outputs,
+                        verified_urls=_verified_urls,
+                        required_sections=_active_template(session),
+                        chat=lambda p: getattr(
+                            base_client.chat([{"role": "user", "content": p}]), "text", ""
+                        ) or "",
+                        rubric_score=_exp_rubric,
+                    )
+                    if _exp_stats["added"] and _exp_text != _pre_exp:
+                        _scored_text = _exp_text
+                        result_output = _exp_text
+                        if _art_file.exists():
+                            _scored_text = _write_artifact_through_sections(
+                                session, _effective_ws_root, _scored_text, _original_requirement
+                            )
+                            result_output = _scored_text
+                            _update_active_template_from_artifact(session, _scored_text)
+                            _verified_urls = _verified_urls_from_cache(_scored_text)
+                        self._emit(GateEvent(
+                            name="depth-expansion",
+                            outcome="pass",
+                            detail=f"added {_exp_stats['added']} grounded paragraph(s) from under-used evidence",
+                            sandboxed=True,
+                        ))
+                except Exception:  # noqa: BLE001 — depth expansion is best-effort; never blocks publish
+                    pass
             _t_pub = time.monotonic()  # T1: publish-revision stage timer
             try:
                 from studio.report_quality import (
-                    build_publish_revision_prompt,
                     build_revision_evidence_text,
                     combined_publish_issues,
                     evaluate_publish_readiness,
                 )
+                from studio.publish_patch import apply_publish_patches, build_patch_prompt
                 _publish = evaluate_publish_readiness(
                     _original_requirement,
                     _scored_text or result_output or "",
@@ -3842,17 +3956,41 @@ class Runner:
                 )
                 if use_llm and _revision_issues:
                     if _evidence_text:
-                        _rev_prompt = build_publish_revision_prompt(
-                            _original_requirement,
-                            _scored_text or result_output or "",
-                            _revision_issues,
-                            _evidence_text,
+                        # §9 step 3: bounded fragment+anchor PATCHES, not a
+                        # whole-doc rewrite. The model names each defect and emits
+                        # only the changed fragment; we fuzzy-apply it. Whole-doc-
+                        # shaped patches are rejected in apply_publish_patches, so a
+                        # weak model cannot smuggle a full rewrite (the 21.4KB→9.5KB
+                        # failure) through the patch channel.
+                        _draft = _scored_text or result_output or ""
+                        _patch_prompt = build_patch_prompt(
+                            _original_requirement, _draft, _revision_issues, _evidence_text
                         )
-                        _rev = base_client.chat([{"role": "user", "content": _rev_prompt}])
-                        _rev_text = strip_satisfied_placeholders(
-                            normalize_artifact(
-                                _strip_preamble(getattr(_rev, "text", "") or "").strip()
+                        _pr = base_client.chat([{"role": "user", "content": _patch_prompt}])
+                        _rev_text, _pstats, _unresolved = apply_publish_patches(
+                            _draft, getattr(_pr, "text", "") or ""
+                        )
+                        # One bounded retry for unresolved anchors, then skip — no
+                        # loop, so the patch gate can never deadlock (§9 risk 1).
+                        if _unresolved:
+                            _retry_prompt = (
+                                _patch_prompt
+                                + "\n\nThese anchors were NOT found verbatim; re-emit "
+                                "ONLY those patches with anchors copied EXACTLY from the "
+                                "report:\n" + "\n".join(f"- {a[:120]}" for a in _unresolved)
                             )
+                            try:
+                                _pr2 = base_client.chat(
+                                    [{"role": "user", "content": _retry_prompt}]
+                                )
+                                _rev_text, _pstats2, _ = apply_publish_patches(
+                                    _rev_text, getattr(_pr2, "text", "") or ""
+                                )
+                                _pstats["applied"] += _pstats2["applied"]
+                            except Exception:  # noqa: BLE001 — retry is best-effort
+                                pass
+                        _rev_text = strip_satisfied_placeholders(
+                            normalize_artifact(_strip_preamble(_rev_text or "").strip())
                         )
                         if _rev_text:
                             _rev_verified = _verified_urls
@@ -3869,17 +4007,32 @@ class Runner:
                             _rev_issues = combined_publish_issues(
                                 _rev_publish, _rev_text, _evidence_text
                             )
+                            # §9 step 1: a publish revision may only FIX defects,
+                            # never shrink/de-cite/regress. Reject that class even
+                            # when the rewrite is publish-clean (that is exactly how
+                            # the 21.4KB→9.5KB loss slipped through). Gate error →
+                            # NO-OP, never fail-open-accept (§9 risk 4).
+                            _rev_regress = _publish_revision_regressed(
+                                _scored_text or result_output or "",
+                                _rev_text,
+                                required_sections=_active_template(session),
+                                verified_pre=_verified_urls,
+                                verified_rev=_rev_verified,
+                            )
+                            _rev_ok = (not _rev_issues) and (not _rev_regress)
                             _rg = GateEvent(
                                 name="publish-revision",
-                                outcome="pass" if not _rev_issues else "fail",
+                                outcome="pass" if _rev_ok else "fail",
                                 detail=(
                                     "Report passed deterministic publish-readiness checks."
-                                    if not _rev_issues else "; ".join(_rev_issues)
+                                    if _rev_ok else "; ".join(
+                                        [*_rev_issues, *(f"guard:{r}" for r in _rev_regress)]
+                                    )
                                 ),
                                 sandboxed=True,
                             )
                             self._emit(_rg)
-                            if not _rev_issues:
+                            if _rev_ok:
                                 _scored_text = _rev_text
                                 result_output = _rev_text
                                 _verified_urls = _rev_verified
@@ -3939,8 +4092,19 @@ class Runner:
                 if _residual_issues:
                     _seen_w = set(_weaknesses)
                     _weaknesses = [w for w in _residual_issues if w not in _seen_w] + _weaknesses
-            except Exception:  # noqa: BLE001 — publish gate must never break recording
-                pass
+            except Exception as _pub_err:  # noqa: BLE001 — publish gate must never break recording
+                # P2-b: a gate ERROR is a no-op (prior text kept), but make it
+                # OBSERVABLE — a silently swallowed exception looks like "gate
+                # passed". Emit a failed event so no-op is visible.
+                try:
+                    self._emit(GateEvent(
+                        name="publish-ready",
+                        outcome="fail",
+                        detail=f"publish gate error (kept prior text): {_pub_err}",
+                        sandboxed=True,
+                    ))
+                except Exception:  # noqa: BLE001 — telemetry must not raise
+                    pass
             self._stage_add("publish", _t_pub)
             # Finalization/revision can repair defects after the miner/linter already
             # recorded them. Prune resolved deterministic lint strings against the exact

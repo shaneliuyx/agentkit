@@ -1878,6 +1878,31 @@ def test_publish_gate_emits_failure_for_report_without_sources(fake_client_facto
     assert "no source URL" in gates[0].detail
 
 
+def test_publish_gate_error_emits_observable_failure(fake_client_factory, monkeypatch) -> None:
+    # P2-b: a publish-gate EXCEPTION must emit a failed GateEvent (no-op kept
+    # prior text), not swallow silently. build_revision_evidence_text is called
+    # only inside the publish try, so forcing it to raise exercises that path.
+    import studio.report_quality as _rq
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("gate boom")
+
+    monkeypatch.setattr(_rq, "build_revision_evidence_text", _boom)
+    events: list[StudioEvent] = []
+    session = _make_session()
+    runner = Runner(session, events.append, client_factory=fake_client_factory, embedder=None)
+    runner.run(
+        "Write a research report about catalog management for agent loops and skills. "
+        "Use fetched evidence and citations."
+    )
+    gate_errors = [
+        e for e in events
+        if e.EVENT_TYPE == "gate" and getattr(e, "name", "") == "publish-ready"
+        and e.outcome == "fail" and "gate error" in (e.detail or "")
+    ]
+    assert gate_errors, "publish-gate exception must emit an observable failure event"
+
+
 def test_final_report_step_requires_synthesis_and_reflection() -> None:
     prompt = _final_step_instruction(
         "Write a research report about catalog management. Include citations.",
