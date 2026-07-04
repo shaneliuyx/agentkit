@@ -3809,6 +3809,7 @@ class Runner:
                 TaskRun,
                 TaskRunStore,
                 base_identity as _base_identity,
+                evidence_rows_from_outputs,
                 mine_weaknesses_from_outputs,
                 score_result,
                 task_hash as _task_hash,
@@ -4570,7 +4571,10 @@ class Runner:
                     # §14.4: snapshot the effective hill-climb config so a later run of
                     # this task can recover its epoch budget across backend restarts.
                     config=_hc_cfg or {},
-                    evidence=_evidence_rows,
+                    # Persist the raw worker outputs alongside the evidence matrix so a
+                    # resumed run can re-feed them to the depth-expansion stage (which
+                    # otherwise starts from evidence_json=[]). Bounded per-output.
+                    evidence=_evidence_rows + evidence_rows_from_outputs(outputs),
                     # Fix 2: True only when relevance_issues() ran this epoch (cross-task
                     # seed). Lets future similar_runs() deprioritize pre-feature seeds.
                     relevance_checked=self._epoch_relevance_checked,

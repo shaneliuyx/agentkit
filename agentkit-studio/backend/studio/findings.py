@@ -68,6 +68,14 @@ def _weakness_score(
 #: finding whose URL didn't fit under the old cap.
 _PREFETCH_LIMIT = 24
 
+#: Depth cap: how many findings whose URL is ALREADY cited in the artifact may still be
+#: folded in per already-cited source. Was a HARD drop (effectively 0) which gutted
+#: resumed reports — every URL is already present, so the drop deleted almost all new
+#: substance. A small cap lets an established source add a couple of NEW angles to deepen
+#: a section without rebuilding a 26-citation quote-wall from one URL. Exact-duplicate
+#: findings are still removed upstream by dedupe_findings/consolidate_findings.
+_MAX_FINDINGS_PER_CITED_URL = 2
+
 
 def _cited_urls(drafts: list[str]) -> list[str]:
     """Extract every cited URL from worker drafts, plain ``URL:`` lines AND the
@@ -258,14 +266,16 @@ def _make_section_reducer(
             "section (sections are the '##' headings).\n\n"
             "Each patch is one object:\n"
             '  {"op": "insert_after", "anchor": "## <exact section heading from the '
-            'artifact>", "content": "<a substantiating SENTENCE woven from the '
-            'finding: its central claim + a short verbatim quote + the source URL>"}\n'
+            'artifact>", "content": "<a SHORT 2-4 sentence paragraph woven from the '
+            "finding: develop its central claim + a short verbatim quote + the "
+            'source URL>"}\n'
             '  - op is "insert_after" (add prose under a heading) or "replace" (swap a '
             "placeholder line for grounded prose).\n"
             "  - anchor MUST be text that already exists in the CURRENT ARTIFACT.\n"
             "  - content ADDS grounded prose and keeps every source URL.\n\n"
             "PATCH CONTENT CONTRACT:\n"
-            "  - content is one short paragraph or sentence, not a markdown section.\n"
+            "  - content is a SHORT 2-4 sentence paragraph that develops the finding's "
+            "claim (not one bare sentence), never a markdown section.\n"
             "  - content MUST include at least one http(s) source URL copied from a worker.\n"
             "  - content MUST NOT contain '#', '##', a report title, a full document, "
             "a template placeholder, or an empty-section marker.\n"
@@ -278,7 +288,7 @@ def _make_section_reducer(
             "  - Every added claim keeps its source URL from the worker's "
             "RESEARCH_FINDING.\n"
             "  - A weakness below resolved by a worker (with a real URL) → weave it in "
-            "as a sentence, not a bare citation line.\n"
+            "as a short 2-4 sentence paragraph, not a bare citation line.\n"
             "  - No worker content for a section → emit no patch for it.\n\n"
             f"SECTION WEAKNESSES (review checklist):\n{wk_block}\n\n"
             f"{req_section}"
@@ -324,12 +334,14 @@ def _make_section_reducer(
         from agentkit.artifacts.dedup import consolidate_findings, dedupe_findings
         from studio.task_runs import _normalize_url
         findings, n_dedup = dedupe_findings(findings, embedder)
-        # F6 (reducer-side dedup): against-doc — drop a finding whose URL is ALREADY cited
-        # in the artifact (re-citing the same source is the bulk of the quote-wall).
+        # F6 (reducer-side dedup): against-doc — CAP (was: hard-drop) findings whose URL is
+        # ALREADY cited in the artifact. Re-citing the same source is the bulk of the
+        # quote-wall, but a hard drop deleted almost all NEW substance on a resumed report
+        # (every URL already present). Allow a couple of new angles per cited source instead.
         _cited = {_normalize_url(u) for u in _re.findall(r'https?://\S+', art_block)}
         _n_doc = len(findings)
-        findings = [f for f in findings if _normalize_url(f.url) not in _cited]
-        n_doc_dup = _n_doc - len(findings)
+        findings = _cap_findings_by_cited_url(findings, _cited)
+        n_doc_capped = _n_doc - len(findings)
         # F6: same-URL merge + scaffolding strip + per-section density cap. Thins the wall
         # at its source so _findings_to_patches emits ~1 woven sentence per real source.
         findings, _cstats = consolidate_findings(findings, norm_url=_normalize_url)
@@ -337,7 +349,7 @@ def _make_section_reducer(
         patches = llm_patches + floor_patches
         if not patches:
             _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
-                 f"llm={len(llm_patches)} floor=0 dedup={n_dedup} doc_dup={n_doc_dup} "
+                 f"llm={len(llm_patches)} floor=0 dedup={n_dedup} doc_capped={n_doc_capped} "
                  f"url_merged={_cstats['url_merged']} capped={_cstats['capped']} → NO PATCHES")
             return art_block, tokens  # nothing to add → unchanged (no truncation)
         # Resolve anchors before merging: a finding's PATCH_TARGET that is not a real
@@ -357,7 +369,7 @@ def _make_section_reducer(
         merged = _apply_ranking(rr.text, findings)
         _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
              f"llm={len(llm_patches)} floor={len(floor_patches)} dedup={n_dedup} "
-             f"doc_dup={n_doc_dup} url_merged={_cstats['url_merged']} capped={_cstats['capped']} "
+             f"doc_capped={n_doc_capped} url_merged={_cstats['url_merged']} capped={_cstats['capped']} "
              f"applied_delta={len(rr.text) - len(art_block)} conflicts={len(rr.conflicts)} "
              f"ranked_delta={len(merged) - len(rr.text)}")
         return merged.strip(), tokens
@@ -546,6 +558,27 @@ def _findings_to_patches(findings: list) -> list:
         else:
             patches.append(DocPatch(op="append", anchor=None, content=content, source="finding"))
     return patches
+
+
+def _cap_findings_by_cited_url(findings: list, cited: set[str]) -> list:
+    """Keep findings for uncited URLs unchanged; for URLs already cited in the artifact,
+    keep at most ``_MAX_FINDINGS_PER_CITED_URL`` (the surplus is quote-wall risk). Replaces
+    the old hard drop that deleted every already-cited finding — which gutted resumed
+    reports whose URLs are all already present. Exact-duplicate findings are already removed
+    upstream by dedupe_findings/consolidate_findings; ``cited`` is a set of _normalize_url'd
+    URLs already present in the artifact."""
+    from studio.task_runs import _normalize_url
+
+    per_url: dict[str, int] = {}
+    kept: list = []
+    for f in findings:
+        nu = _normalize_url(getattr(f, "url", ""))
+        if nu in cited:
+            if per_url.get(nu, 0) >= _MAX_FINDINGS_PER_CITED_URL:
+                continue
+            per_url[nu] = per_url.get(nu, 0) + 1
+        kept.append(f)
+    return kept
 
 
 def _research_findings_to_patches(text: str) -> list:

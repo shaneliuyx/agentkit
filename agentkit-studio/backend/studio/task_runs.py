@@ -498,6 +498,20 @@ class TaskRun:
     status: str = "completed"
 
 
+def evidence_rows_from_outputs(outputs: dict, *, max_chars: int = 8000) -> list[dict]:
+    """Worker label→output map → evidence rows for ``TaskRun.evidence``, so a resumed run
+    can re-feed the raw worker outputs to expand_underdeveloped_sections (which otherwise
+    starts from ``evidence_json='[]'`` and has nothing to grow depth from). Bounded: each
+    output is trimmed to ``max_chars`` so a single run row cannot bloat the DB. Rows carry
+    ``kind='worker_output'`` so evidence-matrix consumers can distinguish them from the
+    grounded finding rows recorded alongside them."""
+    return [
+        {"kind": "worker_output", "label": str(label), "output": (out or "")[:max_chars]}
+        for label, out in (outputs or {}).items()
+        if out
+    ]
+
+
 class TaskRunStore:
     """SQLite store for cross-session task run history."""
 
