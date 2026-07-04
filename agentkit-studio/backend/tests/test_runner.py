@@ -3921,6 +3921,128 @@ def test_a2_accept_gate_restores_on_score_regression(tmp_path, monkeypatch) -> N
     assert not [e for e in retry if e.outcome == "accept"]
 
 
+# --------------------------------------------------------------------------- #
+# Per-section presentation pass (Follow-up #2): after the round loop, runs      #
+# independent of cur_issues / requirement opportunities (codex M2) — a section  #
+# that WARRANTS a diagram gets one even on an otherwise-clean report.           #
+# --------------------------------------------------------------------------- #
+
+_PS_ARTIFACT = (
+    "# Agent Loops Report\n\n"
+    "## Executive Summary\n\nA short narrative overview of the study and its aims.\n\n"
+    "## Key Findings\n\nThe Planner builds a plan. The Executor runs tools. The Memory "
+    "store persists state. The Scorer grades the artifact.\n\n"
+    "## References\n\n- https://x.test/e\n"
+)
+_PS_COMPONENTS = (
+    "COMPONENT: Planner | builds plan\nCOMPONENT: Executor | runs tools\n"
+    "COMPONENT: Memory | persists state\nCOMPONENT: Scorer | grades output\n"
+    "EDGE: Planner -> Executor\nEDGE: Executor -> Scorer\n"
+)
+
+
+class _PSClient:
+    """Detector says DIAGRAM only for ``diagram_heading``; component extraction (prompt
+    has '=== REPORT ===') returns fixed grounded lines; every other turn is inert."""
+
+    def __init__(self, diagram_heading: str, components: str = _PS_COMPONENTS) -> None:
+        self.diagram_heading = diagram_heading
+        self.components = components
+        self.saw_extraction = False
+
+    def chat(self, messages, tools=None):
+        import re
+
+        from agentkit.types import ChatResult
+        content = messages[0].get("content", "") if messages else ""
+        if "=== REPORT ===" in content and "COMPONENT:" in content:
+            self.saw_extraction = True
+            return ChatResult(text=self.components, total_tokens=1)
+        if "DIAGRAM or PROSE" in content:
+            m = re.search(r"SECTION HEADING: (.+)", content)
+            head = m.group(1).strip() if m else ""
+            return ChatResult(
+                text="DIAGRAM" if self.diagram_heading in head else "PROSE", total_tokens=1
+            )
+        return ChatResult(text="", total_tokens=1)
+
+
+def _run_ps(tmp_path, session, art_file, before_art, client, events):
+    from studio import runner as _runner_mod
+    return _runner_mod._run_editor_pass(
+        session=session,
+        base_client=client,
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        max_rounds=1,
+    )
+
+
+def test_section_presentation_adds_diagram_to_clean_report(tmp_path, monkeypatch) -> None:
+    """A report with NO weaknesses (the round loop breaks immediately on empty
+    cur_issues) still gets a diagram in the warranting section via the post-loop
+    presentation pass — the exact M2 case the old opportunity-gated path skipped."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _PS_ARTIFACT)
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    client = _PSClient("Key Findings")
+    events: list = []
+    final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
+    assert client.saw_extraction  # the components prompt actually fired
+    assert "```mermaid" in final and "flowchart TD" in final
+    assert "*Figure:" in final  # caption (C8)
+    assert "```mermaid" in art_file.read_text(encoding="utf-8")  # persisted on disk
+    accepts = [
+        e for e in events
+        if getattr(e, "name", "") == "section_presentation" and e.outcome == "accept"
+    ]
+    assert len(accepts) == 1 and "Key Findings" in accepts[0].detail
+    assert "remaining=0" in accepts[0].detail  # M1 telemetry: 1 warranted, 1 satisfied
+
+
+def test_section_presentation_reverts_on_score_regression(tmp_path, monkeypatch) -> None:
+    """The presentation pass reuses the non-regression gate: a diagram that drops the
+    score is reverted, artifact byte-identical, a reject event emitted."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _PS_ARTIFACT)
+    before_art = art_file.read_text(encoding="utf-8")
+
+    def _scored(session_, text, *a, **k):
+        return (0.3, []) if "mermaid" in text else (0.5, [])
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", _scored)
+    client = _PSClient("Key Findings")
+    events: list = []
+    final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
+    assert "mermaid" not in final and final == before_art
+    assert "mermaid" not in art_file.read_text(encoding="utf-8")
+    ps = [e for e in events if getattr(e, "name", "") == "section_presentation"]
+    assert any(e.outcome == "reject" for e in ps)
+    assert not [e for e in ps if e.outcome == "accept"]
+
+
+def test_section_presentation_noop_when_nothing_warrants(tmp_path, monkeypatch) -> None:
+    """Detector says PROSE for every section → no diagram, no events, artifact untouched."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _PS_ARTIFACT)
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    client = _PSClient("__none__")  # no heading matches → all PROSE
+    events: list = []
+    final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
+    assert "mermaid" not in final and final == before_art
+    assert not [e for e in events if getattr(e, "name", "") == "section_presentation"]
+
+
 def test_editor_structural_retry_skips_when_baseline_recount_unavailable_or_zero(
     tmp_path, monkeypatch
 ) -> None:

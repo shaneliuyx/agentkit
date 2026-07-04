@@ -1563,6 +1563,64 @@ def _run_editor_pass(
                 opportunity_recount=opportunity_recount,
                 emit=emit,
             )
+
+    # --- Per-section presentation pass (Follow-up #2, MVP: one diagram) ----------
+    # Runs ONCE after the round loop, independent of cur_issues / _opp_active: a section
+    # can warrant a diagram even when the report has no weaknesses and no requirement
+    # opportunity, and the `if not cur_issues: break` above would otherwise skip it
+    # entirely (codex M2). Generates one diagram in the highest-ranked warranting section
+    # that lacks a visual (C5), and keeps it only on score/weakness non-regression AND a
+    # confirmed LOCAL presentation-debt drop — that section went 1->0 (C1). The detector
+    # is the value gate (grounding is a trivial-pass, C3); telemetry surfaces remaining
+    # unmet debt (M1). Best-effort: any failure leaves the editor result untouched.
+    if base_client is not None:
+        try:
+            from studio import section_presentation  # noqa: PLC0415
+            from studio.task_runs import _norm_weakness  # noqa: PLC0415
+            _ps_base_score, _ps_base_issues = _editor_scored_issues(
+                session, scored_text, verified_urls, extra_issues, relevance_penalty
+            )
+            _ps_new, _ps_heading, _ps_telem = section_presentation.plan_one(base_client, scored_text)
+            if _ps_new and _ps_heading:
+                _ps_snapshot = _editor_snapshot(art_file, sections_dir)
+                art_file.write_text(_ps_new, encoding="utf-8")
+                _ps_cand = _write_artifact_through_sections(
+                    session, effective_ws_root, _ps_new, original_requirement
+                )
+                _ps_cand_score, _ps_cand_issues = _editor_scored_issues(
+                    session, _ps_cand, verified_urls, extra_issues, relevance_penalty
+                )
+                _ps_no_new = not (
+                    {_norm_weakness(w) for w in _ps_cand_issues}
+                    - {_norm_weakness(w) for w in _ps_base_issues}
+                )
+                _ps_debt_dropped = section_presentation.section_has_visual(_ps_cand, _ps_heading)
+                _ps_remaining = max(_ps_telem["debt_total"] - 1, 0)
+                if _ps_cand_score >= _ps_base_score and _ps_no_new and _ps_debt_dropped:
+                    scored_text, last_weaknesses = _ps_cand, _ps_cand_issues
+                    emit(GateEvent(
+                        name="section_presentation", outcome="accept",
+                        detail=(
+                            f"diagram added to {_ps_heading!r} (debt_total="
+                            f"{_ps_telem['debt_total']}, satisfied=1, remaining={_ps_remaining})"
+                        ),
+                        sandboxed=True,
+                    ))
+                    _dbg(f"section presentation ACCEPT {_ps_heading!r} remaining={_ps_remaining}")
+                else:
+                    _editor_restore(art_file, sections_dir, _ps_snapshot)
+                    emit(GateEvent(
+                        name="section_presentation", outcome="reject",
+                        detail=(
+                            f"diagram for {_ps_heading!r} not kept (score "
+                            f"{_ps_base_score:.3f}->{_ps_cand_score:.3f}, no_new_weakness="
+                            f"{_ps_no_new}, debt_dropped={_ps_debt_dropped})"
+                        ),
+                        sandboxed=True,
+                    ))
+                    _dbg(f"section presentation REJECT {_ps_heading!r}")
+        except Exception:  # noqa: BLE001 — presentation is best-effort, never breaks the editor
+            pass
     return scored_text, last_weaknesses
 
 
