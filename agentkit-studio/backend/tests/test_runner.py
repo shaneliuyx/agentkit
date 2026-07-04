@@ -1750,13 +1750,11 @@ def test_gemma_profile_limits_searches_in_runner_tool_loop(fake_client) -> None:
             if "You extract the EXPLICIT, CHECKABLE requirements" in str(messages):
                 return ChatResult(text="NONE", total_tokens=1)
             self.calls += 1
-            if self.calls == 1:
+            _queries = ["one", "two", "three", "four"]
+            if self.calls <= len(_queries):
                 return ChatResult(
-                    text="", total_tokens=1, tool_calls=[("web_search", {"query": "one"})]
-                )
-            if self.calls == 2:
-                return ChatResult(
-                    text="", total_tokens=1, tool_calls=[("web_search", {"query": "two"})]
+                    text="", total_tokens=1,
+                    tool_calls=[("web_search", {"query": _queries[self.calls - 1]})],
                 )
             return ChatResult(text="answer.", total_tokens=1)
 
@@ -1790,7 +1788,9 @@ def test_gemma_profile_limits_searches_in_runner_tool_loop(fake_client) -> None:
         e for e in events
         if e.EVENT_TYPE == "tool_result" and e.tool == "web_search" and e.rejected
     ]
-    assert queries == ["one"]
+    # gemma budget is now 3 searches (raised from 1 once the fabricated-citation
+    # forcing turn made the budget actually bind) — the 4th call is rejected.
+    assert queries == ["one", "two", "three"]
     assert rejected
     assert "budget exhausted" in rejected[0].notice
 
