@@ -1129,6 +1129,8 @@ def _editor_structural_retry(
     *,
     session: Session,
     editor_client: LLMClient,
+    base_client: LLMClient | None,
+    embedder: Any = None,
     original_requirement: str,
     structural_opportunities: list[str],
     scored_text: str,
@@ -1172,6 +1174,86 @@ def _editor_structural_retry(
 
     from studio.task_runs import _norm_weakness  # noqa: PLC0415
     snapshot = _editor_snapshot(art_file, sections_dir)
+
+    def _accept_candidate(candidate_text: str) -> tuple[bool, float, list[str], int | None]:
+        """Run one candidate through the EXISTING accept gate (no score/weakness/
+        lint regression AND a strictly reduced structural-opportunity count). Reused
+        verbatim by both the A2 deterministic path and the tool-augmented loop so the
+        gate can never drift between them."""
+        cand_score, cand_issues = _editor_scored_issues(
+            session, candidate_text, verified_urls, extra_issues, relevance_penalty
+        )
+        no_new_weakness = not (
+            {_norm_weakness(w) for w in cand_issues} - {_norm_weakness(w) for w in base_issues}
+        )
+        regressed = cand_score < base_score or not no_new_weakness
+        cand_opp = _safe_recount(opportunity_recount, candidate_text) if not regressed else None
+        accepted = not regressed and cand_opp is not None and cand_opp < base_opp_count
+        return accepted, cand_score, cand_issues, cand_opp
+
+    # --- A2 deterministic diagram path (Bug A) --------------------------------
+    # For a DIAGRAM-shaped opportunity, bypass the tool-call dependency entirely:
+    # the BARE ``base_client`` emits plain COMPONENT/EDGE lines (a weak model CAN do
+    # this) and ``studio.diagram_render`` renders + grounds + inserts the mermaid
+    # block deterministically — validity is guaranteed by construction, insertion is
+    # a direct file write (not a model tool call). The tool-augmented loop below is
+    # kept as a fallback (covers tables/code examples, and a diagram if A2 misses).
+    from studio.requirement_compliance import _DIAGRAM_SHAPED_RE  # noqa: PLC0415
+    from studio import diagram_render  # noqa: PLC0415
+
+    _diagram_shaped = bool(_DIAGRAM_SHAPED_RE.search(" ".join(structural_opportunities)))
+    if base_client is not None and _diagram_shaped:
+        body = None
+        try:
+            reply = base_client.chat([{
+                "role": "user",
+                "content": diagram_render.build_components_prompt(scored_text),
+            }])
+            body = diagram_render.render_grounded_diagram(
+                str(getattr(reply, "text", "") or ""), scored_text, embedder=embedder
+            )
+        except Exception:  # noqa: BLE001 — a failed A2 attempt falls through to the loop
+            body = None
+        if body:
+            candidate_text = None
+            try:
+                new_art = diagram_render.insert_diagram_block(
+                    art_file.read_text(encoding="utf-8"), body
+                )
+                art_file.write_text(new_art, encoding="utf-8")
+                candidate_text = _write_artifact_through_sections(
+                    session, effective_ws_root, new_art, original_requirement
+                )
+            except Exception:  # noqa: BLE001
+                candidate_text = None
+            accepted, cand_score, cand_issues, cand_opp = (
+                _accept_candidate(candidate_text) if candidate_text else (False, 0.0, [], None)
+            )
+            if accepted:
+                emit(GateEvent(
+                    name="editor_structural_retry", outcome="accept",
+                    detail=(
+                        f"A2 deterministic diagram reduced structural "
+                        f"opportunities {base_opp_count}->{cand_opp}"
+                    ),
+                    sandboxed=True,
+                ))
+                _dbg(f"editor structural retry A2 ACCEPT opp {base_opp_count}->{cand_opp}")
+                return candidate_text, cand_issues
+            _editor_restore(art_file, sections_dir, snapshot)
+            emit(GateEvent(
+                name="editor_structural_retry", outcome="reject",
+                detail=(
+                    f"A2 deterministic diagram did not qualify "
+                    f"(score {base_score:.3f}->{cand_score:.3f}, opp_count={cand_opp})"
+                ),
+                sandboxed=True,
+            ))
+            _dbg(
+                f"editor structural retry A2 REJECT score {base_score:.3f}->{cand_score:.3f} "
+                f"opp={cand_opp}"
+            )
+
     feedback = ""
     for attempt in range(1, max_attempts + 1):
         try:
@@ -1250,6 +1332,7 @@ def _run_editor_pass(
     relevance_penalty: float = 0.0,
     quality_opportunities: list[str] | None = None,
     opportunity_recount: Callable[[str], int | None] | None = None,
+    embedder: Any = None,
 ) -> tuple[str, list[str] | None]:
     """Goal-aware editor pass: <=2 rounds, FULL revert on regression.
 
@@ -1466,6 +1549,8 @@ def _run_editor_pass(
             scored_text, last_weaknesses = _editor_structural_retry(
                 session=session,
                 editor_client=editor_client,
+                base_client=base_client,
+                embedder=embedder,
                 original_requirement=original_requirement,
                 structural_opportunities=_structural_opps,
                 scored_text=scored_text,
@@ -4197,6 +4282,10 @@ class Runner:
                         if self._epoch_quality_opportunities
                         else None
                     ),
+                    # A2 diagram grounding uses the pipeline's BGE-M3 embedder for the
+                    # SEMANTIC fabrication guard; None → the guard falls open (accept
+                    # gate is the backstop).
+                    embedder=self._embedder,
                 )
                 if _edited and _edited != _scored_text:
                     _scored_text = _edited

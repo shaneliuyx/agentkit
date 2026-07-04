@@ -449,3 +449,47 @@ the real metric).
   must **no-op, not accept**.
 
 **This §9 + §7 constraint (reuse, don't fork) + §8 patterns = the authoritative implementation spec.**
+
+---
+
+## 10. STRUCTURAL-CONTENT / PRESENTATION DESIGN (Bug A generalization, 2026-07-04)
+
+Live re-run (v4) PROVED Bug B fixed (19.8KB not 9.5KB, 10 URLs, 0.79). Bug A (diagram) still 0 —
+CFP fires but the live retry routes through a TOOL-AUGMENTED editor and weak gemma can't insert a
+mermaid via `patch_artifact`. Harness tested CFP as a bare completion (fidelity gap). Fix = A2 path,
+generalized to a full per-section presentation decision. Owned by agent `diagram-fixer` (task #22).
+
+**Core principle (user):** PER SECTION, pick the RIGHT PRESENTATION for each content chunk. Decision
+by content shape — the unified ladder:
+- PARAGRAPH — flowing argument/logic; few short items; patterns lists can't hold.
+- BULLETED LIST — ≥3-4 PARALLEL items sharing a category, unordered.
+- NUMBERED LIST — order/sequence/priority matters (steps, ranked).
+- TABLE — multiple components need COMPARISON across attributes, OR a list past ~8-10 items.
+- DIAGRAM — multiple components + RELATIONSHIPS / FLOW / STRUCTURE.
+
+**Detection (per section, tiered):** deterministic pre-filter (keywords/relational verbs/≥3 named
+components/numbered steps) → semantic classifier (reuse `_is_structural_opportunity` LLM-fallback
+pattern, run over CONTENT) returning presentation-type. GATES: text-first threshold (≲5-6 items stays
+prose), no-duplication (don't restate prose or an existing block; idempotent), highlight-main-findings.
+
+**Generation (cheapest-tier-that's-correct):** DETERMINISTIC parse + render (list→mermaid / rows→md
+table — code renders, weak model never writes syntax or issues a tool call); SEMANTIC embedding-cosine
+grounding (BGE-M3, NOT brittle keyword — catches implicit meaning); code-inserts directly (no gemma
+tool call); existing accept gate (score/opp/lint non-regression) as backstop; captions on every block.
+
+**Cost/fidelity tiering (user principle):** deterministic WHERE it yields the same result (cheaper+
+faster); embedding where meaning is needed but not full reasoning; LLM only if embedding insufficient.
+Never trade correctness for cheapness (keyword grounding was rejected for this reason).
+
+**Sequencing:** (1) DIAGRAM path — PROMPT-TEST FIRST on live gemma (prove it extracts a correct
+grounded per-section component-list before wiring), then implement + live-validate a mermaid LANDS via
+the production path; (2) TABLE path (same pattern, simpler render); (3) paragraph/list reformatting
+layer (separate report-quality workstream, deferred). `studio/diagram_render.py` (deterministic render)
++ `tests/test_diagram_render.py` already built; the tool-call-bypass wiring + detection are pending the
+prompt-test checkpoint.
+
+**Best-practice sources baked in:** APA tables-figures; Turabian ch.11 (verbal-vs-visual, ≤5-6 items);
+Canada CCDR (tables=precise/comparison, figures=trends/relationships/process); CSE Science Editor
+(table data-ink); Google Tech Writing + Microsoft Style Guide + Cornell CHEC (list vs paragraph,
+parallelism, 2-7 items); UK DfE + WSDOT (headings, accessibility, no spacing hacks). STORM/ScaffoldAgent
+(per-section population + polish never free-rewrites).
