@@ -152,8 +152,10 @@ def _deterministic_decompose(task: str) -> list[dict[str, Any]]:
     if len(parts_and) >= 2:
         return _linear_steps(parts_and)
 
-    # 3. Sentence split
-    sentences = [s.strip() for s in re.split(r"\.\s+", task) if s.strip()]
+    # 3. Sentence split — lookbehind keeps the terminating '.' on each sentence
+    # (eating the delimiter mutated step descriptions: "…scoring matrix." became
+    # "…scoring matrix", breaking exact-text consumers downstream).
+    sentences = [s.strip() for s in re.split(r"(?<=\.)\s+", task) if s.strip()]
     if len(sentences) >= 2:
         return _linear_steps(sentences)
 
