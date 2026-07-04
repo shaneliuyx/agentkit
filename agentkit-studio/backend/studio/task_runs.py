@@ -512,6 +512,20 @@ def evidence_rows_from_outputs(outputs: dict, *, max_chars: int = 8000) -> list[
     ]
 
 
+def outputs_from_evidence_rows(rows: list[dict] | None) -> dict[str, str]:
+    """Inverse of ``evidence_rows_from_outputs``: reconstruct the worker label→output map from
+    a run's persisted evidence rows, filtered to ``kind='worker_output'``. Lets a resumed run
+    re-feed the PRIOR run's raw worker outputs to expand_underdeveloped_sections when the
+    current run produced none (restart / silent-worker resume) — otherwise the saved rows are
+    ignored and depth-expansion starts from nothing. Round-trips through
+    ``evidence_rows_from_outputs`` modulo its ``max_chars`` output trim."""
+    return {
+        str(r["label"]): r.get("output", "")
+        for r in (rows or [])
+        if isinstance(r, dict) and r.get("kind") == "worker_output" and r.get("label")
+    }
+
+
 class TaskRunStore:
     """SQLite store for cross-session task run history."""
 

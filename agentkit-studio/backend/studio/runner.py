@@ -1726,6 +1726,11 @@ def _run_editor_pass(
 #: worse than a cold start, so below this floor _persist_partial_run records nothing.
 _MIN_PARTIAL_CONTENT_WORDS = 20
 
+#: A resumed / silent-worker run whose current worker outputs number fewer than this is
+#: treated as "thin": depth-expansion re-feeds the prior run's persisted worker_output
+#: evidence so it has something to grow from, instead of the current run's empty dict.
+_RESUME_OUTPUT_FLOOR = 2
+
 
 def _artifact_has_real_content(text: str) -> bool:
     """True when ``text`` has section-body content that is real, not just a skeleton.
@@ -4159,11 +4164,25 @@ class Runner:
                     from studio.expand_sections import expand_underdeveloped_sections
                     from studio.rubric import rubric_score as _exp_rubric
 
+                    # Resume depth-restore: a restarted / silent-worker run has an empty or
+                    # thin `outputs`, so expand would start with nothing even though the prior
+                    # run persisted its worker outputs as evidence. Re-feed those (current-run
+                    # outputs win), bounded by the per-row char trim already applied on record.
+                    _exp_outputs = outputs
+                    if len(outputs) < _RESUME_OUTPUT_FLOOR:
+                        from studio.task_runs import outputs_from_evidence_rows
+                        _prior_run = _store.latest(_thash)
+                        _prior_outputs = (
+                            outputs_from_evidence_rows(_prior_run.evidence)
+                            if _prior_run is not None else {}
+                        )
+                        if _prior_outputs:
+                            _exp_outputs = {**_prior_outputs, **outputs}
                     _pre_exp = _scored_text or result_output or ""
                     _exp_text, _exp_stats = expand_underdeveloped_sections(
                         text=_pre_exp,
                         requirement=_original_requirement,
-                        evidence_outputs=outputs,
+                        evidence_outputs=_exp_outputs,
                         verified_urls=_verified_urls,
                         required_sections=_active_template(session),
                         chat=lambda p: getattr(

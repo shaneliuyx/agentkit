@@ -86,21 +86,99 @@ def test_worker_outputs_round_trip_through_store(tmp_path) -> None:
     assert len(big[0]["output"]) == 8000
 
 
-# --- CHANGE 3: per-URL depth cap (replaces hard drop) --------------------------
+# --- CHANGE 3: per-URL depth floor survives the FULL reduce pipeline -----------
 
-def test_cited_url_capped_not_dropped() -> None:
-    from studio.findings import _MAX_FINDINGS_PER_CITED_URL, _cap_findings_by_cited_url
+def test_cited_url_yields_one_finding_after_full_reduce_pipeline() -> None:
+    """Depth-restoration guard, asserting the ACTUAL reduce sequence — not the helper in
+    isolation. An already-cited URL with several distinct-claim findings must survive
+    dedupe -> _cap_findings_by_cited_url -> consolidate_findings as EXACTLY ONE finding:
+
+      * not ZERO  — proves the un-zeroing depth win (the old hard-drop deleted every
+        already-cited source on a resumed report, leaving it shallow);
+      * not a rebuilt wall — consolidate_findings collapses same-URL to one downstream,
+        which is exactly why capping the helper at >1 buys nothing. The old isolation
+        test asserted ``== 2`` against the helper alone and hid this collapse.
+    """
+    from agentkit.artifacts.dedup import consolidate_findings, dedupe_findings
+    from studio.findings import _cap_findings_by_cited_url
     from studio.task_runs import _normalize_url
 
     cited_url = "https://cited.com/x"
     fresh_url = "https://fresh.com/y"
     cited = {_normalize_url(cited_url)}
 
-    findings = [Finding(url=cited_url, why=f"distinct angle {i}") for i in range(6)]
-    findings.append(Finding(url=fresh_url, why="brand new source"))
+    angles = [
+        "Throughput scales with worker concurrency.",
+        "Latency is dominated by network round-trips.",
+        "Cost grows linearly with token volume.",
+    ]
+    findings = [
+        Finding(url=cited_url, quote=f"verbatim excerpt {i}", why=angles[i])
+        for i in range(len(angles))
+    ]
+    findings.append(Finding(url=fresh_url, quote="fresh excerpt", why="A brand-new uncited source."))
 
-    kept = _cap_findings_by_cited_url(findings, cited)
+    # replicate studio/findings.py reduce order (~336-347); no embedder -> lexical fallback
+    findings, _ = dedupe_findings(findings, None)
+    findings = _cap_findings_by_cited_url(findings, cited)
+    findings, _ = consolidate_findings(findings, norm_url=_normalize_url)
 
-    n_cited = sum(1 for f in kept if _normalize_url(f.url) == _normalize_url(cited_url))
-    assert n_cited == _MAX_FINDINGS_PER_CITED_URL == 2  # 2 survive, 4 capped
-    assert any(_normalize_url(f.url) == _normalize_url(fresh_url) for f in kept)  # uncited untouched
+    n_cited = sum(1 for f in findings if _normalize_url(f.url) == _normalize_url(cited_url))
+    n_fresh = sum(1 for f in findings if _normalize_url(f.url) == _normalize_url(fresh_url))
+    assert n_cited == 1  # un-zeroed: survives, held to one by consolidate (no wall)
+    assert n_fresh == 1  # fresh/uncited source unaffected
+
+
+# --- CHANGE 2b: persisted worker evidence is reconstructed + re-fed on resume ---
+
+def test_evidence_rows_reconstruct_round_trip() -> None:
+    """``outputs_from_evidence_rows`` is the inverse of ``evidence_rows_from_outputs``
+    (modulo the 8000-char trim) and ignores non-worker_output rows."""
+    from studio.task_runs import evidence_rows_from_outputs, outputs_from_evidence_rows
+
+    d = {"worker-1": "body A", "worker-2": "body B"}
+    assert outputs_from_evidence_rows(evidence_rows_from_outputs(d)) == d
+
+    # finding/other rows are filtered out
+    mixed = evidence_rows_from_outputs(d) + [{"kind": "finding", "label": "x", "output": "q"}]
+    assert outputs_from_evidence_rows(mixed) == d
+
+    # the char trim is the only lossy step
+    assert outputs_from_evidence_rows(evidence_rows_from_outputs({"w": "x" * 20000})) == {"w": "x" * 8000}
+
+
+def test_resume_refeeds_prior_worker_outputs_to_expand() -> None:
+    """Simulated resume: the current run produced NO worker outputs, but the prior run
+    persisted worker_output evidence rows. The runner's reconstruct+merge (runner.py
+    ~4165) must hand ``expand_underdeveloped_sections`` non-empty evidence so depth can
+    grow — the defect was passing the current run's empty ``outputs`` and ignoring the
+    saved rows. Asserts the reconstructed prior source actually reaches expand's synthesis
+    prompt (proves it flowed all the way in, not merely that a dict was non-empty)."""
+    from studio.expand_sections import expand_underdeveloped_sections
+    from studio.task_runs import evidence_rows_from_outputs, outputs_from_evidence_rows
+
+    current_outputs: dict[str, str] = {}  # silent-worker / restart resume
+    prior_rows = evidence_rows_from_outputs({"w1": "PRIOR EVIDENCE BODY https://src.example/a"})
+
+    # replicate runner merge (current-run outputs win)
+    prior_outputs = outputs_from_evidence_rows(prior_rows)
+    exp_outputs = {**prior_outputs, **current_outputs}
+    assert exp_outputs  # non-empty — expand now has evidence to grow from
+
+    captured: dict[str, bool] = {}
+
+    def fake_chat(prompt: str) -> str:
+        captured["saw_prior_evidence"] = "PRIOR EVIDENCE BODY" in prompt
+        return ""  # no synthesis; we only assert the evidence reached the prompt
+
+    # thin section + a source URL not yet in the body => that source is "under-used"
+    expand_underdeveloped_sections(
+        text="## Analysis\nShort.\n",
+        requirement="analyze the system",
+        evidence_outputs=exp_outputs,
+        verified_urls=None,
+        required_sections=None,
+        chat=fake_chat,
+        rubric_score=lambda *a, **k: 0.0,
+    )
+    assert captured.get("saw_prior_evidence") is True

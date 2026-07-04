@@ -68,13 +68,15 @@ def _weakness_score(
 #: finding whose URL didn't fit under the old cap.
 _PREFETCH_LIMIT = 24
 
-#: Depth cap: how many findings whose URL is ALREADY cited in the artifact may still be
-#: folded in per already-cited source. Was a HARD drop (effectively 0) which gutted
-#: resumed reports — every URL is already present, so the drop deleted almost all new
-#: substance. A small cap lets an established source add a couple of NEW angles to deepen
-#: a section without rebuilding a 26-citation quote-wall from one URL. Exact-duplicate
-#: findings are still removed upstream by dedupe_findings/consolidate_findings.
-_MAX_FINDINGS_PER_CITED_URL = 2
+#: Depth floor for findings whose URL is ALREADY cited in the artifact. Was a HARD drop
+#: (effectively 0) which zeroed out resumed reports — every URL is already present, so the
+#: drop deleted almost every source. This keeps a cited source's SINGLE (richest, after
+#: consolidation) finding instead of dropping it entirely. NOTE the value is 1, not >1:
+#: ``consolidate_findings`` downstream already merges same-URL findings to one, so a larger
+#: cap buys NOTHING for the deterministic floor patches. This guard only prevents the
+#: zeroing-out; it does not multiply findings. Exact-duplicates are removed upstream by
+#: dedupe_findings/consolidate_findings.
+_MAX_FINDINGS_PER_CITED_URL = 1
 
 
 def _cited_urls(drafts: list[str]) -> list[str]:
@@ -334,14 +336,15 @@ def _make_section_reducer(
         from agentkit.artifacts.dedup import consolidate_findings, dedupe_findings
         from studio.task_runs import _normalize_url
         findings, n_dedup = dedupe_findings(findings, embedder)
-        # F6 (reducer-side dedup): against-doc — CAP (was: hard-drop) findings whose URL is
-        # ALREADY cited in the artifact. Re-citing the same source is the bulk of the
-        # quote-wall, but a hard drop deleted almost all NEW substance on a resumed report
-        # (every URL already present). Allow a couple of new angles per cited source instead.
+        # F6 (reducer-side dedup): against-doc — a finding whose URL is ALREADY cited in the
+        # artifact used to be HARD-dropped, which zeroed out every source on a resumed report
+        # (every URL already present). Keep its single richest finding instead of dropping it.
+        # consolidate_findings below enforces one-per-URL regardless, so this only un-zeroes
+        # the cited sources — it does not multiply findings.
         _cited = {_normalize_url(u) for u in _re.findall(r'https?://\S+', art_block)}
         _n_doc = len(findings)
         findings = _cap_findings_by_cited_url(findings, _cited)
-        n_doc_capped = _n_doc - len(findings)
+        n_doc_capped = _n_doc - len(findings)  # surplus findings dropped per already-cited URL
         # F6: same-URL merge + scaffolding strip + per-section density cap. Thins the wall
         # at its source so _findings_to_patches emits ~1 woven sentence per real source.
         findings, _cstats = consolidate_findings(findings, norm_url=_normalize_url)
@@ -562,11 +565,13 @@ def _findings_to_patches(findings: list) -> list:
 
 def _cap_findings_by_cited_url(findings: list, cited: set[str]) -> list:
     """Keep findings for uncited URLs unchanged; for URLs already cited in the artifact,
-    keep at most ``_MAX_FINDINGS_PER_CITED_URL`` (the surplus is quote-wall risk). Replaces
-    the old hard drop that deleted every already-cited finding — which gutted resumed
-    reports whose URLs are all already present. Exact-duplicate findings are already removed
-    upstream by dedupe_findings/consolidate_findings; ``cited`` is a set of _normalize_url'd
-    URLs already present in the artifact."""
+    keep at most ``_MAX_FINDINGS_PER_CITED_URL`` (=1). Replaces the old hard drop that
+    deleted EVERY already-cited finding and zeroed out resumed reports whose URLs are all
+    already present. Since ``consolidate_findings`` downstream collapses same-URL findings
+    to one regardless, this only prevents the zeroing-out — it does NOT multiply the surviving
+    findings, so a cap above 1 would be a no-op for the deterministic floor patches. Kept as
+    a named guard (not inlined) to document that intent. Exact-duplicates are already removed
+    upstream by dedupe_findings; ``cited`` is a set of _normalize_url'd URLs in the artifact."""
     from studio.task_runs import _normalize_url
 
     per_url: dict[str, int] = {}
