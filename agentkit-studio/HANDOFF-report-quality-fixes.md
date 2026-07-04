@@ -115,7 +115,10 @@ narrative/meta summary") + a cleaner (non-placeholder-echoing) output format.
    `_GROUND_COSINE_MIN`/`_cosine`/`_StubEmbedder`/`embedder` param; caller (`runner.py:1212`) + both test
    files updated (`_AxisEmbedder`/`_Boom` doubles deleted). LLM-verify residual escape hatch NOT added
    (deferred per DECISION A #3 — residual == fabrications today). **710 passed / 4 deselected**; module
-   self-check green. Uncommitted on `build-research-report-generator-plan`.
+   self-check green. **Committed `7a7f049`.** Follow-on codex-review fix **C2 (`843fa44`)**: reject an
+   edgeless component list in `render_grounded_diagram` (N boxes / 0 edges is not a diagram) — `_MIN_EDGES`.
+   Follow-up #2 (per-section presentation loop) designed + codex-reviewed in `PLAN-per-section-presentation.md`
+   §10 (build order: C2✓ → live prompt-test → local-debt gate + one-diagram wiring → tests → #4 list, #3 table).
 2. **Per-section detection loop** — current wiring runs on the WHOLE `scored_text` and produces ONE
    diagram. User wants PER-SECTION: iterate H2 sections, decide per section, generate for qualifying
    sections only. Idempotent (skip a section already having a mermaid/table), text-first threshold
