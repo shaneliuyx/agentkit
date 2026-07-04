@@ -67,15 +67,35 @@ finer walk · References=BULLETED(currently polluted). Format: line-265 unclosed
 - End-to-end: run analyzer via the wired path, confirm haiku adjudication, compare to MY GROUND TRUTH.
 - A/B single-shot vs multi-round is DONE (single-shot won); re-confirm after wiring.
 
-### D. Shallowness diagnosis (user directive — the ROOT) — NOT STARTED
-- READ the report + its EVIDENCE files (`backend/tmp/studio-workspaces/s_2b186fac503d/evidence/*` or
-  the fetch cache), form MY ground truth of what depth/content the report SHOULD have given the
-  evidence, then diagnose the code that makes it shallow. Known suspects (from PLAN-generic §P5/Bug C):
-  per-target dedup cap 3/section (`dedup.py:92`), cited-URL drop pre-consolidation (`findings.py:327`),
-  one-short-paragraph reducer contract (`findings.py:268`), same-URL merge (`dedup.py:77`). Also the
-  orphaned/repetitive scaffolding this artifact shows (Exec Summary + Background have near-duplicate
-  citation fragments; References has misplaced analysis) — a de-dup/cleanup gap.
-- Make the code output a satisfying (deep, clean) result vs MY ground truth.
+### D. Shallowness diagnosis (user directive — the ROOT) — DIAGNOSED (2026-07-04), fix NOT yet built
+
+**Evidence (measured on s_2b186fac503d):** 9 sources / ~375KB (source-003 = 119KB) → 22.9KB report
+= **~6% utilization**. The `io/*.reducer.in/out` pairs localize the collapse: worker extracts ~34KB of
+findings → reducer emits **~6 ONE-SENTENCE patches (~3.5KB)**. The run's own weakness log admits it:
+"Evidence synthesis 7.4/14.7, Analytical depth 5.3/10.5, multiple redundant/duplicate sections."
+
+**Three confirmed code roots (the depth ceiling is architectural, not a knob):**
+1. **`findings.py:268` — reducer contract "content is one short paragraph or SENTENCE, not a markdown
+   section."** Forbids multi-sentence synthesis BY DESIGN; depth accretes one sentence/round and
+   plateaus. PRIMARY cap.
+2. **`findings.py:333` — per-section density cap** ("thins the wall") — anti-citation-wall, over-thins
+   real depth.
+3. **`findings.py:327` — drops a finding whose URL is ALREADY cited** — a section can't be DEEPENED from
+   a source it cited once; each source ≈ 1 sentence/section then locked out.
+Plus: additive-only reducer + weak dedup → near-duplicate sentences across rounds (the "redundant
+sections" weakness) — wastes the depth budget on repetition.
+
+**MY GROUND TRUTH of target depth:** the 9 sources are genuinely rich (Pi architecture, lifecycle
+handlers, context-window internals; GH issues #350/#807; package.json; 2 Substack deep-dives). A
+satisfying report carries MULTI-SENTENCE synthesized analysis per section, draws >1 claim per rich
+source, and does not repeat itself. Current: ~6% + visible repetition.
+
+**Fix direction (PLAN-generic §P5 / codex, NOT yet implemented):** an **expand-underdeveloped-sections**
+stage fed by UNUSED grounded findings — hard-guarded (only `_parse_findings` survivors; URL retention;
+expand only sections below an evidence/word floor; ≤1 synthesized paragraph per source-cluster; reject
+if citation density rises without synthesis density) — PLUS relax the cited-URL drop (327) and make the
+density cap (333) floor-aware for under-developed sections. This is the hardest deferred bug (touches the
+core reducer/findings pipeline); implement + real-gemma verify in a FRESH session.
 
 ## UNCOMMITTED / PARKED
 The earlier diagram-GENERATION MVP (`studio/section_presentation.py` + the `_run_editor_pass` wiring +
