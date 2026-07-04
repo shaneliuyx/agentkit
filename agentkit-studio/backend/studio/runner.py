@@ -28,6 +28,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
+# Module-level so EVERY method sees it: the phase-loop extraction left this as a
+# local import in the parent method, and _run_phase_loop's gap-ledger clause hit
+# NameError on TaskRecord (silently, behind fail-open guards) — same disease as
+# the dropped judge_client parameter.
+from agentkit.orchestrator.ledger import TaskLedger, TaskRecord
 from agentkit.planner.core import Plan, PlanStep, plan
 from agentkit.topology.core import (
     DURABLE_BOARD,
@@ -2331,7 +2336,6 @@ class Runner:
         )
 
         # M8: cross-phase TaskLedger and dynamic sizing (DESIGN §3, §5)
-        from agentkit.orchestrator.ledger import TaskRecord, TaskLedger
         _ledger = TaskLedger()
         # Seed the ledger with every planned phase UP FRONT (DESIGN §2.3 / §3.2).
         # Without this, all_tasks stayed empty and remaining() was structurally
@@ -2521,6 +2525,7 @@ class Runner:
             result_output=result_output,
             outputs=outputs,
             base_client=base_client,
+            judge_client=judge_client,
             use_llm=use_llm,
             _base_requirement=_base_requirement,
             _original_requirement=_original_requirement,
@@ -3830,6 +3835,13 @@ class Runner:
         result_output: str,
         outputs: dict[str, str],
         base_client,
+        # Strong-model judge for the editor's presentation detection. The postrun
+        # extraction silently dropped this from scope — the editor call's arg
+        # evaluation raised NameError, the fail-open except ate it, and the whole
+        # editor/presentation stage never ran on ANY live run (editor=0.00s).
+        # Default None (not base_client) so a missed caller degrades visibly in
+        # tests rather than silently judging with the weak generator.
+        judge_client=None,
         use_llm: bool,
         _base_requirement: str,
         _original_requirement: str,
