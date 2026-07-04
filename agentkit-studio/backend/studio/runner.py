@@ -695,6 +695,25 @@ def _write_artifact_through_sections(
     return (root / "artifact.md").read_text(encoding="utf-8")
 
 
+def _pick_scored_source(art_file: Path, result_output: str) -> str:
+    """Return the text to finalize/score: the canonical ``artifact.md`` when present,
+    else the most substantial workspace ``.md`` — in default "auto" mode nothing
+    bootstraps the canonical file and the agent writes the report under a filename
+    IT chose, so keying on ``artifact.md`` alone scored a phase's short status
+    string instead of the real report on disk. Never prefers a shorter file over
+    a longer in-memory return."""
+    try:
+        candidates = [art_file] if art_file.exists() else list(art_file.parent.glob("*.md"))
+        if candidates:
+            best = max(candidates, key=lambda p: p.stat().st_size)
+            file_text = best.read_text()
+            if len(file_text.strip()) >= len((result_output or "").strip()):
+                return file_text
+    except Exception:  # noqa: BLE001 - a read failure must not break recording
+        pass
+    return result_output
+
+
 def _dbg(msg: str) -> None:
     """Append a throughput-diagnostic line to the file named by OMC_THROUGHPUT_DEBUG.
 
@@ -1389,6 +1408,10 @@ def _run_editor_pass(
     misread as success. This is an ADDITION to the accept logic; every existing
     revert-on-regression protection for score/lint/weaknesses is unchanged."""
     rc = getattr(session, "rubric_config", None) or {}
+    _dbg(f"[DIAG-ENTRY] tools={getattr(session, 'tools_enabled', False)} "
+         f"base={base_client is not None} sm={bool(rc.get('scoring_matrix'))} "
+         f"art_exists={art_file.exists()} art={art_file} "
+         f"scored={bool((scored_text or '').strip())} scored_len={len(scored_text or '')}")
     if not (
         getattr(session, "tools_enabled", False)
         and base_client is not None
@@ -1590,6 +1613,9 @@ def _run_editor_pass(
             _ps_new, _ps_heading, _ps_telem = section_presentation.plan_one(
                 base_client, scored_text, judge_client=judge_client
             )
+            _dbg(f"[DIAG] section_presentation plan_one telem={_ps_telem} "
+                 f"new={_ps_new is not None} heading={_ps_heading!r} "
+                 f"scored_text_len={len(scored_text)} judge={type(judge_client).__name__}")
             if _ps_new and _ps_heading:
                 _ps_snapshot = _editor_snapshot(art_file, sections_dir)
                 art_file.write_text(_ps_new, encoding="utf-8")
@@ -3838,14 +3864,7 @@ class Runner:
             # scoring one text and carrying forward another — the cause of phantom scores
             # (e.g. a recorded 0.50 on a report that re-scores 0.80). Prefer the file when
             # it is at least as substantial as the return; fall back to result_output.
-            _scored_text = result_output
-            try:
-                if _art_file.exists():
-                    _file_text = _art_file.read_text()
-                    if len(_file_text.strip()) >= len((result_output or "").strip()):
-                        _scored_text = _file_text
-            except Exception:  # noqa: BLE001 - a read failure must not break recording
-                pass
+            _scored_text = _pick_scored_source(_art_file, result_output)
             # N1 / anti-accumulation (verified live): collapse DUPLICATE section headings in the
             # FINAL artifact before it is scored, served, and carried forward as the next seed.
             # A gemma spoke that echoes the whole document, stacked by the grow-only writeback,
@@ -3867,6 +3886,24 @@ class Runner:
                     _dbg(f"normalize_artifact: un-glued + deduped → {len(_scored_text)} chars")
             except Exception:  # noqa: BLE001 — dedupe is best-effort; never break recording
                 pass
+            # ROOT CAUSE (verified live, editor=0.00s): cold-start "auto"-mode runs end
+            # with NO canonical artifact.md — the skeleton bootstrap is gated on
+            # mode=="llm" and only seeded lineage runs get the file copied in. Every
+            # downstream stage gated on art_file.exists() — the editor/presentation
+            # passes (diagrams/tables/lists), the mermaid-repair write-back, and the
+            # next run's seed carry-forward — was silently dead for exactly those runs.
+            # Materialize the finalized text under the canonical name (sections +
+            # assembled artifact.md) before those gates evaluate.
+            if not _art_file.exists() and (_scored_text or "").strip():
+                try:
+                    _scored_text = _write_artifact_through_sections(
+                        session, _effective_ws_root, _scored_text, _original_requirement
+                    )
+                    result_output = _scored_text
+                    _update_active_template_from_artifact(session, _scored_text)
+                    _dbg(f"materialized artifact.md ({len(_scored_text)} chars) — cold-start auto-mode run")
+                except Exception:  # noqa: BLE001 — materialization is best-effort
+                    pass
             # Scoring and weakness mining must use the RAW client (base_client), not the
             # ToolAugmentedClient. When the scorer has web_search available, it calls it
             # to verify citations — fabricated or paywalled articles score 0.0 even when

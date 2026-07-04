@@ -272,6 +272,43 @@ def test_section_writeback_assembles_artifact_from_section_files(tmp_path) -> No
     assert active == ["Executive Summary", "References", "New Section"]
 
 
+def test_pick_scored_source_prefers_canonical_artifact(tmp_path) -> None:
+    from studio.runner import _pick_scored_source
+
+    ws = tmp_path / "s_x"
+    ws.mkdir()
+    (ws / "artifact.md").write_text("# Canonical report\n" + "body " * 50)
+    (ws / "notes.md").write_text("# Bigger side file\n" + "noise " * 500)
+    picked = _pick_scored_source(ws / "artifact.md", "short return")
+    assert picked.startswith("# Canonical report")
+
+
+def test_pick_scored_source_falls_back_to_agent_named_md(tmp_path) -> None:
+    """Cold-start auto-mode runs never bootstrap artifact.md (skeleton is gated on
+    mode=="llm") — the agent writes the report under its OWN filename. The
+    finalizer must score that file, not the phase's short status return."""
+    from studio.runner import _pick_scored_source
+
+    ws = tmp_path / "s_x"
+    ws.mkdir()
+    report = "# Agent Frameworks Research Report\n" + "finding sentence. " * 200
+    (ws / "agent_frameworks_research_report.md").write_text(report)
+    picked = _pick_scored_source(ws / "artifact.md", "Report complete, see file.")
+    assert picked == report
+
+
+def test_pick_scored_source_never_prefers_shorter_file(tmp_path) -> None:
+    from studio.runner import _pick_scored_source
+
+    ws = tmp_path / "s_x"
+    ws.mkdir()
+    (ws / "stub.md").write_text("# stub")
+    long_return = "# Full report\n" + "rich body. " * 100
+    assert _pick_scored_source(ws / "artifact.md", long_return) == long_return
+    # And with no files at all, the in-memory return survives untouched.
+    assert _pick_scored_source(tmp_path / "s_none" / "artifact.md", long_return) == long_return
+
+
 def test_section_writeback_prefers_active_report_title(tmp_path) -> None:
     from studio.runner import _write_artifact_through_sections
 
