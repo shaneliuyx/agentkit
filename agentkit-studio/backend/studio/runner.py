@@ -1210,7 +1210,7 @@ def _editor_structural_retry(
                 "content": diagram_render.build_components_prompt(scored_text),
             }])
             body = diagram_render.render_grounded_diagram(
-                str(getattr(reply, "text", "") or ""), scored_text, embedder=embedder
+                str(getattr(reply, "text", "") or ""), scored_text
             )
         except Exception:  # noqa: BLE001 — a failed A2 attempt falls through to the loop
             body = None

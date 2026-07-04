@@ -24,28 +24,29 @@ and THIS module (pure Python, no LLM) renders those lines into a guaranteed-vali
 so the output is always syntactically valid by construction. Insertion is done by
 the caller writing the artifact file directly, NOT via a model tool call.
 
-GROUNDING GUARD — SEMANTIC, NOT KEYWORD
----------------------------------------
+GROUNDING GUARD — LITERAL TOKEN PRESENCE (empirically settled, HANDOFF DECISION A)
+---------------------------------------------------------------------------------
 The primary grounding is inherent: gemma builds the component/edge list BY READING
-the report, so it already extracts the report's own (often implicit) structure.
-The safety guard against fabrication is a SEMANTIC check, NOT literal keyword/
-substring matching. Keyword matching is brittle — it would reject a validly-
-grounded node like "Feedback Loop" whose meaning is paraphrased in the prose
-("the agent iterates on its own critique") with no shared literal token. That is
-the exact whack-a-mole this codebase already fixed once for ``_STRUCTURAL_OPP_RE``
-(which needed an LLM-fallback classifier because a fixed vocabulary can't capture
-implicit meaning). So we embed each node label and the report's section text with
-the pipeline's existing BGE-M3 embedder and keep a node only if its max cosine
-against any section clears ``_GROUND_COSINE_MIN`` — paraphrase and synonyms pass,
-a node whose concept appears NOWHERE (even semantically) is rejected.
+the report, so real nodes are **verbatim substrings of the prose by construction**.
+The fabrication guard keeps a node only if ≥1 significant token (len≥4, case-
+insensitive) of its label literally appears in the report.
 
-When no embedder is available in the retry context, we FALL OPEN — trust the
-model's extraction and render all parsed components — because the accept gate
-(rubric/lint non-regression + strict opportunity-count drop) is the final
-backstop; a missing embedder must never hard-reject a real diagram.
+This deliberately REVERSES the earlier embedding-cosine guard. That guard was
+measured on the real v9 artifact and found INERT: BGE-M3 scores short entity
+labels by DOMAIN, not presence, so a same-domain fabrication ("Stripe Billing
+API", 0.540) TIES a real component ("Agentic logic", 0.540) — only ~0.03
+separation, so no threshold rejects anything. Literal-token presence separated the
+same data cleanly (real 4/4 tokens in the section, fabricated 0/3). The feared
+"paraphrase/synonym" failure of literal matching does NOT materialize here,
+precisely because the generator extracts labels FROM the prose rather than
+inventing them. (Escape hatch, deferred until a real non-literal node is ever
+observed: one cheap LLM-verify per zero-token-overlap residual node. Currently the
+residual == the fabrications, so it would add cost for nothing — not added.)
 
-Ported from ``tmp/mvp_harness`` (the validated A2 render candidate); grounding
-upgraded from the harness's keyword check to the semantic check per review.
+A label with no significant token (all <4 chars, e.g. "AI", "DB") cannot be
+literal-checked → it FALLS OPEN (kept). The accept gate (rubric/lint non-regression
++ strict opportunity-count drop) is the final backstop, so grounding must never
+hard-reject what it cannot check.
 """
 from __future__ import annotations
 
@@ -58,22 +59,14 @@ import re
 _MIN_NODES = 4
 _MAX_NODES = 15
 
-#: Cosine floor for the SEMANTIC grounding guard (BGE-M3). Tuned empirically on the
-#: real v9 artifact (tmp/a2_tune_threshold.py): genuine nodes for that agent-dev
-#: report ("Agent Loop", "Craft", "Executor", "Reflect") score ~0.5-0.75 against
-#: their section; an injected fabrication ("Blockchain Ledger", "Quantum Encryption")
-#: scores ~0.2-0.3. 0.40 sits in the gap — real nodes pass, fabricated nodes fail —
-#: with margin on both sides. This is the calibration knob; re-tune if the embedder
-#: model changes.
-_GROUND_COSINE_MIN = 0.40
+#: Minimum length for a label token to count as a grounding signal. Below this,
+#: tokens are glue words / acronyms too generic to discriminate real from fabricated.
+_MIN_TOKEN_LEN = 4
 
 _COMPONENT_RE = re.compile(r"COMPONENT:\s*([^|]+?)\s*(?:\|.*)?$")
 #: EDGE endpoints are short labels containing no ``->``, so a non-greedy left side up
 #: to the FIRST ``->`` is unambiguous.
 _EDGE_RE = re.compile(r"EDGE:\s*(.+?)\s*->\s*([^|]+?)\s*(?:\|\s*(.*))?$")
-#: Split the artifact into per-section chunks (grounding compares a label against the
-#: section text, per review) — any markdown heading level starts a new chunk.
-_SECTION_SPLIT_RE = re.compile(r"(?m)^#{1,6}\s+")
 
 
 def build_components_prompt(artifact_text: str) -> str:
@@ -81,7 +74,7 @@ def build_components_prompt(artifact_text: str) -> str:
     COMPONENT/EDGE lines this module parses. No mermaid, no tool call, no prose:
     every hard part is done deterministically downstream. The report is the sole
     grounding source; the model is told to name only entities it discusses, and the
-    semantic grounding guard enforces it regardless."""
+    literal-token grounding guard enforces it regardless."""
     return (
         "List the architecture of the system described in the REPORT below as "
         "plain lines. Use ONLY this exact format — no prose, no markdown, no code "
@@ -121,35 +114,28 @@ def _parse(raw: str) -> tuple[list[str], list[tuple[str, str, str]]]:
     return comps, edges
 
 
-def _cosine(a, b) -> float:
-    import numpy as np
-    a = np.asarray(a, dtype=np.float32)
-    b = np.asarray(b, dtype=np.float32)
-    na = float(np.linalg.norm(a))
-    nb = float(np.linalg.norm(b))
-    if na == 0.0 or nb == 0.0 or a.shape != b.shape:
-        return 0.0
-    return float(np.dot(a, b) / (na * nb))
+def _significant_tokens(label: str) -> list[str]:
+    """Lowercased alphanumeric tokens of ``label`` at least ``_MIN_TOKEN_LEN`` chars —
+    the terms specific enough to ground against ("planner", "executor"). Short glue
+    ("a", "the", "of") and bare acronyms ("AI", "DB") are dropped as non-discriminating."""
+    return [t for t in re.findall(r"[a-z0-9]+", label.lower()) if len(t) >= _MIN_TOKEN_LEN]
 
 
-def _ground(comps: list[str], artifact_text: str, embedder, min_cosine: float) -> list[str]:
-    """Keep only components semantically present in the report. FALL OPEN (keep all)
-    when there is no embedder or the embed call fails — the accept gate is the
-    backstop, and a missing embedder must never hard-reject a real diagram."""
-    comps = comps[:_MAX_NODES]
-    if embedder is None:
-        return comps
-    try:
-        sections = [s.strip() for s in _SECTION_SPLIT_RE.split(artifact_text) if s.strip()]
-        sections = sections or [artifact_text]
-        sec_vecs = embedder.embed(sections)
-        label_vecs = embedder.embed(comps)
-    except Exception:  # noqa: BLE001 — embedder down → trust the model's extraction
-        return comps
+def _ground(comps: list[str], artifact_text: str) -> list[str]:
+    """Keep a component iff ≥1 significant token of its label literally appears in the
+    report prose (word-start match, so a plural/inflection of a real term still counts,
+    while a token buried inside an unrelated word does not). Deterministic, zero-cost.
+
+    Real nodes survive because the model extracts the list FROM the prose (verbatim by
+    construction); a fabrication sharing no ≥4-char token with the report is dropped.
+    A label with no significant token at all is un-checkable → kept (fall-open; the
+    accept gate is the backstop). See the module docstring for why this beats the
+    embedding-cosine guard it replaces."""
+    low = artifact_text.lower()
     kept: list[str] = []
-    for name, lv in zip(comps, label_vecs):
-        best = max((_cosine(lv, sv) for sv in sec_vecs), default=0.0)
-        if best >= min_cosine:
+    for name in comps[:_MAX_NODES]:
+        toks = _significant_tokens(name)
+        if not toks or any(re.search(r"\b" + re.escape(t), low) for t in toks):
             kept.append(name)
     return kept
 
@@ -174,20 +160,18 @@ def _render(names: list[str], edges: list[tuple[str, str, str]]) -> str:
     return "\n".join(lines)
 
 
-def render_grounded_diagram(
-    raw: str, artifact_text: str, *, embedder=None, min_cosine: float = _GROUND_COSINE_MIN
-) -> str | None:
-    """Parse the model's COMPONENT/EDGE lines, drop semantically-ungrounded
-    components, and render a guaranteed-valid mermaid ``flowchart TD`` body — or
-    ``None`` if fewer than ``_MIN_NODES`` grounded components survive (adding a
-    diagram then would mean inventing nodes).
+def render_grounded_diagram(raw: str, artifact_text: str) -> str | None:
+    """Parse the model's COMPONENT/EDGE lines, drop ungrounded components (literal-token
+    presence in the report), and render a guaranteed-valid mermaid ``flowchart TD``
+    body — or ``None`` if fewer than ``_MIN_NODES`` grounded components survive (adding
+    a diagram then would mean inventing nodes).
 
     Returns the block BODY (starting ``flowchart TD``), NOT fenced — the caller owns
     fencing + placement via ``insert_diagram_block``."""
     comps, edges = _parse(raw)
     if not comps:
         return None
-    kept = _ground(comps, artifact_text, embedder, min_cosine)
+    kept = _ground(comps, artifact_text)
     if len(kept) < _MIN_NODES:
         return None
     return _render(kept, edges)
@@ -231,35 +215,11 @@ def insert_diagram_block(artifact_text: str, mermaid_body: str) -> str:
     return f"{artifact_text}{sep}\n{block}\n"
 
 
-class _StubEmbedder:
-    """Self-check embedder (no network): any text mentioning a grounded concept →
-    shared axis 0 (so a grounded label and its section score cosine 1.0); each
-    DISTINCT non-grounded string → its own private axis (so a fabricated label matches
-    neither a grounded section nor an ungrounded 'References' section)."""
-
-    _GROUNDED = ("planner", "executor", "memory", "scorer")
-
-    def __init__(self) -> None:
-        self._other: dict[str, int] = {}
-
-    def embed(self, texts):
-        out = []
-        for t in texts:
-            low = t.lower()
-            v = [0.0] * 129
-            if any(g in low for g in self._GROUNDED):
-                v[0] = 1.0
-            else:
-                idx = self._other.setdefault(low.strip(), len(self._other))
-                v[1 + (idx % 128)] = 1.0
-            out.append(v)
-        return out
-
-
 def _demo() -> None:
-    """Runnable self-check (no network): render is valid+balanced; the SEMANTIC guard
-    drops a fabricated node; fall-open (no embedder) keeps everything; insertion lands
-    in a body section. `python -m studio.diagram_render`."""
+    """Runnable self-check (no network, no embedder): render is valid+balanced; the
+    literal-token guard drops a fabricated node and keeps grounded ones; an un-checkable
+    short-token label falls open; insertion lands in a body section.
+    `python -m studio.diagram_render`."""
     report = (
         "## Architecture\nThe Planner builds a plan. The Executor runs tools. The "
         "Memory store persists state. The Scorer grades the artifact.\n## References\n- x\n"
@@ -269,22 +229,22 @@ def _demo() -> None:
         "COMPONENT: Memory | persists state\nCOMPONENT: Scorer | grades output\n"
         "EDGE: Planner -> Executor\nEDGE: Executor -> Scorer\n"
     )
-    emb = _StubEmbedder()
-
-    body = render_grounded_diagram(raw, report, embedder=emb)
+    body = render_grounded_diagram(raw, report)
     assert body and body.startswith("flowchart TD"), body
     assert body.count("[") == body.count("]") and "-->" in body
 
-    # Semantic guard: fabricated nodes (orthogonal embedding) are dropped → below floor.
+    # Literal-token guard: fabricated nodes share no >=4-char token with the report → dropped.
     fabricated = "\n".join(f"COMPONENT: Zorptron{i} | invented" for i in range(6))
-    assert render_grounded_diagram(fabricated, report, embedder=emb) is None
+    assert render_grounded_diagram(fabricated, report) is None
 
-    # Mixed: only grounded survive; 1 grounded < floor → None.
+    # Mixed: only the grounded node survives; 1 grounded < _MIN_NODES → None.
     mixed = "COMPONENT: Planner | real\n" + fabricated
-    assert render_grounded_diagram(mixed, report, embedder=emb) is None
+    assert render_grounded_diagram(mixed, report) is None
 
-    # Fall open (no embedder): trust extraction, keep all → renders.
-    assert render_grounded_diagram(fabricated, report, embedder=None) is not None
+    # Un-checkable short-token labels (no >=4-char token) fall open — grounding must
+    # not hard-reject what it cannot check; the accept gate is the backstop.
+    short = "\n".join(f"COMPONENT: AI{i} | x" for i in range(4))
+    assert render_grounded_diagram(short, report) is not None
 
     out = insert_diagram_block(report, body)
     assert out.index("## Architecture") < out.index("```mermaid") < out.index("## References")

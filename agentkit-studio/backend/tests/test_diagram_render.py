@@ -1,10 +1,9 @@
 """Pure-renderer unit tests for the A2 deterministic diagram path (Bug A).
 
 Deterministic, no LLM/network: the model's job (emit COMPONENT/EDGE lines) is faked
-with literal strings, and the SEMANTIC grounding embedder is faked with an axis
-double (grounded concept → one axis, fabricated → orthogonal). Everything asserted
-here is code we own — parse, render, ground, cap, place. The renderer must NEVER
-emit invalid mermaid regardless of input.
+with literal strings, and grounding is a pure literal-token check against the report
+prose (no embedder). Everything asserted here is code we own — parse, render, ground,
+cap, place. The renderer must NEVER emit invalid mermaid regardless of input.
 """
 from __future__ import annotations
 
@@ -19,32 +18,6 @@ _REPORT = (
     "persists state. The Scorer grades the artifact against a rubric.\n\n"
     "## References\n\n- https://x.test/e\n"
 )
-
-
-class _AxisEmbedder:
-    """Semantic double: any text mentioning a grounded concept → shared axis 0 (a
-    grounded label and its section → cosine 1.0); each DISTINCT non-grounded string →
-    its own axis (a fabricated label matches neither a grounded nor a 'References'
-    section). Mirrors the production geometry closely enough to exercise the guard at
-    the real 0.40 threshold."""
-
-    _GROUNDED = ("planner", "executor", "memory", "scorer", "architecture", "agent", "rubric")
-
-    def __init__(self) -> None:
-        self._other: dict[str, int] = {}
-
-    def embed(self, texts):
-        out = []
-        for t in texts:
-            low = t.lower()
-            v = [0.0] * 129
-            if any(g in low for g in self._GROUNDED):
-                v[0] = 1.0
-            else:
-                idx = self._other.setdefault(low.strip(), len(self._other))
-                v[1 + (idx % 128)] = 1.0
-            out.append(v)
-        return out
 
 
 def _balanced(body: str) -> bool:
@@ -64,7 +37,7 @@ def test_renderer_emits_valid_flowchart_from_clean_lines() -> None:
         "EDGE: Planner -> Executor | hands off\n"
         "EDGE: Executor -> Scorer\n"
     )
-    body = dr.render_grounded_diagram(raw, _REPORT, embedder=_AxisEmbedder())
+    body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None
     assert body.splitlines()[0] == "flowchart TD"
     assert _balanced(body)
@@ -74,7 +47,7 @@ def test_renderer_emits_valid_flowchart_from_clean_lines() -> None:
 
 def test_renderer_tolerates_malformed_and_stray_lines() -> None:
     """Interleaved prose, blank lines, and a broken EDGE must not crash or corrupt the
-    output — stray lines are skipped, valid ones still render (fall-open, no embedder)."""
+    output — stray lines are skipped, valid grounded ones still render."""
     raw = (
         "Sure! Here is the architecture:\n"
         "COMPONENT: Planner | builds plan\n"
@@ -86,53 +59,57 @@ def test_renderer_tolerates_malformed_and_stray_lines() -> None:
         "EDGE: Planner Executor\n"  # malformed (no ->) — skipped
         "EDGE: Planner -> Executor\n"
     )
-    body = dr.render_grounded_diagram(raw, _REPORT, embedder=None)
+    body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None
     assert body.startswith("flowchart TD")
     assert _balanced(body)
 
 
-def test_semantic_guard_rejects_invented_components() -> None:
-    """Every component fabricated (orthogonal embedding, cosine 0) → below floor → None."""
+def test_literal_guard_rejects_invented_components() -> None:
+    """Every component fabricated (no >=4-char token appears in the report) → all
+    dropped → below _MIN_NODES → None."""
     raw = "\n".join(f"COMPONENT: Zorptron{i} | invented" for i in range(6))
-    assert dr.render_grounded_diagram(raw, _REPORT, embedder=_AxisEmbedder()) is None
+    assert dr.render_grounded_diagram(raw, _REPORT) is None
 
 
-def test_semantic_guard_drops_ungrounded_keeps_grounded() -> None:
-    """Mix: only semantically-grounded components survive; 1 grounded (< floor) → None."""
+def test_literal_guard_drops_ungrounded_keeps_grounded() -> None:
+    """Mix: only components whose token literally appears in the report survive; a
+    single grounded node (< _MIN_NODES) → None."""
     raw = (
         "COMPONENT: Planner | real\n"
         "COMPONENT: Zorptron | invented\n"
         "COMPONENT: Blivet | invented\n"
     )
-    assert dr.render_grounded_diagram(raw, _REPORT, embedder=_AxisEmbedder()) is None
+    assert dr.render_grounded_diagram(raw, _REPORT) is None
 
 
-def test_falls_open_when_no_embedder() -> None:
-    """No embedder → trust the model's extraction (accept gate is the backstop). Even
-    'fabricated' names render, because grounding cannot be checked without an embedder."""
-    raw = "\n".join(f"COMPONENT: Zorptron{i} | x" for i in range(5))
-    body = dr.render_grounded_diagram(raw, _REPORT, embedder=None)
+def test_grounding_matches_inflected_forms() -> None:
+    """Word-start matching keeps a real term even as a plural/inflection in the prose
+    ('Loop' vs 'Loops', 'Produce' vs 'produces') — real nodes are not lost to surface
+    variation, which is why literal grounding is safe here."""
+    raw = (
+        "COMPONENT: Loop | the report's title term (appears as 'Loops')\n"
+        "COMPONENT: Produce | appears as 'produces'\n"
+        "COMPONENT: Persist | appears as 'persists'\n"
+        "COMPONENT: Grade | appears as 'grades'\n"
+    )
+    body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None and body.startswith("flowchart TD")
 
 
-def test_falls_open_when_embedder_raises() -> None:
-    """A raising embedder (oMLX down) must fall open, never crash the retry."""
-    class _Boom:
-        def embed(self, texts):
-            raise RuntimeError("embed backend down")
-    raw = (
-        "COMPONENT: Planner | a\nCOMPONENT: Executor | b\n"
-        "COMPONENT: Memory | c\nCOMPONENT: Scorer | d\n"
-    )
-    body = dr.render_grounded_diagram(raw, _REPORT, embedder=_Boom())
+def test_short_token_labels_fall_open() -> None:
+    """Labels with no >=4-char token are un-checkable, so grounding falls open (keeps
+    them) — the accept gate is the backstop; grounding must not reject what it can't check."""
+    raw = "\n".join(f"COMPONENT: AI{i} | x" for i in range(5))
+    body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None and body.startswith("flowchart TD")
 
 
 def test_renderer_caps_node_count() -> None:
-    """A runaway list is capped at _MAX_NODES rendered nodes (fall-open path)."""
-    raw = "\n".join(f"COMPONENT: Node {i} | role" for i in range(20))
-    body = dr.render_grounded_diagram(raw, _REPORT, embedder=None)
+    """A runaway list is capped at _MAX_NODES rendered nodes (all grounded via the
+    'Planner' token that is present in the report)."""
+    raw = "\n".join(f"COMPONENT: Planner {i} | role" for i in range(20))
+    body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None
     node_ids = set(re.findall(r"\bN\d+\b", body))
     assert len(node_ids) <= dr._MAX_NODES
@@ -148,7 +125,7 @@ def test_edges_only_between_rendered_nodes() -> None:
         "EDGE: Planner -> Ghostnode | to a non-component\n"
         "EDGE: Planner -> Executor\n"
     )
-    body = dr.render_grounded_diagram(raw, _REPORT, embedder=_AxisEmbedder())
+    body = dr.render_grounded_diagram(raw, _REPORT)
     assert body is not None
     assert body.count("-->") == 1  # the Ghostnode edge is dropped
 
@@ -159,7 +136,6 @@ def test_insertion_places_block_in_body_before_references() -> None:
         "COMPONENT: Memory | c\nCOMPONENT: Scorer | d\n"
         "EDGE: Planner -> Executor\n",
         _REPORT,
-        embedder=_AxisEmbedder(),
     )
     out = dr.insert_diagram_block(_REPORT, body)
     assert out.index("## Architecture") < out.index("```mermaid") < out.index("## References")

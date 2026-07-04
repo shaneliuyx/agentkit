@@ -3825,30 +3825,6 @@ _A2_GROUNDED_LINES = (
 )
 
 
-class _AxisEmbedder:
-    """Semantic-grounding double: any text mentioning a grounded concept → shared axis
-    0; each DISTINCT non-grounded string → its own axis. A grounded label and its
-    section score cosine 1.0; a fabricated label matches neither a grounded nor an
-    ungrounded ('References') section. `grounded` lists the report's concept tokens."""
-
-    def __init__(self, grounded: tuple[str, ...]) -> None:
-        self.grounded = grounded
-        self._other: dict[str, int] = {}
-
-    def embed(self, texts):
-        out = []
-        for t in texts:
-            low = t.lower()
-            v = [0.0] * 129
-            if any(g in low for g in self.grounded):
-                v[0] = 1.0
-            else:
-                idx = self._other.setdefault(low.strip(), len(self._other))
-                v[1 + (idx % 128)] = 1.0
-            out.append(v)
-        return out
-
-
 def _run_a2(tmp_path, session, art_file, before_art, base_client, recount, events, embedder=None):
     from studio import runner as _runner_mod
     return _runner_mod._run_editor_pass(
@@ -3906,12 +3882,11 @@ def test_a2_grounding_guard_adds_nothing_for_ungrounded_components(tmp_path, mon
     monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
     ungrounded = "\n".join(f"COMPONENT: Zorptron{i} | invented" for i in range(6))
     client = _A2Client(ungrounded)
-    # Embedder grounds real report entities only; the invented "Zorptron" nodes are
-    # orthogonal → cosine 0 → all dropped → below floor → no diagram.
-    embedder = _AxisEmbedder(grounded=("agent", "loop", "summary", "finding", "reference"))
+    # Literal-token grounding: no >=4-char token of any invented "Zorptron" label
+    # appears in the report prose → all dropped → below _MIN_NODES → no diagram.
     events: list = []
     final, _ = _run_a2(
-        tmp_path, session, art_file, before_art, client, lambda t: 1, events, embedder=embedder
+        tmp_path, session, art_file, before_art, client, lambda t: 1, events
     )
     assert "mermaid" not in final
     assert final == before_art
