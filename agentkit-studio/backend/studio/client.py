@@ -29,6 +29,78 @@ from studio.shared_bridge import UsageReport
 OnUsage = Callable[[UsageReport], None]
 
 
+# ── deterministic context compaction (agentkit.context.compactor) ────────────
+#: Compact only past this serialized size — small calls (planner, reducer,
+#: judge single-shots) pass through untouched.
+_COMPACT_MAX_CHARS = int(os.getenv("STUDIO_COMPACT_MAX_CHARS", "100000"))
+#: Verbatim-tail budget. Deliberately generous: recent tool results carry the
+#: fetched-page content the model must QUOTE for the citation contract — the
+#: compactor's one-line transcript would destroy it.
+_COMPACT_TAIL_CHARS = int(os.getenv("STUDIO_COMPACT_TAIL_CHARS", "50000"))
+
+
+def _msg_chars(m: Message) -> int:
+    """Approximate context cost of one message (content + tool_calls payload)."""
+    n = len(str(m.get("content") or ""))
+    for tc in m.get("tool_calls") or []:
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        if isinstance(fn, dict):
+            n += len(str(fn.get("name") or "")) + len(str(fn.get("arguments") or ""))
+    return n + 16  # role + framing overhead
+
+
+def compact_messages(messages: list[Message], *,
+                     max_chars: int = 0, tail_chars: int = 0) -> list[Message]:
+    """Deterministically compact an oversized conversation before an LLM call.
+
+    ``agentkit.context.compactor.compact`` cuts at the last ``keep`` USER turns,
+    which no-ops on a tool loop (one user message, then assistant/tool
+    alternation) — exactly the conversations that balloon. So the cut here is
+    ours: keep leading system messages + the first user message (the
+    assignment) + a verbatim recent tail sized by ``tail_chars``; summarize the
+    middle with ``compact(head, keep=0)``. The tail never starts on a ``tool``
+    message (an orphaned tool result is an API 400 — it must follow the
+    assistant message carrying its tool_calls).
+    """
+    max_chars = max_chars or _COMPACT_MAX_CHARS
+    tail_chars = tail_chars or _COMPACT_TAIL_CHARS
+    if sum(_msg_chars(m) for m in messages) <= max_chars:
+        return messages
+
+    prefix_end = 0
+    while prefix_end < len(messages) and messages[prefix_end].get("role") == "system":
+        prefix_end += 1
+    if prefix_end < len(messages) and messages[prefix_end].get("role") == "user":
+        prefix_end += 1
+
+    # walk the tail backward within budget, then pair-safety: never start on 'tool'
+    start = len(messages)
+    budget = tail_chars
+    while start > prefix_end and budget - _msg_chars(messages[start - 1]) >= 0:
+        start -= 1
+        budget -= _msg_chars(messages[start])
+    while (
+        start > prefix_end
+        and start < len(messages)
+        and messages[start].get("role") == "tool"
+    ):
+        start -= 1
+    if start <= prefix_end:  # tail swallowed everything → nothing left to summarize
+        return messages
+
+    try:
+        from agentkit.context.compactor import compact
+
+        summary = compact(list(messages[prefix_end:start]), keep=0).text
+    except Exception:  # noqa: BLE001 — compaction is an optimization, never a crash
+        return messages
+    bridge: Message = {
+        "role": "user",
+        "content": "[Earlier turns compacted deterministically — summary]\n" + summary,
+    }
+    return list(messages[:prefix_end]) + [bridge] + list(messages[start:])
+
+
 class StudioChatClient:
     """OpenAI-compatible ``LLMClient`` that reports the in/out token split.
 
@@ -86,6 +158,7 @@ class StudioChatClient:
         reducer that reproduces a large artifact must raise it above the API
         default or the document truncates mid-sentence — §11.10).
         """
+        messages = compact_messages(messages)
 
         def _call() -> ChatResult:
             kwargs: dict[str, Any] = {
