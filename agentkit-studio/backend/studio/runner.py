@@ -4796,6 +4796,10 @@ class Runner:
             max_searches=model_profile.max_searches,
             max_successful_fetches=model_profile.max_successful_fetches,
             auto_fetch_top_results=model_profile.auto_fetch_top_results,
+            # Citation-grade slice: a triage-sized snippet forces the model to
+            # paraphrase quotes it should copy verbatim. One section window per
+            # page is what the model can actually attend to per work unit.
+            auto_fetch_page_chars=model_profile.section_window_chars,
         )
 
     def _emit_tool_call(self, sid: str, tool: str, args: dict[str, Any]) -> None:

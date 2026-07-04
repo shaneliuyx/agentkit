@@ -1167,3 +1167,30 @@ def test_auto_fetch_off_by_default_and_fail_open() -> None:
     )
     res2 = c2.chat([{"role": "user", "content": "research"}])
     assert res2.text  # failing fetches never break the loop
+
+
+def test_auto_fetch_page_slice_is_configurable_for_citation_grade_content() -> None:
+    """A triage-sized slice (old hardcoded 2500) forces paraphrased quotes when
+    the quotable sentence sits deeper in the article; the caller sizes the slice
+    to the model's section window so verbatim quoting is possible."""
+    long_page = "x" * 9_000 + " THE QUOTABLE SENTENCE " + "y" * 1_000
+
+    def fetch(url: str, *, selector: str | None = None):
+        from web_toolkit import FetchResult
+        return FetchResult(url=url, ok=True, content=long_page, bytes=len(long_page))
+
+    inner = _SearchThenFinal()
+    c = ToolAugmentedClient(
+        inner, search_fn=_fake_search, fetch_fn=fetch,
+        max_iters=6, auto_fetch_top_results=1, auto_fetch_page_chars=12_000,
+    )
+    c.chat([{"role": "user", "content": "research"}])
+    assert any("THE QUOTABLE SENTENCE" in m for m in inner.tool_msgs)
+
+    inner2 = _SearchThenFinal()
+    c2 = ToolAugmentedClient(
+        inner2, search_fn=_fake_search, fetch_fn=fetch,
+        max_iters=6, auto_fetch_top_results=1, auto_fetch_page_chars=2_500,
+    )
+    c2.chat([{"role": "user", "content": "research"}])
+    assert not any("THE QUOTABLE SENTENCE" in m for m in inner2.tool_msgs)

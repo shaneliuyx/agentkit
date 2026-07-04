@@ -645,6 +645,7 @@ class ToolAugmentedClient:
         max_successful_fetches: int | None = None,
         context_compact: bool = True,
         auto_fetch_top_results: int = 0,
+        auto_fetch_page_chars: int = 12_000,
     ) -> None:
         self._inner = inner
         self._on_tool_call = on_tool_call
@@ -660,6 +661,12 @@ class ToolAugmentedClient:
         self._max_successful_fetches = max_successful_fetches
         self._context_compact = context_compact
         self._auto_fetch_top_results = max(0, int(auto_fetch_top_results))
+        # Per-page slice spliced into the search message. A tiny slice (the
+        # original 2500) is fine for RELEVANCE triage but forces the model to
+        # paraphrase when the quotable sentence sits deeper — verified live: a
+        # 57K-char fetched article produced a stitched near-quote that fails
+        # verbatim grounding. Sized by the caller to the model's section window.
+        self._auto_fetch_page_chars = max(1_000, int(auto_fetch_page_chars))
         #: Per-instance registry — blocks concurrent threads from fetching the
         #: same URL simultaneously (dog-pile prevention within one run).
         self._in_flight = InFlightRegistry()
@@ -1004,7 +1011,7 @@ class ToolAugmentedClient:
             except Exception:  # noqa: BLE001
                 content = ""
             if content:
-                fetched.append({"url": url, "content": content[:2500]})
+                fetched.append({"url": url, "content": content[: self._auto_fetch_page_chars]})
         if fetched:
             payload["fetched_pages"] = fetched
             payload["notice"] = (
