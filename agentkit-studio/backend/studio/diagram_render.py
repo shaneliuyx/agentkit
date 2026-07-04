@@ -121,6 +121,19 @@ def _parse(raw: str) -> tuple[list[str], list[tuple[str, str, str]]]:
     return comps, edges
 
 
+#: Non-discriminating architecture-noise labels (codex review C3): a node named only
+#: "System"/"Data"/"Process" carries no information and clutters the diagram — a real node
+#: has a specific name ("Planner", "pi-agent-core"). Dropped when a label's ONLY significant
+#: tokens are generic; a compound like "Data Pipeline" survives on its non-generic token.
+_GENERIC_LABELS = frozenset({
+    "system", "systems", "process", "processes", "data", "component", "components",
+    "module", "modules", "service", "services", "framework", "frameworks", "tool",
+    "tools", "platform", "platforms", "application", "applications", "layer", "layers",
+    "output", "outputs", "input", "inputs", "result", "results", "object", "objects",
+    "interface", "interfaces", "function", "functions", "pipeline", "pipelines",
+})
+
+
 def _significant_tokens(label: str) -> list[str]:
     """Lowercased alphanumeric tokens of ``label`` at least ``_MIN_TOKEN_LEN`` chars —
     the terms specific enough to ground against ("planner", "executor"). Short glue
@@ -129,20 +142,28 @@ def _significant_tokens(label: str) -> list[str]:
 
 
 def _ground(comps: list[str], artifact_text: str) -> list[str]:
-    """Keep a component iff ≥1 significant token of its label literally appears in the
-    report prose (word-start match, so a plural/inflection of a real term still counts,
-    while a token buried inside an unrelated word does not). Deterministic, zero-cost.
+    """Keep a component iff ≥1 DISCRIMINATING significant token of its label literally
+    appears in the report prose (word-start match, so a plural/inflection of a real term
+    still counts, while a token buried inside an unrelated word does not). Deterministic,
+    zero-cost.
 
     Real nodes survive because the model extracts the list FROM the prose (verbatim by
-    construction); a fabrication sharing no ≥4-char token with the report is dropped.
-    A label with no significant token at all is un-checkable → kept (fall-open; the
-    accept gate is the backstop). See the module docstring for why this beats the
-    embedding-cosine guard it replaces."""
+    construction); a fabrication sharing no ≥4-char token with the report is dropped. A
+    label with no significant token at all is un-checkable → kept (fall-open; the accept
+    gate is the backstop). A label whose ONLY significant tokens are generic
+    ("System", "Data Process") is dropped as non-discriminating (C3). See the module
+    docstring for why literal grounding beats the embedding-cosine guard it replaces."""
     low = artifact_text.lower()
     kept: list[str] = []
     for name in comps[:_MAX_NODES]:
-        toks = _significant_tokens(name)
-        if not toks or any(re.search(r"\b" + re.escape(t), low) for t in toks):
+        sig = _significant_tokens(name)
+        if not sig:
+            kept.append(name)  # un-checkable short label (acronym) → fall open
+            continue
+        discriminating = [t for t in sig if t not in _GENERIC_LABELS]
+        if not discriminating:
+            continue  # generic-only label → drop (C3)
+        if any(re.search(r"\b" + re.escape(t), low) for t in discriminating):
             kept.append(name)
     return kept
 

@@ -107,6 +107,25 @@ def test_short_token_labels_fall_open() -> None:
     assert body is not None and body.startswith("flowchart TD")
 
 
+def test_generic_only_labels_are_dropped() -> None:
+    """Labels whose only significant tokens are generic ('System', 'Data Process') are
+    non-discriminating and dropped (codex C3), even though those words appear in the
+    report; a compound with a specific token ('Planner System') survives."""
+    report = (
+        "# R\n\n## Architecture\n\nThe System processes Data through several Components. "
+        "The Planner drives the whole System.\n"
+    )
+    # All generic → each dropped → < _MIN_NODES → None.
+    generic = (
+        "COMPONENT: System | a\nCOMPONENT: Data | b\nCOMPONENT: Process | c\n"
+        "COMPONENT: Component | d\nEDGE: System -> Data\n"
+    )
+    assert dr.render_grounded_diagram(generic, report) is None
+    # 'Planner' has a discriminating token present in prose; the generics drop, leaving 1 < _MIN_NODES.
+    mixed = "COMPONENT: Planner | real\n" + generic
+    assert dr.render_grounded_diagram(mixed, report) is None
+
+
 def test_edgeless_component_list_is_rejected() -> None:
     """A grounded component list with NO valid edges is not a diagram (no relationships)
     → None, even though all four nodes are grounded and >= _MIN_NODES (codex review C2)."""
