@@ -2190,7 +2190,12 @@ class Runner:
             or ""
         )
         _model_profile = resolve_model_profile(_model_id)
-        _planner_client = MaxTokensClient(base_client, _model_profile.planner_max_tokens)
+        # Planning runs on the STRONG judge model (same rationale as presentation
+        # detection, _build_judge_client): a weak generation model shreds compound
+        # requirements and under-specifies phase deliverables. judge_client degrades
+        # to base_client when the judge backend is unavailable or tests inject one
+        # client, so this never adds a hard dependency.
+        _planner_client = MaxTokensClient(judge_client, _model_profile.planner_max_tokens)
         # Wrap in a web_search tool loop when tools are enabled (run_plan stays
         # unchanged — it sees a plain LLMClient that happens to run a tool loop).
         # When a prior artifact was seeded, also offer read_artifact/patch_artifact

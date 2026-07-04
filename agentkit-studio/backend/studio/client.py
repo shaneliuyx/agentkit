@@ -57,8 +57,14 @@ class StudioChatClient:
         self.model = model
         self.temperature = temperature
         self.retries = int(os.getenv("STUDIO_LLM_RETRIES", str(retries)))
+        # 240s, not 90: a legitimate full-budget completion (8192 tokens at the
+        # measured ~112 tok/s through VibeProxy) takes ~73s of decode alone; add
+        # prefill on a 50K+ spoke prompt and honest requests cross 90s. A 90s
+        # read timeout then aborts work that WOULD finish, and the retry ladder
+        # regenerates from scratch — the run grinds forever (2026-07-04 haiku
+        # leg: 8 spokes × ~21 aborted attempts, hours of zero progress).
         self.timeout_s = timeout_s if timeout_s is not None else float(
-            os.getenv("STUDIO_LLM_TIMEOUT_S", "90")
+            os.getenv("STUDIO_LLM_TIMEOUT_S", "240")
         )
         self._on_usage = on_usage
         self._client = make_client(base_url, api_key)
@@ -94,7 +100,12 @@ class StudioChatClient:
             kwargs["max_tokens"] = max_tokens if max_tokens is not None else 8192
             if tools:
                 kwargs["tools"] = tools
-            r = self._client.with_options(timeout=self.timeout_s).chat.completions.create(**kwargs)
+            # max_retries=0: _resilient below owns retry policy. openai-python's
+            # default (2 internal retries) MULTIPLIES with our ladder — 7 × 3
+            # socket attempts = 21 × timeout worst case per chat() call.
+            r = self._client.with_options(
+                timeout=self.timeout_s, max_retries=0
+            ).chat.completions.create(**kwargs)
             message = r.choices[0].message
             text = (getattr(message, "content", None) or "").strip()
             usage = getattr(r, "usage", None)
