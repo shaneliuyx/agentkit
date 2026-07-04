@@ -184,6 +184,12 @@ def test_render_grounded_table_allows_inferred_dimension_labels() -> None:
            "| Speed | faster | slower |\n| Warp | teleports | vanishes |")
     assert cp.render_grounded_table(bad, sec) is None
 
+    # codex [P2]: a PARTIALLY fabricated row (grounded label + one real value + one invented
+    # entity value) must drop — the exemption is the label column only, not any cell.
+    partial = ("| Attribute | LangGraph | CrewAI |\n| --- | --- | --- |\n"
+               "| Speed | faster | slower |\n| Cost | pricier | leaks secrets |")
+    assert cp.render_grounded_table(partial, sec) is None  # 'leaks secrets' ungrounded -> row drop -> <2
+
 
 def test_render_grounded_list_rejects_below_two_grounded() -> None:
     section = "The system uses caching to reduce latency."

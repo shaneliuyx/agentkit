@@ -178,14 +178,13 @@ def render_grounded_table(reply_text: str, section_body: str) -> str | None:
     section_low = section_body.lower()
     if not _header_grounded(header, section_low):  # entity headers must be real (codex [P2])
         return None
-    # A row survives if a MAJORITY of its cells are grounded — the DATA values must be real,
-    # but ONE inferred dimension label per row is allowed (e.g. a 'Speed'/'Price' row-label
-    # the model coins from 'faster'/'pricier' prose). All-cells-grounded made the broadened
-    # prose-comparison TABLE recommendation a no-op (codex [P2]); a fully fabricated row (no
-    # grounded cell) or a mostly-fabricated one is still dropped.
+    # Only the FIRST cell (the dimension/row label) may be inferred — the model coins a
+    # 'Speed'/'Price' label from 'faster'/'pricier' prose. Every ENTITY DATA cell (cols 1+)
+    # must be grounded, so a partially-fabricated row (one real value, one invented) is
+    # rejected (codex [P2]) while the broadened prose-comparison recommendation is no longer
+    # a no-op. All-cells-grounded had dropped every such row because the label isn't literal.
     def _row_grounded(r: list[str]) -> bool:
-        g = sum(1 for c in r if _cell_grounded(c, section_low))
-        return g * 2 >= len(r) and g >= 1
+        return len(r) >= 2 and all(_cell_grounded(c, section_low) for c in r[1:])
     kept = [r for r in data if _row_grounded(r)]
     if len(kept) < _MIN_TABLE_ROWS:
         return None
