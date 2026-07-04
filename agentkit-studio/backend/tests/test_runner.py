@@ -3729,7 +3729,10 @@ def test_editor_structural_retry_accepts_first_qualifying_attempt(tmp_path, monk
         emit=events.append,
         workspace_root=tmp_path,
         step_id_getter=lambda: "editor",
-        quality_opportunities=["Explicit alternative not included: add an architecture diagram"],
+        # A non-diagram structural opportunity (a table) so this test exercises the
+        # tool-augmented fallback LOOP, not the A2 deterministic diagram path (which
+        # only intercepts diagram-shaped opportunities — see the A2 tests below).
+        quality_opportunities=["Explicit alternative not included: add a comparison table"],
         opportunity_recount=recount,
         max_rounds=1,
     )
@@ -3769,7 +3772,8 @@ def test_editor_structural_retry_restores_when_no_attempt_qualifies(tmp_path, mo
         emit=events.append,
         workspace_root=tmp_path,
         step_id_getter=lambda: "editor",
-        quality_opportunities=["Explicit alternative not included: add an architecture diagram"],
+        # Non-diagram structural opportunity → tool-augmented fallback loop (not A2).
+        quality_opportunities=["Explicit alternative not included: add a comparison table"],
         opportunity_recount=lambda t: 1,  # never drops
         max_rounds=1,
     )
@@ -3778,6 +3782,168 @@ def test_editor_structural_retry_restores_when_no_attempt_qualifies(tmp_path, mo
     retry_events = [e for e in events if getattr(e, "name", "") == "editor_structural_retry"]
     assert len([e for e in retry_events if e.outcome == "reject"]) == 3  # all 3 bounded attempts
     assert not [e for e in retry_events if e.outcome == "accept"]
+
+
+# --------------------------------------------------------------------------- #
+# A2 deterministic diagram path (Bug A): for a DIAGRAM-shaped structural         #
+# opportunity, the BARE base_client emits plain COMPONENT/EDGE lines and         #
+# studio.diagram_render renders + grounds + inserts a mermaid block by direct    #
+# file write (no model tool call). These drive the REAL _run_editor_pass so the  #
+# section-split round-trip that preserves the block is exercised, not stubbed.   #
+# --------------------------------------------------------------------------- #
+
+
+class _A2Client:
+    """Bare client: returns COMPONENT/EDGE lines ONLY for the A2 components prompt
+    (identified by its '=== REPORT ===' + 'COMPONENT:' markers); every other turn
+    (the fallback loop's fix/toc/selfeval/retry turns) is an inert no-op with no
+    tool calls, so nothing but the A2 path can mutate the artifact."""
+
+    def __init__(self, components_text: str) -> None:
+        self.components_text = components_text
+        self.saw_components_prompt = False
+
+    def chat(self, messages, tools=None):
+        from agentkit.types import ChatResult
+        content = messages[0].get("content", "") if messages else ""
+        if isinstance(content, str) and "=== REPORT ===" in content and "COMPONENT:" in content:
+            self.saw_components_prompt = True
+            return ChatResult(text=self.components_text, total_tokens=1)
+        return ChatResult(text="", total_tokens=1)
+
+
+#: Component names whose key terms all appear in _editor_artifact_text() (so the
+#: grounding guard passes) — "Agent"/"Loops", "Executive"/"Summary", "Findings",
+#: "References". Four grounded components + edges → a valid grounded diagram.
+_A2_GROUNDED_LINES = (
+    "COMPONENT: Agent Loops | the system under study\n"
+    "COMPONENT: Executive Summary | the intro section\n"
+    "COMPONENT: Key Findings | the results\n"
+    "COMPONENT: References | the sources\n"
+    "EDGE: Executive Summary -> Agent Loops | frames\n"
+    "EDGE: Agent Loops -> Key Findings | produces\n"
+)
+
+
+class _AxisEmbedder:
+    """Semantic-grounding double: any text mentioning a grounded concept → shared axis
+    0; each DISTINCT non-grounded string → its own axis. A grounded label and its
+    section score cosine 1.0; a fabricated label matches neither a grounded nor an
+    ungrounded ('References') section. `grounded` lists the report's concept tokens."""
+
+    def __init__(self, grounded: tuple[str, ...]) -> None:
+        self.grounded = grounded
+        self._other: dict[str, int] = {}
+
+    def embed(self, texts):
+        out = []
+        for t in texts:
+            low = t.lower()
+            v = [0.0] * 129
+            if any(g in low for g in self.grounded):
+                v[0] = 1.0
+            else:
+                idx = self._other.setdefault(low.strip(), len(self._other))
+                v[1 + (idx % 128)] = 1.0
+            out.append(v)
+        return out
+
+
+def _run_a2(tmp_path, session, art_file, before_art, base_client, recount, events, embedder=None):
+    from studio import runner as _runner_mod
+    return _runner_mod._run_editor_pass(
+        session=session,
+        base_client=base_client,
+        scored_text=before_art,
+        verified_urls=["https://x.test/e"],
+        effective_ws_root=tmp_path,
+        art_file=art_file,
+        original_requirement="write an agent loops report with an architecture diagram",
+        emit=events.append,
+        workspace_root=tmp_path,
+        step_id_getter=lambda: "editor",
+        quality_opportunities=["Explicit alternative not included: add an architecture diagram"],
+        opportunity_recount=recount,
+        max_rounds=1,
+        embedder=embedder,
+    )
+
+
+def test_a2_diagram_lands_and_is_accepted(tmp_path, monkeypatch) -> None:
+    """The deterministic path inserts a real ```mermaid block (grounded in the
+    report's own entities) via direct file write, it survives the section-split
+    round-trip, and the accept gate keeps it because the structural-opportunity
+    count strictly drops. This is the production-path analog of the live check."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    recount = lambda t: 0 if "mermaid" in t else 1  # diagram present ⇒ opportunity resolved
+    client = _A2Client(_A2_GROUNDED_LINES)
+    events: list = []
+    final, weaknesses = _run_a2(tmp_path, session, art_file, before_art, client, recount, events)
+    assert client.saw_components_prompt  # the A2 components prompt actually fired
+    assert "```mermaid" in final, "mermaid block did not land in the returned artifact"
+    assert "```mermaid" in art_file.read_text(encoding="utf-8"), "block not persisted on disk"
+    assert "flowchart TD" in final
+    assert weaknesses == ["w1"]  # score/weaknesses untouched — only the opp count moved
+    accepts = [
+        e for e in events
+        if getattr(e, "name", "") == "editor_structural_retry" and e.outcome == "accept"
+    ]
+    assert len(accepts) == 1 and "A2 deterministic diagram" in accepts[0].detail
+
+
+def test_a2_grounding_guard_adds_nothing_for_ungrounded_components(tmp_path, monkeypatch) -> None:
+    """When the model names only invented components, the grounding guard yields no
+    diagram → A2 adds nothing (no file write, no accept) and the fallback loop (inert
+    client) leaves the artifact byte-for-byte unchanged."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    ungrounded = "\n".join(f"COMPONENT: Zorptron{i} | invented" for i in range(6))
+    client = _A2Client(ungrounded)
+    # Embedder grounds real report entities only; the invented "Zorptron" nodes are
+    # orthogonal → cosine 0 → all dropped → below floor → no diagram.
+    embedder = _AxisEmbedder(grounded=("agent", "loop", "summary", "finding", "reference"))
+    events: list = []
+    final, _ = _run_a2(
+        tmp_path, session, art_file, before_art, client, lambda t: 1, events, embedder=embedder
+    )
+    assert "mermaid" not in final
+    assert final == before_art
+    assert art_file.read_text(encoding="utf-8") == before_art
+    assert not [
+        e for e in events
+        if getattr(e, "name", "") == "editor_structural_retry" and e.outcome == "accept"
+    ]
+
+
+def test_a2_accept_gate_restores_on_score_regression(tmp_path, monkeypatch) -> None:
+    """The gate is NOT weakened for A2: a grounded, opportunity-reducing diagram is
+    still REJECTED and the snapshot restored if it regresses the rubric score —
+    proving A2 reuses the same non-regression bounds as the tool-augmented loop."""
+    from studio import runner as _runner_mod
+    session = _editor_session()
+    root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
+    before_art = art_file.read_text(encoding="utf-8")
+    # Candidate (contains mermaid) scores LOWER than the baseline → regression.
+    def _scored(session_, text, *a, **k):
+        return (0.3, ["w1"]) if "mermaid" in text else (0.5, ["w1"])
+    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", _scored)
+    recount = lambda t: 0 if "mermaid" in t else 1  # opp WOULD drop, but score blocks accept
+    client = _A2Client(_A2_GROUNDED_LINES)
+    events: list = []
+    final, _ = _run_a2(tmp_path, session, art_file, before_art, client, recount, events)
+    assert "mermaid" not in final, "regressing diagram must be reverted, not kept"
+    assert final == before_art
+    assert art_file.read_text(encoding="utf-8") == before_art
+    retry = [e for e in events if getattr(e, "name", "") == "editor_structural_retry"]
+    assert any(e.outcome == "reject" and "A2 deterministic diagram" in e.detail for e in retry)
+    assert not [e for e in retry if e.outcome == "accept"]
 
 
 def test_editor_structural_retry_skips_when_baseline_recount_unavailable_or_zero(
@@ -3850,7 +4016,8 @@ def test_editor_structural_retry_survives_raising_recount_after_mutation(
         emit=events.append,
         workspace_root=tmp_path,
         step_id_getter=lambda: "editor",
-        quality_opportunities=["Explicit alternative not included: add an architecture diagram"],
+        # Non-diagram structural opportunity → tool-augmented fallback loop (not A2).
+        quality_opportunities=["Explicit alternative not included: add a comparison table"],
         opportunity_recount=_raising_recount,
         max_rounds=1,
     )
