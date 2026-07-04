@@ -1673,7 +1673,9 @@ def _run_editor_pass(
                         ),
                         sandboxed=True,
                     ))
-                    _dbg(f"section presentation REJECT {_ps_heading!r}")
+                    _dbg(f"section presentation REJECT {_ps_heading!r} "
+                         f"(score {_ps_base_score:.3f}->{_ps_cand_score:.3f}, "
+                         f"no_new_weakness={_ps_no_new}, debt_dropped={_ps_debt_dropped})")
         except Exception:  # noqa: BLE001 — presentation is best-effort, never breaks the editor
             # A mid-sync failure AFTER the candidate hit disk left _ps_snapshot set:
             # roll the artifact + sections back so disk matches the returned scored_text.
@@ -1755,7 +1757,9 @@ def _run_editor_pass(
                         ),
                         sandboxed=True,
                     ))
-                    _dbg(f"content presentation REJECT {_cp_what}")
+                    _dbg(f"content presentation REJECT {_cp_what} "
+                         f"(score {_cp_base_score:.3f}->{_cp_cand_score:.3f}, "
+                         f"no_new_weakness={_cp_no_new}, realized={_cp_realized})")
         except Exception:  # noqa: BLE001 — presentation is best-effort, never breaks the editor
             if _cp_snapshot is not None:
                 try:
