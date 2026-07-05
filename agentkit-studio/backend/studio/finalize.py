@@ -315,11 +315,20 @@ def _pass_structural_producer(state: FinalizeState) -> FinalizeState:
                 state.result_output = sp_text
                 try:
                     if state.art_file.exists():
+                        _fences_pre = sp_text.count("```")
                         state.scored_text = _write_artifact_through_sections(
                             state.session, state.effective_ws_root, state.scored_text,
                             state.original_requirement,
                         )
                         state.result_output = state.scored_text
+                        # Run v5: fence vanished between L0's verified insertion and
+                        # compliance with every pass reporting changed=False — this
+                        # line splits "eraser is the write-through" from "eraser is
+                        # a later pass" definitively.
+                        _dbg(
+                            f"structural_producer write-through: fences "
+                            f"{_fences_pre}→{(state.scored_text or '').count('```')}"
+                        )
                         _update_active_template_from_artifact(state.session, state.scored_text)
                         state.verified_urls = _verified_urls_from_cache(state.scored_text)
                 except Exception:  # noqa: BLE001 — write-back is best-effort
@@ -1175,7 +1184,14 @@ def run_passes(state: FinalizeState) -> FinalizeState:
                 state.scored_text != before_scored
                 or state.result_output != before_output
             )
-            _dbg(f"finalize[{name}]: ran changed={changed}")
+            # fences= tracks structural-content survival across passes — added after
+            # run v5 recorded ZERO fences despite L0's changed=True insertion, with
+            # every intermediate pass reporting changed=False (the eraser was
+            # invisible; static analysis could not resolve the contradiction).
+            _dbg(
+                f"finalize[{name}]: ran changed={changed} "
+                f"fences={(state.scored_text or '').count('```')}"
+            )
             streaks[name] = 0 if changed else streaks.get(name, 0) + 1
         except Exception as exc:  # noqa: BLE001 — a pass must never abort the pipeline
             _dbg(f"finalize[{name}]: EXCEPTION {exc!r}")
