@@ -184,6 +184,49 @@ def section_file_map(root: Path) -> dict[str, str]:
     return files
 
 
+def pending_subsections(root: Path) -> dict[str, list[str]]:
+    """Map section title → PENDING ``###`` sub-heading titles inside its file.
+
+    Workstream P (and any future mechanism) can plant ``###`` placeholder
+    sub-headings inside a section body — but assignment rows are built from
+    section TITLES, so no worker ever saw them (live finding, 2026-07-05: zero
+    spoke inputs mentioned the planner-injected sub-sections; only the reducer
+    touched them by accident). This surfaces the pending ones so the owning
+    section's assignment can name them explicitly. A sub-heading whose body has
+    real content is NOT returned — ownership matters while the work is undone."""
+    out: dict[str, list[str]] = {}
+    for title, rel_path in section_file_map(root).items():
+        try:
+            text = (root / rel_path).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        pending: list[str] = []
+        current: str | None = None
+        body: list[str] = []
+
+        def _flush() -> None:
+            if current is not None:
+                joined = " ".join(body).strip()
+                if not joined or "_(pending" in joined or "to be completed" in joined:
+                    pending.append(current)
+
+        for line in text.splitlines():
+            if line.startswith("### "):
+                _flush()
+                current = line[4:].strip()
+                body = []
+            elif line.startswith("## "):
+                _flush()
+                current = None
+                body = []
+            elif current is not None:
+                body.append(line)
+        _flush()
+        if pending:
+            out[title] = pending
+    return out
+
+
 def write_assignment_queue(root: Path, rows: tuple[dict[str, str], ...]) -> None:
     """Persist queued one-file section assignments."""
     section_dir = Path(root) / SECTIONS_DIR

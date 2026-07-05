@@ -191,3 +191,38 @@ def test_skeleton_drops_subsection_with_unknown_parent() -> None:
         ["References"], {"Nonexistent Parent": ["Orphan"]}
     )
     assert "Orphan" not in skel
+
+
+# ── sub-section OWNERSHIP: pending ### headings reach a worker's assignment ──
+# Live finding (2026-07-05, s_f649739da1af): planner-injected sub-sections
+# appeared in ZERO spoke inputs — rows carry section titles, the ### markers
+# live in file bodies, so no agent was responsible for them.
+
+def test_pending_subsections_found_and_filled_ones_skipped(tmp_path) -> None:
+    from studio.section_workspace import pending_subsections, write_section_workspace
+
+    art = (
+        "# T\n\n## Evidence and Analysis\nIntro prose.\n\n"
+        "### Code Implementation Examples\n_(pending - needs sourced content)_\n\n"
+        "### System Architecture Design\nReal sourced content already here.\n\n"
+        "## References\nhttps://x.test\n"
+    )
+    write_section_workspace(tmp_path, art)
+    subs = pending_subsections(tmp_path)
+    assert subs == {"Evidence and Analysis": ["Code Implementation Examples"]}
+
+
+def test_assignment_row_names_pending_subsections_for_owner_only() -> None:
+    from studio.planning import build_section_assignment_rows
+
+    rows = build_section_assignment_rows(
+        ["Evidence and Analysis", "References"],
+        subsections={"Evidence and Analysis": ["Code Implementation Examples",
+                                               "System Architecture Design"]},
+    )
+    by_section = {r["section"]: r["assignment"] for r in rows}
+    owner = by_section["## Evidence and Analysis"]
+    assert "REQUIRED SUB-SECTIONS" in owner
+    assert "### Code Implementation Examples" in owner
+    assert "### System Architecture Design" in owner
+    assert "REQUIRED SUB-SECTIONS" not in by_section["## References"]

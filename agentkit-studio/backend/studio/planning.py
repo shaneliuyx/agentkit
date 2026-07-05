@@ -415,29 +415,46 @@ def build_section_assignment_rows(
     section_files: dict[str, str] | None = None,
     agent_slots: int | None = None,
     scoring_matrix: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
+    subsections: dict[str, list[str]] | None = None,
 ) -> tuple[dict[str, str], ...]:
-    """Build atomic queue rows: one agent slot, one section, one file."""
+    """Build atomic queue rows: one agent slot, one section, one file.
+
+    *subsections* maps a section title to PENDING ``###`` sub-headings inside
+    its file (``section_workspace.pending_subsections``). They are named
+    EXPLICITLY in the owning row's assignment — otherwise no worker ever sees
+    them (rows carry titles, the ``###`` placeholders live in file bodies)."""
     clean_sections = [_normalize_section_heading(s) for s in sections if str(s).strip()]
     if not clean_sections:
         return ()
     slots = max(1, int(agent_slots or len(clean_sections)))
     files = section_files or {}
+    subs = subsections or {}
     rows: list[dict[str, str]] = []
     for i, section in enumerate(clean_sections):
         agent_id = f"agent-{(i % slots) + 1:03d}"
+        bare_title = section.removeprefix("## ").strip()
+        assignment = _section_focus_text(
+            [section],
+            weaknesses,
+            files,
+            agent_id=agent_id,
+            scoring_matrix=scoring_matrix,
+        )
+        pending_subs = subs.get(bare_title) or []
+        if pending_subs:
+            assignment += (
+                "\nREQUIRED SUB-SECTIONS — these `###` headings inside your "
+                "section are PART OF YOUR ASSIGNMENT; research and fill EACH "
+                "with sourced content:\n"
+                + "\n".join(f"- ### {s}" for s in pending_subs)
+            )
         rows.append(
             {
                 "agent_id": agent_id,
                 "section": section,
-                "file": files.get(section.removeprefix("## ").strip(), "(section file pending)"),
+                "file": files.get(bare_title, "(section file pending)"),
                 "status": "queued",
-                "assignment": _section_focus_text(
-                    [section],
-                    weaknesses,
-                    files,
-                    agent_id=agent_id,
-                    scoring_matrix=scoring_matrix,
-                ),
+                "assignment": assignment,
             }
         )
     return tuple(rows)

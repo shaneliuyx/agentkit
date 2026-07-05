@@ -3329,12 +3329,26 @@ class Runner:
                 # section file. The queue length controls total foci so active
                 # files are not silently dropped by the max_agents breadth cap;
                 # _max_workers remains the concurrency throttle.
+                # Pending ### sub-headings (Workstream P injections and any
+                # other source) must be NAMED in the owning section's
+                # assignment — rows carry titles, the placeholders live in
+                # file bodies, so without this no worker ever sees them.
+                _subs_for_workers: dict[str, list[str]] = {}
+                if _eff_ws2 is not None:
+                    try:
+                        from studio.section_workspace import pending_subsections
+                        _subs_for_workers = pending_subsections(
+                            _eff_ws2 / session.session_id
+                        )
+                    except Exception:  # noqa: BLE001 — ownership hint is best-effort
+                        _subs_for_workers = {}
                 _queue_rows = build_section_assignment_rows(
                     _sections_for_workers,
                     getattr(session, "weaknesses", []) or [],
                     section_files=_section_files_for_workers,
                     agent_slots=_max_workers,
                     scoring_matrix=_prompt_scoring_matrix(session),
+                    subsections=_subs_for_workers,
                 )
                 if _assignment_root is not None:
                     write_assignment_queue(_assignment_root, _queue_rows)
