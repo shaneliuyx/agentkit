@@ -103,6 +103,31 @@ def test_synthesis_rejects_when_materially_shorter():
     assert not changed and out == draft
 
 
+def test_synthesis_rejects_when_a_fence_is_dropped():
+    """§14 slate bundle A: the URL/overlap/ratio guards never checked fenced
+    blocks — a rewrite dropped a code fence while every citation survived
+    (live: "finalize[synthesize_readability]: changed=True fences 2->0")."""
+    draft = (
+        "Finding one. https://a.com/1\n\n```python\nprint(1)\n```\n\n"
+        "Finding two. https://b.com/2\n"
+    ) * 10
+    dropped_fence = draft.replace("```python\nprint(1)\n```\n", "")
+    out, changed = _synthesize_analysis(draft, _FakeClient(dropped_fence), "task")
+    assert not changed and out == draft
+
+
+def test_synthesis_accepts_when_fence_count_preserved():
+    """No over-triggering: a rewrite that keeps every fenced block (even if the
+    content inside changes) is unaffected by the new guard."""
+    draft = (
+        "Finding one. https://a.com/1\n\n```python\nprint(1)\n```\n\n"
+        "Finding two. https://b.com/2\n"
+    ) * 10
+    better = draft + "\n\nIn contrast, this implies a further trade-off worth noting overall."
+    out, changed = _synthesize_analysis(draft, _FakeClient(better), "task")
+    assert changed and out == better
+
+
 # --- §14.6 root cause: block-level mermaid repair + deterministic splice ------
 # Whole-doc repair truncates a large artifact, so _repair_lints sends ONLY the broken
 # ```mermaid block to the model and splices the corrected block back; the surrounding

@@ -236,6 +236,15 @@ def _synthesize_block(
         _dbg(f"synth[{_tag}]: REJECT urls lost={len(urls_before - urls_after)} "
              f"gained={len(urls_after - urls_before)}")
         return src, False
+    # §14 slate bundle A: the URL/overlap/ratio guards above never checked fenced
+    # blocks — a rewrite can preserve every citation while silently dropping a code
+    # or mermaid block (observed live: "finalize[synthesize_readability]: changed=True
+    # fences 2→0"). Pair count, not raw marker count, so an accidentally-unbalanced
+    # rewrite still reads as a loss rather than being masked by integer division.
+    _fences_before, _fences_after = src.count("```") // 2, out.count("```") // 2
+    if _fences_after < _fences_before:
+        _dbg(f"synth[{_tag}]: REJECT fence lost {_fences_before}→{_fences_after}")
+        return src, False
     if len(out) < int(min_ratio * len(src)):
         _dbg(f"synth[{_tag}]: REJECT length ratio={len(out) / max(1, len(src)):.2f} "
              f"< min_ratio={min_ratio}")
