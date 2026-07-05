@@ -133,6 +133,40 @@ def test_repair_lints_rejects_when_reply_has_no_block():
     assert not changed and out == _BROKEN
 
 
+def test_repair_lints_logs_residual_lint_names_when_nothing_could_be_fixed(tmp_path, monkeypatch):
+    """PLAN §14 attempt-9 #3: run v5 logged lints_before=6 changed=False with no
+    way to tell WHICH six. When nothing could be fixed, the lint list itself must
+    reach the debug log, not just a count."""
+    log = tmp_path / "debug.log"
+    monkeypatch.setenv("OMC_THROUGHPUT_DEBUG", str(log))
+    # A table lint that neither deterministic sub-repair nor the mermaid repair
+    # can touch → changed=False with a real, nameable lint remaining.
+    text = "## X\n\n| a | b |\n| -- | --- |\n| 1 | 2 |\n"
+    out, changed = _repair_lints(text, _FakeClient("Sorry, I cannot."), "task")
+    assert not changed and out == text
+    logged = log.read_text()
+    assert "repair_lints: residual" in logged
+    assert "Malformed markdown table separator" in logged
+
+
+def test_repair_lints_logs_residual_lints_even_when_something_was_fixed(tmp_path, monkeypatch):
+    """Review follow-up: logging must be UNCONDITIONAL on changed — a repair that
+    fixes ONE defect (the glued fence) but leaves ANOTHER (the malformed table)
+    still ships changed=True, and that residual lint needs the same visibility."""
+    log = tmp_path / "debug.log"
+    monkeypatch.setenv("OMC_THROUGHPUT_DEBUG", str(log))
+    text = (
+        "```python\nprint(1)\n``` https://example.com/report\n\n"
+        "| a | b |\n| -- | --- |\n| 1 | 2 |\n"
+    )
+    out, changed = _repair_lints(text, _FakeClient("Sorry, I cannot."), "task")
+    assert changed  # the fence glue WAS fixed
+    assert "``` https://example.com/report" not in out
+    logged = log.read_text()
+    assert "repair_lints: residual" in logged
+    assert "Malformed markdown table separator" in logged
+
+
 # --- deterministic format repairs: fence-line glue + doubled citation ---------
 # Run-1537 artifact.md line 93 (closing fence immediately followed by a citation
 # URL) and line 105 (`[title](url) url` duplicate) — both purely mechanical text

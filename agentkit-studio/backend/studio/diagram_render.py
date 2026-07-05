@@ -222,6 +222,14 @@ _TAIL_HEADING_RE = re.compile(r"(?i)^#{1,6}\s+(references|sources|bibliography|c
 _HEADING_RE = re.compile(r"^#{1,6}\s+")
 
 
+def build_diagram_block(mermaid_body: str) -> str:
+    """The fenced ```mermaid block wrapper — the ONE place this format string is
+    built. ``structural_producer._produce_diagram`` finds its own inserted block
+    via a literal ``str.replace`` on this exact construction, so a change here
+    must stay byte-identical between callers."""
+    return f"```mermaid\n{mermaid_body}\n```"
+
+
 def insert_diagram_block(artifact_text: str, mermaid_body: str) -> str:
     """Insert a fenced ```mermaid block into ``artifact_text`` at a sensible spot.
 
@@ -234,7 +242,7 @@ def insert_diagram_block(artifact_text: str, mermaid_body: str) -> str:
     Written into a section BODY, so the downstream ``_write_artifact_through_sections``
     section-split round-trip preserves it (the same round-trip the tool-augmented
     path already relies on)."""
-    block = f"```mermaid\n{mermaid_body}\n```"
+    block = build_diagram_block(mermaid_body)
     lines = artifact_text.splitlines()
 
     for i, ln in enumerate(lines):  # (1) after a target body heading

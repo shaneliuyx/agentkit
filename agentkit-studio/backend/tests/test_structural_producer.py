@@ -109,6 +109,22 @@ def test_diagram_branch_uses_a2_machinery_and_inserts_mermaid():
     assert out.index("## Architecture") < out.index("```mermaid") < out.index("## References")
 
 
+def test_diagram_insertion_carries_explanatory_prose_and_passes_accept():
+    """PLAN §14 attempt-9 #2: without a prose sentence, artifact_lint's 'no nearby
+    explanatory prose' finding trips _accept's lint-count-worse veto on every
+    diagram insertion (observed: 6->7). The producer must supply grounded prose
+    deterministically, from the diagram's own node labels — no extra LLM call."""
+    from studio.artifact_lint import lint_artifact
+
+    assert lint_artifact(_REPORT_WITH_ARCH) == []  # sanity: before-text is clean
+
+    out = sp._produce_diagram(_REPORT_WITH_ARCH, _client(_DIAGRAM_REPLY))
+
+    assert out is not None and "```mermaid" in out
+    assert not any("explanatory prose" in w for w in lint_artifact(out))
+    assert sp._accept(_REPORT_WITH_ARCH, out)
+
+
 def test_both_branches_already_satisfied_is_a_byte_identical_noop():
     text = (
         "# Report\n\n## Body\n\n```python\nprint('hi')\n```\n\n"

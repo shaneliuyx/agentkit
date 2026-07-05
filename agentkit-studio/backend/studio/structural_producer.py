@@ -242,9 +242,28 @@ def _produce_code(text: str, evidence_dir: Path | None, client: Any, dyn_section
 # ---------------------------------------------------------------------------
 
 
+#: A rendered node line is ``Nx["Label"]`` (studio.diagram_render._render) — never
+#: the raw label, so this only ever matches real node text, not mermaid syntax.
+_NODE_LABEL_RE = re.compile(r'\["([^"]+)"\]')
+
+
+def _diagram_explanation_sentence(mermaid_body: str) -> str:
+    """Deterministic one-sentence intro built from the diagram's OWN node labels —
+    no extra LLM call (PLAN §14 attempt-9 #2). Without this, a freshly-inserted
+    diagram trips artifact_lint's "Mermaid diagram has no nearby explanatory prose"
+    check, which then trips ``_accept``'s lint-count-worse veto (observed: 6→7),
+    rejecting every diagram this producer ever inserts."""
+    names = _NODE_LABEL_RE.findall(mermaid_body)[:3]
+    if not names:
+        return "This diagram shows how the components above interact."
+    joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return f"This diagram shows how {joined} interact."
+
+
 def _produce_diagram(text: str, client: Any) -> str | None:
     from studio.diagram_render import (
         build_components_prompt,
+        build_diagram_block,
         insert_diagram_block,
         render_grounded_diagram,
     )
@@ -257,7 +276,12 @@ def _produce_diagram(text: str, client: Any) -> str | None:
     body = render_grounded_diagram(raw, text)
     if not body:
         return None
-    return insert_diagram_block(text, body)
+    inserted = insert_diagram_block(text, body)
+    # Precede the block with grounded prose — insert_diagram_block is shared with
+    # runner.py's editor diagram-retry (A2), so the sentence is added HERE via a
+    # literal splice on its known-exact output, not inside insert_diagram_block itself.
+    block = build_diagram_block(body)
+    return inserted.replace(block, f"{_diagram_explanation_sentence(body)}\n\n{block}", 1)
 
 
 # ---------------------------------------------------------------------------

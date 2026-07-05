@@ -103,6 +103,75 @@ _CODE_REQUIRED_NOTE = (
     "code does not satisfy this)"
 )
 
+#: SUBJECT COVERAGE branches are extractor-emitted as literally "covers <subject>"
+#: (see _extract_prompt above) — a naming-shape gate mirroring _DIAGRAM_SHAPED_RE /
+#: _CODE_SHAPED_RE, not a general classifier.
+_COVERS_SHAPED_RE = re.compile(r"\bcovers?\b")
+_COVERS_REQUIRED_NOTE = " (downgraded: subject mentioned without cited substance)"
+#: Two subject-token occurrences count as DISTINCT contexts only when their
+#: character positions are at least this far apart. Distance-based, not sentence-
+#: split: a naive sentence-boundary regex splits mid-abbreviation ("e.g.", "i.e.")
+#: into two fragments of the SAME sentence, each still containing the subject —
+#: inflating one repeated mention into "2 sentences" (the reviewer's adversarial
+#: case). An abbreviation-split fragment pair always lands well under this
+#: distance, so it collapses to one context with no abbreviation list needed.
+_COVERS_CONTEXT_MIN_DISTANCE = 100
+#: A context counts as "cited" only when an http(s) URL starts within this many
+#: characters of it — citation-ADJACENT, not merely present somewhere else in
+#: the document.
+_COVERS_CITATION_PROXIMITY = 120
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+_URL_START_RE = re.compile(r"https?://")
+
+
+def _covers_subject_tokens(branch: str) -> set[str]:
+    """Content-word tokens of a "covers <subject>" branch's SUBJECT (the verb
+    stripped). Uses ``studio.rubric._content_tokens`` (short-phrase tokenizer, no
+    minimum-count floor) rather than ``textutil.content_word_stems`` — that one
+    requires >=8 distinct stems before returning anything (it judges whether a
+    prose SECTION is substantial, entry for ``findings._req_content_words``), so
+    on a 2-4 word subject phrase like "covers Pi" it always returns empty and the
+    gate could never fire. ``_content_tokens`` is the primitive already used for
+    exactly this short-phrase-token job (task_runs.refute_false_weaknesses,
+    rubric.sections_present) — same cross-module import convention (local import,
+    matching task_runs.py's existing usage).
+
+    ponytail: ``_content_tokens`` requires len>2, so a 1-2 char subject name (e.g.
+    "covers Pi", "covers Go") tokenizes to empty and the gate fails open on it (see
+    ``_covers_subject_has_cited_substance``) — no false downgrade, but also no real
+    gating for those. Upgrade path if that shows up in calibration: a case-
+    preserving word split with no length floor, scoped to just this gate.
+    """
+    from studio.rubric import _content_tokens
+    subject = _COVERS_SHAPED_RE.sub("", branch, count=1)
+    return _content_tokens(subject)
+
+
+def _covers_subject_has_cited_substance(subject_tokens: set[str], artifact_text: str) -> bool:
+    """True when *subject_tokens* occur in >=2 DISTINCT contexts of the artifact
+    (occurrence positions >=``_COVERS_CONTEXT_MIN_DISTANCE`` chars apart), with
+    >=1 of those contexts within ``_COVERS_CITATION_PROXIMITY`` chars of an
+    http(s) URL — citation-adjacent substance, not a bare name-drop repeated in
+    one breath. Empty *subject_tokens* (no extractable subject) fails open (True)
+    — there is nothing to judge, so the gate must not downgrade on it."""
+    if not subject_tokens:
+        return True
+    text = artifact_text or ""
+    positions = [
+        m.start() for m in _WORD_RE.finditer(text)
+        if m.group(0).rstrip("s").lower() in subject_tokens
+    ]
+    contexts: list[int] = []
+    for pos in positions:
+        if not contexts or pos - contexts[-1] >= _COVERS_CONTEXT_MIN_DISTANCE:
+            contexts.append(pos)
+    if len(contexts) < 2:
+        return False
+    url_positions = [m.start() for m in _URL_START_RE.finditer(text)]
+    return any(
+        abs(ctx - u) <= _COVERS_CITATION_PROXIMITY for ctx in contexts for u in url_positions
+    )
+
 
 class ComplianceCheckUnavailable(Exception):
     """Raised (only in ``strict=True``) when a compliance check could not actually
@@ -358,6 +427,16 @@ def requirement_compliance_issues(
             if verdicts.get(fi) and _CODE_SHAPED_RE.search(branch):
                 verdicts[fi] = False
                 downgrade_note[fi] = _CODE_REQUIRED_NOTE
+    # Same deterministic gate for SUBJECT COVERAGE branches (PLAN §14 attempt-9 #4):
+    # a SATISFIED verdict on "covers <subject>" is only trusted if the subject is
+    # actually discussed with cited substance, not just name-dropped once — mirrors
+    # the diagram/code gates exactly (post-parse, pre-aggregation).
+    for fi, (_, branch) in enumerate(flat, 1):
+        if verdicts.get(fi) and _COVERS_SHAPED_RE.search(branch):
+            tokens = _covers_subject_tokens(branch)
+            if not _covers_subject_has_cited_substance(tokens, artifact_text or ""):
+                verdicts[fi] = False
+                downgrade_note[fi] = _COVERS_REQUIRED_NOTE
     # Observability (RC2): per-branch verdicts, post-downgrade — without this line
     # "check never ran" and "judge wrongly said SATISFIED" are indistinguishable in
     # the diag log (run 1537: the covers-Craft outcome was unknowable).

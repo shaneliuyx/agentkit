@@ -787,6 +787,23 @@ def _repair_doubled_citations(text: str) -> tuple[str, bool]:
     return ("".join(out), True) if changed else (src, False)
 
 
+#: Cap on how many residual lints get named in one log line — a pathological
+#: artifact could carry dozens; the point is diagnosability, not a full dump.
+_RESIDUAL_LINT_LOG_CAP = 10
+
+
+def _log_residual_lints(lints: list[str]) -> None:
+    """PLAN §14 attempt-9 #2/#3: run v5 logged ``lints_before=6 changed=False`` with
+    no way to tell WHICH six — name them (first ~80 chars each, capped at
+    ``_RESIDUAL_LINT_LOG_CAP``) so a stuck repair is diagnosable instead of a bare
+    count. Called UNCONDITIONALLY on whatever text ``_repair_lints`` is about to
+    return, regardless of ``changed`` — a repair can fix ONE lint and still ship
+    with others remaining, and that case needs the same visibility."""
+    if lints:
+        names = " | ".join(w[:80] for w in lints[:_RESIDUAL_LINT_LOG_CAP])
+        _dbg(f"repair_lints: residual ({len(lints)}): {names}")
+
+
 def _repair_lints(
     text: str, client: "LLMClient | None", requirement: str
 ) -> tuple[str, bool]:
@@ -824,35 +841,41 @@ def _repair_lints(
     out, fence_fixed = _repair_fence_contamination(src)
     out, dup_fixed = _repair_doubled_citations(out)
     changed = fence_fixed or dup_fixed
-    if client is None:
-        return (out, True) if changed else (src, False)
-    before = len(lint_artifact(out))
-    if before == 0:
-        return (out, True) if changed else (src, False)
-    before_mermaid = out
-    for block in _MERMAID_BLOCK_RE.findall(out):
-        if not _MERMAID_GLUED_EDGE.search(block):
-            continue  # this diagram is well-formed — leave it
-        prompt = (
-            "Fix the syntax errors in this Mermaid diagram. A node glued to an edge label "
-            "(e.g. `A|label| B`) is missing its link operator and must become `A -->|label| "
-            "B`. Change ONLY what is needed to make it valid; keep every node and edge. "
-            "Output ONLY the corrected ```mermaid code block, nothing else.\n\n" + block
-        )
-        try:
-            reply = (getattr(client.chat([{"role": "user", "content": prompt}]), "text", "") or "").strip()
-        except Exception:  # noqa: BLE001 — repair is best-effort; never break the run
-            continue
-        m = _MERMAID_BLOCK_RE.search(reply)
-        fixed = m.group(0) if m else ""
-        if not fixed or _MERMAID_GLUED_EDGE.search(fixed):
-            continue  # model didn't return a clean block — keep the original
-        out = out.replace(block, fixed, 1)
-    # Accept the mermaid splice only on a strict improvement; the deterministic
-    # sub-repairs above are already-verified fixes and always count as `changed`.
-    if out != before_mermaid and len(lint_artifact(out)) < before:
-        return out, True
-    return (before_mermaid, True) if changed else (src, False)
+    if client is not None:
+        before = len(lint_artifact(out))
+        if before > 0:
+            before_mermaid = out
+            for block in _MERMAID_BLOCK_RE.findall(out):
+                if not _MERMAID_GLUED_EDGE.search(block):
+                    continue  # this diagram is well-formed — leave it
+                prompt = (
+                    "Fix the syntax errors in this Mermaid diagram. A node glued to an edge "
+                    "label (e.g. `A|label| B`) is missing its link operator and must become "
+                    "`A -->|label| B`. Change ONLY what is needed to make it valid; keep "
+                    "every node and edge. Output ONLY the corrected ```mermaid code block, "
+                    "nothing else.\n\n" + block
+                )
+                try:
+                    reply = (
+                        getattr(client.chat([{"role": "user", "content": prompt}]), "text", "")
+                        or ""
+                    ).strip()
+                except Exception:  # noqa: BLE001 — repair is best-effort; never break the run
+                    continue
+                m = _MERMAID_BLOCK_RE.search(reply)
+                fixed = m.group(0) if m else ""
+                if not fixed or _MERMAID_GLUED_EDGE.search(fixed):
+                    continue  # model didn't return a clean block — keep the original
+                out = out.replace(block, fixed, 1)
+            # Accept the mermaid splice only on a strict improvement; the deterministic
+            # sub-repairs above are already-verified fixes and always count as `changed`.
+            if out != before_mermaid and len(lint_artifact(out)) < before:
+                changed = True
+            else:
+                out = before_mermaid  # unaccepted mermaid attempt — revert to pre-loop text
+    result = out if changed else src
+    _log_residual_lints(lint_artifact(result))
+    return result, changed
 
 
 def _strip_preamble(text: str) -> str:

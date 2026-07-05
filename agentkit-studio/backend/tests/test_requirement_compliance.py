@@ -350,6 +350,68 @@ def test_mermaid_only_artifact_does_not_count_as_code_fence() -> None:
     assert len(hard) == 1
 
 
+def test_covers_shaped_requirement_mention_only_is_downgraded() -> None:
+    """PLAN §14 attempt-9 #4: a SUBJECT COVERAGE branch ('covers <subject>') must
+    not be trusted SATISFIED on a bare name-drop with no cited substance behind
+    it — mirrors the diagram/code gates' 'form, not content, was checked' fix."""
+    client = _ScriptedVerifier("REQUIREMENT 1: SATISFIED")
+    penalty, hard, opps = requirement_compliance_issues(
+        client,
+        [["covers Postgres"]],
+        "We looked at Postgres briefly. Nothing else to say about it here.",
+    )
+    assert penalty == 1.0
+    assert len(hard) == 1
+    assert "downgraded" in hard[0]
+    assert opps == []
+
+
+def test_covers_shaped_requirement_with_cited_substance_is_not_downgraded() -> None:
+    """No over-triggering: >=2 sentences discussing the subject, one with a
+    citation URL, is real coverage — SATISFIED stands."""
+    client = _ScriptedVerifier("REQUIREMENT 1: SATISFIED")
+    penalty, hard, opps = requirement_compliance_issues(
+        client,
+        [["covers Postgres"]],
+        "Postgres is a relational database with strong ACID guarantees. "
+        "It scales well for OLTP workloads. See https://example.com/postgres for details.",
+    )
+    assert penalty == 0.0
+    assert hard == []
+    assert opps == []
+
+
+def test_covers_gate_rejects_abbreviation_split_sentence_inflation() -> None:
+    """Review follow-up: a naive sentence-boundary split treats 'e.g.' as a
+    sentence end, turning ONE real sentence's two halves into "2 sentences" that
+    both mention the subject — falsely counting as 2 distinct contexts. The
+    distance-based gate must see this as ONE context (the halves are close
+    together) and still downgrade. Reviewer's exact adversarial fixture."""
+    client = _ScriptedVerifier("REQUIREMENT 1: SATISFIED")
+    penalty, hard, opps = requirement_compliance_issues(
+        client,
+        [["covers Postgres"]],
+        "Postgres is well documented (e.g. see https://postgres.org) and "
+        "Postgres remains popular.",
+    )
+    assert penalty == 1.0
+    assert len(hard) == 1
+    assert "downgraded" in hard[0]
+    assert opps == []
+
+
+def test_non_covers_shaped_requirement_is_never_downgraded_by_covers_gate() -> None:
+    """The covers-shape keyword gate must stay narrow: a requirement with no
+    'covers/cover' phrasing is untouched even on a thin, uncited artifact."""
+    client = _ScriptedVerifier("REQUIREMENT 1: SATISFIED")
+    penalty, hard, opps = requirement_compliance_issues(
+        client, [["cite at least 3 sources"]], "Thin prose, no subject-coverage phrasing."
+    )
+    assert penalty == 0.0
+    assert hard == []
+    assert opps == []
+
+
 def test_non_diagram_shaped_requirement_is_never_downgraded() -> None:
     """The keyword gate must stay narrow: a requirement with no diagram-shaped
     phrasing is untouched by the mermaid check even when no mermaid exists
