@@ -466,6 +466,49 @@ def strip_satisfied_placeholders(text: str) -> str:
     return "\n\n".join(out).rstrip() + "\n"
 
 
+#: The References/Sources heading a report ends with (case-insensitive).
+_REFERENCES_HEADING_RE = _re.compile(r"(?im)^##\s+(?:references|sources)\b.*$")
+
+
+def rebuild_references_section(text: str) -> str:
+    """Replace the References section with a deterministic bibliography (PLAN-CONSOLIDATED P2-8).
+
+    References is a template section like any other, so spokes fill it with
+    PROSE — which is where junk findings landed live (a self-admittedly
+    off-topic π-Wikipedia note, refusal filler, "definition of Pi… baseline for
+    geometric calculations"). The real bibliography is derivable: every URL
+    cited in the BODY, first-appearance order, titled from its markdown link
+    text when the body has one. A URL cited ONLY inside References earned no
+    body citation and is dropped with the prose. Fail-open: no References
+    heading or no body-cited URLs → text unchanged."""
+    src = text or ""
+    m = _REFERENCES_HEADING_RE.search(src)
+    if not m:
+        return src
+    nxt = _re.compile(r"(?m)^##\s").search(src, m.end())
+    refs_end = nxt.start() if nxt else len(src)
+    body = src[: m.start()] + src[refs_end:]
+
+    urls: list[str] = []
+    for raw in _re.findall(r"https?://[^\s)>\]\"']+", body):
+        u = raw.rstrip(".,;:")
+        if u and u not in urls:
+            urls.append(u)
+    if not urls:
+        return src
+
+    titles: dict[str, str] = {}
+    for t, raw in _re.findall(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", body):
+        u = raw.rstrip(".,;:")
+        titles.setdefault(u, t.strip())
+    entries = "\n".join(
+        f"- [{titles[u]}]({u})" if u in titles else f"- {u}" for u in urls
+    )
+    rebuilt = f"{m.group(0)}\n\n{entries}\n"
+    tail = src[refs_end:]
+    return src[: m.start()] + rebuilt + ("\n" + tail.lstrip("\n") if tail.strip() else "")
+
+
 def add_missing_section_citations(
     text: str,
     verified_urls: list[str] | tuple[str, ...] | None,

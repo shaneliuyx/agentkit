@@ -4129,6 +4129,28 @@ class Runner:
                         pass
             except Exception:  # noqa: BLE001
                 pass
+            # P2-8: References is a deterministic bibliography of BODY-cited URLs
+            # (post-neutralize, so only surviving citations earn an entry). Runs on
+            # scored AND served text so junk References prose (off-topic findings,
+            # refusal filler) can neither earn scoring credit nor reach the user.
+            try:
+                from studio.artifact_text import rebuild_references_section
+
+                _rebuilt = rebuild_references_section(_scored_text)
+                if _rebuilt != _scored_text:
+                    _scored_text = _rebuilt
+                    result_output = rebuild_references_section(result_output)
+                    _dbg("references section rebuilt deterministically from body citations")
+                    try:
+                        if _art_file.exists():
+                            _scored_text = _write_artifact_through_sections(
+                                session, _effective_ws_root, _scored_text, _original_requirement
+                            )
+                            result_output = _scored_text
+                    except Exception:  # noqa: BLE001 — write-back is best-effort
+                        pass
+            except Exception:  # noqa: BLE001 — bibliography rebuild must never break scoring
+                pass
             _score, _scorer_feedback = score_result(
                 _scored_text, _original_requirement, _judge_client,
                 verified_urls=_verified_urls or None,

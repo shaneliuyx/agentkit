@@ -400,6 +400,50 @@ class _ScriptedText:
         return ChatResult(text=self._text, total_tokens=1)
 
 
+# --- P2-8: References = deterministic bibliography of body-cited URLs -------
+
+def test_references_rebuilt_from_body_citations_drops_refs_only_junk():
+    # Live junk (runs 1527/hybrid/current): an off-topic π-Wikipedia finding
+    # lived ONLY in References, self-rationalizing its relevance. It earned no
+    # body citation, so the rebuild drops it with the prose.
+    from studio.artifact_text import rebuild_references_section
+    doc = (
+        "# T\n\n## Key Findings\n"
+        "The toolkit layers packages ([Pi toolkit](https://github.com/earendil-works/pi)).\n"
+        "Loop details at https://nader.substack.com/p/how-to-build-a-custom-agent-framework.\n\n"
+        "## References\n\n"
+        "A foundational mathematical definition of Pi, which serves as a baseline for "
+        "any computational or algorithmic agent development involving geometric "
+        "calculations ([Pi - Wikipedia](https://en.wikipedia.org/wiki/Pi)).\n"
+    )
+    out = rebuild_references_section(doc)
+    refs = out.split("## References", 1)[1]
+    assert "wikipedia.org/wiki/Pi" not in refs
+    assert "- [Pi toolkit](https://github.com/earendil-works/pi)" in refs
+    assert "- https://nader.substack.com/p/how-to-build-a-custom-agent-framework" in refs
+    assert "geometric calculations" not in out
+
+
+def test_references_rebuild_is_fail_open():
+    from studio.artifact_text import rebuild_references_section
+    no_heading = "# T\n\n## Key Findings\nSee https://a.test/x.\n"
+    assert rebuild_references_section(no_heading) == no_heading
+    no_body_urls = "# T\n\n## Key Findings\nUncited prose.\n\n## References\nJunk prose.\n"
+    assert rebuild_references_section(no_body_urls) == no_body_urls
+
+
+def test_references_rebuild_preserves_content_after_the_section():
+    from studio.artifact_text import rebuild_references_section
+    doc = (
+        "# T\n\n## Body\nSee https://a.test/x.\n\n"
+        "## References\nOld prose.\n\n## Appendix\nKept.\n"
+    )
+    out = rebuild_references_section(doc)
+    assert "- https://a.test/x" in out
+    assert "## Appendix\nKept." in out
+    assert "Old prose" not in out
+
+
 def test_synthesis_rejects_refusal_prose_on_citation_free_section():
     # Live run 1530 (score 0.97 → 0.087): a URL-free window makes the URL guard
     # vacuous (∅ == ∅), so gemma's meta-refusal — which QUOTED heading names —
