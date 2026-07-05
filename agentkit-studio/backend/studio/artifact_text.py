@@ -16,6 +16,23 @@ if TYPE_CHECKING:
     from agentkit.types import LLMClient
 
 
+def _dbg(msg: str) -> None:
+    """Append a diagnostic line to the file named by OMC_THROUGHPUT_DEBUG (no-op unless set).
+
+    Local copy of ``studio.runner._dbg`` — runner imports this module, so importing back
+    would be circular. Added because the synthesis pass's accept/reject decisions were
+    invisible (run 1531: depth rows byte-identical, undiagnosable without this)."""
+    import os
+    path = os.environ.get("OMC_THROUGHPUT_DEBUG")
+    if not path:
+        return
+    try:
+        with open(path, "a") as fh:
+            fh.write(msg + "\n")
+    except OSError:
+        pass
+
+
 _TITLE_PLACEHOLDER_RE = _re.compile(
     r"(?i)(?:\b(?:report|deliverable)\s+title\b|\btitle\s*[-—]\s*generated\b|"
     r"generated from (?:the )?findings|generated below)"
@@ -185,18 +202,27 @@ def _synthesize_block(
         f"TASK: {requirement[:400]}\n\n"
         f"DRAFT:\n{src}"
     )
+    _tag = (src.lstrip().splitlines() or [""])[0][:60]
     try:
         resp = client.chat([{"role": "user", "content": prompt}])
         out = (getattr(resp, "text", "") or "").strip()
-    except Exception:  # noqa: BLE001 — synthesis is best-effort; never break the run
+    except Exception as exc:  # noqa: BLE001 — synthesis is best-effort; never break the run
+        _dbg(f"synth[{_tag}]: REJECT exception={type(exc).__name__}")
         return src, False
     if not out:
+        _dbg(f"synth[{_tag}]: REJECT empty-reply")
         return src, False
     urls_after = set(_re.findall(r"https?://\S+", out))
     # Reject regressions: a dropped citation (always), or shrinking below ``min_ratio`` of the
     # block. Analysis ADDS (ratio 0.9); the readability/summarize pass CONDENSES repeated quotes
     # (ratio ~0.4) — so it may come back shorter, but every URL must survive.
-    if not urls_before <= urls_after or not urls_after <= urls_before or len(out) < int(min_ratio * len(src)):
+    if not urls_before <= urls_after or not urls_after <= urls_before:
+        _dbg(f"synth[{_tag}]: REJECT urls lost={len(urls_before - urls_after)} "
+             f"gained={len(urls_after - urls_before)}")
+        return src, False
+    if len(out) < int(min_ratio * len(src)):
+        _dbg(f"synth[{_tag}]: REJECT length ratio={len(out) / max(1, len(src)):.2f} "
+             f"< min_ratio={min_ratio}")
         return src, False
     # The URL/length guards are BLIND on a citation-free window (∅ == ∅), which let a
     # weak model's meta-refusal — "Once you provide the text … I will immediately
@@ -206,14 +232,20 @@ def _synthesize_block(
     # 1. Synthesis must never INVENT a heading — new heading lines are how the
     #    refusal's quoted section names became fake sections on reassembly.
     headings_before = set(_re.findall(r"(?m)^#{1,3}\s.*$", src))
-    if set(_re.findall(r"(?m)^#{1,3}\s.*$", out)) - headings_before:
+    _invented = set(_re.findall(r"(?m)^#{1,3}\s.*$", out)) - headings_before
+    if _invented:
+        _dbg(f"synth[{_tag}]: REJECT invented-headings={sorted(_invented)[:3]}")
         return src, False
     # 2. A REWRITE must preserve the draft's own content vocabulary. Genuine
     #    synthesis paraphrases but keeps the topic's terms; prose ABOUT the task
     #    (refusals, rule restatements, requests for input) shares almost none of
     #    the draft's words — in any phrasing, so no phrase list can rot.
-    if _content_word_overlap(src, out) < _SYNTH_MIN_OVERLAP:
+    _ov = _content_word_overlap(src, out)
+    if _ov < _SYNTH_MIN_OVERLAP:
+        _dbg(f"synth[{_tag}]: REJECT overlap={_ov:.2f} < {_SYNTH_MIN_OVERLAP}")
         return src, False
+    _dbg(f"synth[{_tag}]: ACCEPT overlap={_ov:.2f} "
+         f"ratio={len(out) / max(1, len(src)):.2f} urls={len(urls_after)}")
     return out, True
 
 

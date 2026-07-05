@@ -4371,6 +4371,7 @@ class Runner:
                         ) or "",
                         rubric_score=_exp_rubric,
                     )
+                    _dbg(f"expand: stats={_exp_stats} outputs={len(_exp_outputs)}")
                     if _exp_stats["added"] and _exp_text != _pre_exp:
                         _scored_text = _exp_text
                         result_output = _exp_text
@@ -4387,8 +4388,8 @@ class Runner:
                             detail=f"added {_exp_stats['added']} grounded paragraph(s) from under-used evidence",
                             sandboxed=True,
                         ))
-                except Exception:  # noqa: BLE001 — depth expansion is best-effort; never blocks publish
-                    pass
+                except Exception as _exp_exc:  # noqa: BLE001 — depth expansion is best-effort; never blocks publish
+                    _dbg(f"expand: EXCEPTION {type(_exp_exc).__name__}: {_exp_exc}")
             _t_pub = time.monotonic()  # T1: publish-revision stage timer
             try:
                 from studio.report_quality import (
