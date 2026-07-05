@@ -324,6 +324,18 @@ def _make_section_reducer(
         _io_capture["prompt"] = prompt
         _io_capture["output"] = res.text or ""
         tokens = int(getattr(res, "total_tokens", 0) or 0)
+        # Fetch-density fix: spokes cite ~12 URLs/phase but fetch ~1, so the grounding
+        # guard dropped 80-100% of real findings. Fetch the cited-but-uncached URLs now
+        # so genuine sources survive grounding (a 404/fabricated URL still drops).
+        # MUST run BEFORE _sanitize_llm_patches (live attempt 5, 2026-07-05): the
+        # patch sanitizer's topical oracle reads the SAME cache — with prefetch
+        # after it, a junk URL's page was never cached at judgment time, its
+        # verdict was "unknown", and the junk patch sailed through while the
+        # (post-prefetch) findings floor correctly dropped the twin finding.
+        _t_pf = time.monotonic()  # T1: cited-URL prefetch (the P0-B parallelize target)
+        _prefetch_cited(drafts)
+        if timing_sink is not None:
+            timing_sink("prefetch", time.monotonic() - _t_pf)
         llm_patches = _sanitize_llm_patches(
             art_block, _parse_patches_from_output(res.text or ""), requirement,
             judge=client,
@@ -332,13 +344,6 @@ def _make_section_reducer(
         # additive patches. Guarantees grounded progress when the model emits no
         # usable PATCHES, and folds in any finding it skipped. The reduce_patches
         # duplicate-guard makes the overlap idempotent.
-        # Fetch-density fix: spokes cite ~12 URLs/phase but fetch ~1, so the grounding
-        # guard dropped 80-100% of real findings. Fetch the cited-but-uncached URLs now
-        # so genuine sources survive grounding (a 404/fabricated URL still drops).
-        _t_pf = time.monotonic()  # T1: cited-URL prefetch (the P0-B parallelize target)
-        _prefetch_cited(drafts)
-        if timing_sink is not None:
-            timing_sink("prefetch", time.monotonic() - _t_pf)
         findings: list = []
         raw_findings = 0
         for d in drafts:
