@@ -4015,7 +4015,14 @@ class Runner:
             _is_last_epoch = (self._epoch == 0) or (
                 self._epoch >= int(_hc_cfg.get("max_epochs", 5) or 5)
             )
-            if (use_llm and _is_last_epoch and _scored_text
+            # NOT gated on use_llm (third instance of the mode-gate disease,
+            # 2026-07-05): _synthesize_analysis is the ONLY writer of
+            # cross-section analysis — the "Evidence synthesis" and "Analytical
+            # depth" rubric rows it exists to satisfy were the exact residual
+            # weaknesses on every auto-mode run (1527: 2.5/14.7 and 1.8/10.5),
+            # because mode=="auto" made this pass dead. base_client is always
+            # built; depth is independent of the generation mode.
+            if (_is_last_epoch and _scored_text
                     and len(_scored_text) > 800 and "http" in _scored_text):
                 try:
                     _syn, _changed = _synthesize_analysis(
@@ -4289,7 +4296,11 @@ class Runner:
             # LLM calls when no section is under the word floor, so healthy reports
             # pay nothing. On accept it persists through the SAME section machinery
             # the publish-accept path uses, so the served artifact stays consistent.
-            if use_llm:
+            # NOT gated on use_llm (2026-07-05, same mode-gate disease as the
+            # skeleton and _synthesize_analysis): expand is the depth-grower for
+            # under-used grounded evidence and must run in auto mode too — its own
+            # word-floor guard already makes it free on healthy reports.
+            if base_client is not None:
                 try:
                     from studio.expand_sections import expand_underdeveloped_sections
                     from studio.rubric import rubric_score as _exp_rubric
