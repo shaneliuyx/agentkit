@@ -801,7 +801,7 @@ class TaskRunStore:
         is the carry-forward win — when a run died mid-flight its partial artifact is the
         best available seed, strictly better than cold-starting from nothing.
 
-        L3 lineage immune system (PLAN §6/§12.4): a ``completed`` row that is lint-broken,
+        L3 lineage immune system (PLAN §6/§12.4): a ``completed`` row that is
         uncited, crashed (score<=0), or an outlier-low score is INELIGIBLE and skipped
         (see ``_seed_ineligible_reason``) — it stays in the DB as history, it just never
         seeds. Walks all the way back to the oldest run; returns None (cold start) only
