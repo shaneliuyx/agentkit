@@ -110,6 +110,7 @@ Legend: ✅ fulfilled (code-verified) · 🟡 partial · ❌ unfulfilled · ⚰ 
 ### P0 — prove the depth fix (the open headline question)
 1. Cold Pi/Craft run on the post-`468e6b1` backend: measure Evidence-synthesis + Analytical-depth rubric rows, code blocks in the injected "Code Implementation Examples" subsection, score vs 0.6083 baseline. (Run queued; this closes or reopens the shallowness thread.)
 2. If depth still capped: execute PLAN-content-and-shallowness Phase 3 remainder — relax `findings.py` one-sentence contract (:327 area), floor-aware density cap, sentence-cap reconsideration. The three anchors need re-locating first (see §2.16).
+2b. **Strong-model reducer** (Lever 4 from trashed HANDOFF-score-improvement, 2026-06-27 — the only one of its four levers never built; recovered 2026-07-05). The reducer is the synthesis chokepoint; run it on the judge client (same degrade-to-base pattern as hybrid planning, `runner.py:2198`) while spokes stay on the session model. Cost is confined to reduce calls. Directly targets the Evidence-synthesis/Analytical-depth rows; try AFTER P0-1 measures the un-gated passes, so the two levers are attributable separately.
 
 ### P1 — finish the presentation ladder (PLAN-content-and-shallowness Phases 1–2)
 3. Wire `presentation_classifier.py` (built, unwired).
@@ -165,6 +166,21 @@ Legend: ✅ fulfilled (code-verified) · 🟡 partial · ❌ unfulfilled · ⚰ 
 - **F3 anti-truncation section repair**: the motivating "truncation" was miner hallucination (DESIGN §14 Cut).
 - **Deterministic regex mermaid repair**: rejected; in-run LLM repair turn won 5/5 (memory: lint-on-seed blindspot).
 - **gemma citation-integrity ceiling** on fixture `s_db8f2ec3b920`: genuine model ceiling, not a code bug (entry 156).
+
+**Standing design invariants recovered from trashed handoffs (2026-07-05 dig):**
+- **Reducer patch contract stays prose-only** — URL-bearing sentences, never headings/diagrams/
+  tables/code. Loosening it is exactly the duplicate-heading bug class entry 162 fixed. Structural
+  content belongs to the editor/presentation passes only (HANDOFF-requirement-compliance).
+- **Goal-blind spoke invariant** — requirement/relevance/compliance notices go to the goal-aware
+  reducer only, never spoke prompts.
+- **Two fan-out levers stay distinct** — `max_workers` (concurrency) vs `max_agents` (breadth);
+  conflating them hid an 18-spoke/790K-token explosion (HANDOFF-agent-explosion, 2026-06-27).
+
+**Trashed-handoff disposition** (all four dug 2026-07-05; safe to remain deleted):
+`HANDOFF-agent-explosion` resolved → DESIGN two-lever doctrine · `HANDOFF-seed-shrink-debug`
+resolved same-day per its own header · `HANDOFF-requirement-compliance-diagram-reliability`
+absorbed (structural retry = entry 174; clean E2E since run repeatedly) ·
+`HANDOFF-score-improvement` levers 1–3 built; lever 4 recovered as backlog P0-2b.
 
 ---
 
