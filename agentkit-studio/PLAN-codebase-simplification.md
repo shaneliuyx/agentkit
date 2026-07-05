@@ -35,7 +35,7 @@ cold run records (refactoring during a measurement run muddies both).
 
 ## 2. Workstreams (priority order, each independently shippable + test-gated)
 
-### S1 — `studio/textutil.py`: one home for text primitives (LOW RISK, do first)
+### S1 — `studio/textutil.py`: one home for text primitives (LOW RISK, do first) — ✅ DONE (committed 2026-07-05)
 Move + de-duplicate: URL_RE, `norm_url()` (single rstrip-punctuation rule),
 `extract_urls()`, `content_word_stems()`, `mask_fenced_code` (import from rubric or move
 here), `_dbg()` (env-gated diag logger), mermaid-block regex, fence pair-parsing
@@ -43,7 +43,7 @@ here), `_dbg()` (env-gated diag logger), mermaid-block regex, fence pair-parsing
 primitive once instead of per-copy).
 **Kills:** the entire "fix must land in N places" bug class hit twice today.
 
-### S2 — finalize pipeline as an ordered pass list (MEDIUM RISK, biggest layer cut)
+### S2 — finalize pipeline as an ordered pass list (MEDIUM RISK, biggest layer cut) — ✅ DONE (committed 2026-07-05; cold E2E compare pending attempt 8)
 The epoch-end sequence in runner.py (synthesize → readability → repair_lints →
 grounded-full archive → expand → publish gate → editor retry → presentation →
 references rebuild → score/record) is ~1,500 lines of nested inline try-blocks. Extract
@@ -53,7 +53,7 @@ conditions preserved verbatim.
 **Kills:** most of the 83 ad-hoc excepts; every future pass gets observability for free
 (no more silent-dead passes — the editor-pass and depth-pass blindness were both this).
 
-### S3 — guard primitives (`studio/guards.py`) (MEDIUM RISK)
+### S3 — guard primitives (`studio/guards.py`) (MEDIUM RISK) — ⬜ PENDING (next after attempt 8)
 `urls_preserved(before, after)`, `length_ratio_ok`, `no_invented_headings(masked)`,
 `topical_verdict(url, req, judge)` — synthesis guards, `_sanitize_llm_patches`, and
 expand guards COMPOSE these instead of re-implementing. Per-guard unit tests move to
@@ -64,7 +64,7 @@ Verified: all probe/demo scripts live under `backend/tmp/` which is gitignored �
 REPO is already clean; the audit's Pyright sweep saw local disk, not tracked files.
 Local probes are kept deliberately (L6 probe-before-wire values them). No action.
 
-### S5 — measured efficiency wins (ONLY with numbers)
+### S5 — measured efficiency wins (ONLY with numbers) — ◐ PARTIAL (offtopic-verdict memoization DONE; rest pending timing numbers)
 - Memoize `rubric_score`/`score_breakdown` per text-hash within a run (called from
   editor recount loops many times per epoch on identical text). Measure call count via
   diag before/after.
@@ -149,7 +149,7 @@ zero silent stalls, and every stall explained in the run report.**
 
 ## 6. LOOP-HEALTH WORKSTREAMS (combine with S1–S5; L2 = S2)
 
-### L1 — Verify hardening (RC1) [after S1/S2 land]
+### L1 — Verify hardening (RC1) [after S1/S2 land] — ⬜ PENDING (spec now = §10.2 editorial checklist + crashed-status rule)
 - Deterministic gates FIRST, LLM judgment second: every requirement-shaped check gets
   a hard oracle where one exists (fences, mermaid, citations — landed 2026-07-05;
   extend to tables/word-counts when asked for).
@@ -161,12 +161,12 @@ zero silent stalls, and every stall explained in the run report.**
 - Tiny fixed eval set (3 requirement-shaped tasks with known-good properties) run as a
   probe script after scorer/rubric changes — rubric changes get calibrated, not vibed.
 
-### L2 — Dead-pass detector (RC2) — this IS S2's pass-list, plus one rule
+### L2 — Dead-pass detector (RC2) — this IS S2's pass-list, plus one rule — ✅ DONE (shipped inside S2: per-pass ran/changed/reason + inert-streak flag)
 Every pass emits ran/changed/reason via the uniform wrapper (S2). Add: postrun
 diagnostics flag any pass with N consecutive no-op epochs on a task ("pass X inert 3
 epochs — investigate or expected?"). Silence is no longer indistinguishable from health.
 
-### L3 — Lineage immune system (RC3)
+### L3 — Lineage immune system (RC3) — ✅ DONE (committed 2026-07-05; lint criterion dropped, see annotation below)
 Deterministic seed-eligibility gate in `latest_with_content`: a row is seed-eligible
 only if its artifact passes lint + has ≥1 citation + score not >50% below lineage
 median. (REVISED 2026-07-05: lint criterion dropped — lint-broken rows are §14.6
@@ -175,7 +175,7 @@ Ineligible rows stay recorded (history) but are skipped for seeding — no more
 manual backup-and-delete surgery. Plus: goal/constraints NEVER rotate task identity
 (already fixed) — add a regression test if missing.
 
-### L4 — Repeat-weakness escalation (RC4)
+### L4 — Repeat-weakness escalation (RC4) — ⬜ PENDING (§12 slice 9)
 When the SAME weakness row survives K=3 epochs byte-identical, stop retrying the same
 lever: escalate deterministically — (1) route to the structural editor with the
 weakness named, (2) relax the specific execute-contract cap for that section for one
@@ -183,13 +183,13 @@ epoch (e.g. allow multi-sentence weave from under-used sources), (3) if still st
 mark "app-limit reached" in the run report and STOP burning epochs on that row. The
 loop learns to notice its own walls instead of spinning at them.
 
-### L5 — Acceptance economics (RC5)
+### L5 — Acceptance economics (RC5) — ◐ PARTIAL (verdict memoization done; per-run cost line pending)
 Per-run postrun block: per-pass attempted/accepted counts + tokens spent per accepted
 change (data already flows through timing_sink/_dbg; aggregate it). Feeds S5: passes
 with chronic ~0% acceptance are candidates for removal or redesign — measured, not
 guessed.
 
-### L6 — Probe-before-wire (process rule, institutionalize today's lesson)
+### L6 — Probe-before-wire (process rule, institutionalize today's lesson) — ✅ ADOPTED (live probes used for extraction fix + synthesis guards + L0 verification)
 No new pass/guard/threshold enters the loop without a standalone probe script proving
 ONE manual run behaves (the article's "get one manual run reliable first"). The
 2026-07-05 probes (synthesis guards, topical-floor calibration) are the template —
@@ -234,7 +234,7 @@ Proof by contrast: `rebuild_references_section` — deterministic finalize step
 (build → validate → insert → fail-open) — worked on its FIRST live run and every run
 since. Nothing structural uses that pattern.
 
-### 8.2 Fix — L0: requirement-driven deterministic structural producer (NEW TOP ITEM)
+### 8.2 Fix — L0: requirement-driven deterministic structural producer (NEW TOP ITEM) — ✅ DONE (committed; code path verified live run 1534; diagram path unblocked by fence-lint repair, verify attempt 8)
 
 At finalization, for each still-unmet code/diagram/table-shaped requirement branch
 (the compliance downgrades now detect these deterministically):
@@ -302,17 +302,17 @@ gap ("subject Craft has zero sources — issue direct searches"); (b) compliance
 (c) verify stage records per-subject coverage into the run record for lineage.
 Breaks the carry-forward lock-in: v(n+1) sees the ledger, not just the one-sided text.
 
-**P2 — question-first planning (deep fix, prompt-level, medium risk).**
+**P2 — question-first planning (deep fix, prompt-level, medium risk).** ⬜ PENDING (§12 slice 12)
 Hub planning emits research questions + per-question search plans BEFORE section
 assignment; spokes own questions, reducer owns section placement. Sections stop being
 the unit of research.
 
-**P3 — subject disambiguation probe (small, rides on P1).**
+**P3 — subject disambiguation probe (small, rides on P1).** ⬜ PENDING (§12 slice 5)
 Per subject: one cheap discovery search + one LLM call "which interpretation of
 <subject> does this task mean? state it in one line" → recorded into Scope section +
 ledger. Kills the silent wrong-subject/no-subject failure mode.
 
-**P4 — explicit not-found contract (small, rides on P1).**
+**P4 — explicit not-found contract (small, rides on P1).** ⬜ PENDING (§12 slice 5)
 Reducer/finalize contract: a subject whose ledger row is empty after the run gets an
 auto-placed Limitations entry ("No public sources found for <subject> under
 interpretation <I>; coverage is limited to <other subjects>"). Honest asymmetry beats
