@@ -444,15 +444,16 @@ def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = 
             continue
         # Topical floor (same oracle as _drop_offtopic_findings): the aborted
         # 2026-07-05 run showed the π-Wikipedia citation riding an LLM patch —
-        # the floor on findings alone leaves this door open. Drop a patch only
-        # when EVERY cited URL is positively judged off-topic by its own cached
-        # page (an uncached URL is unknown → the patch stays).
+        # the floor on findings alone leaves this door open. Drop a patch when
+        # ANY cited URL is positively judged off-topic by its own cached page
+        # (live attempt 4: an every-URL-junk rule let a junk citation ride in
+        # next to a genuine one — a patch built on a junk source is not saved
+        # by also citing a good one). Uncached URLs are unknown → no vote.
         raw_urls = _re.findall(r"https?://\S+", content)
         req_words = _req_content_words(requirement)
         if req_words and raw_urls:
-            verdicts = [_offtopic_url(u.rstrip(".,);]"), req_words, requirement, judge)
-                        for u in raw_urls]
-            if all(v is True for v in verdicts):
+            if any(_offtopic_url(u.rstrip(".,);]"), req_words, requirement, judge) is True
+                   for u in raw_urls):
                 continue
         if _re.search(r"(?m)^#{1,6}\s+", content):
             continue
@@ -497,27 +498,40 @@ def _offtopic_url(url: str, req_words: set[str], requirement: str = "",
     page = _page_for_url(url)
     if not page:
         return None
+    from studio.runner import _dbg
+
     toks = _re.findall(r"[a-z]{4,}", page.lower())
     if not toks:
         return None
     density = sum(1 for t in toks if t.rstrip("s") in req_words) / len(toks)
     if density < _OFFTOPIC_HARD_DENSITY:
+        _dbg(f"offtopic[{url[:60]}]: DROP density={density:.4f} (hard band)")
         return True
     if density > _OFFTOPIC_CLEAR_DENSITY:
         return False
     if judge is None:
+        _dbg(f"offtopic[{url[:60]}]: KEEP density={density:.4f} (gray, no judge)")
         return False
     try:
         reply = judge.chat([{"role": "user", "content": (
             "You judge whether a fetched SOURCE PAGE is about the SPECIFIC "
             "subject of a task, or merely shares common words with it.\n\n"
+            "IRRELEVANT includes a source that merely DEFINES a word the task "
+            "happens to use (a dictionary-style entry) or covers a DIFFERENT "
+            "subject that shares a name with something in the task (a homonym). "
+            "Sharing vocabulary is not relevance; addressing the task's actual "
+            "subject is.\n\n"
             f"TASK: {requirement[:400]}\n\n"
             f"SOURCE PAGE EXCERPT (from {url}):\n{page[:2000]}\n\n"
             "Answer on the last line with exactly one word: RELEVANT or IRRELEVANT."
         )}])
         matches = _OFFTOPIC_VERDICT_RE.findall(getattr(reply, "text", "") or "")
-        return matches[-1].upper() == "IRRELEVANT" if matches else False
-    except Exception:  # noqa: BLE001 — relevance judging is best-effort; keep on failure
+        verdict = matches[-1].upper() == "IRRELEVANT" if matches else False
+        _dbg(f"offtopic[{url[:60]}]: {'DROP' if verdict else 'KEEP'} "
+             f"density={density:.4f} (gray, judge={'IRRELEVANT' if verdict else 'RELEVANT/unparsed'})")
+        return verdict
+    except Exception as exc:  # noqa: BLE001 — relevance judging is best-effort; keep on failure
+        _dbg(f"offtopic[{url[:60]}]: KEEP density={density:.4f} (gray, judge error {type(exc).__name__})")
         return False
 
 

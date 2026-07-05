@@ -344,3 +344,35 @@ def test_offtopic_gray_zone_goes_to_llm_judge():
     assert kept == [f] and dropped == 0
     kept, dropped = _drop_offtopic_findings([f], req, judge=None)
     assert kept == [f] and dropped == 0
+
+
+def test_llm_patch_with_one_junk_url_is_dropped():
+    """Live attempt 4 (2026-07-05): a junk citation rode an accepted patch NEXT
+    TO a genuine one — the every-URL-junk rule was too lax. ANY positively
+    off-topic URL now sinks the patch; an uncached URL still casts no vote."""
+    from types import SimpleNamespace
+
+    from studio.findings import _sanitize_llm_patches
+
+    tools._fetch_cache.clear()
+    req = ("Research how to build a custom agent framework with the pi-ai "
+           "package, covering the agent loop, tool calling, and example code")
+    tools._fetch_cache["https://good.example|"] = (
+        "Building a custom agent framework: the agent loop calls each tool, "
+        "the pi-ai package provides completions, example code included.", 9)
+    tools._fetch_cache["https://pi.wikipedia|"] = (
+        "The number pi is a mathematical constant, the ratio of a circle's "
+        "circumference to its diameter, used in geometry and trigonometry.", 9)
+    art = "## Evidence and Analysis\n\nbody\n"
+    p = SimpleNamespace(
+        op="insert_after", anchor="## Evidence and Analysis",
+        content=("Grounded claim (https://good.example). Baseline definition "
+                 "(https://pi.wikipedia)."))
+    assert _sanitize_llm_patches(art, [p], req) == []
+    # Junk URL uncached → unknown → patch survives (fail-open unchanged).
+    del tools._fetch_cache["https://pi.wikipedia|"]
+    p2 = SimpleNamespace(
+        op="insert_after", anchor="## Evidence and Analysis",
+        content=("Grounded claim (https://good.example). Unknown source "
+                 "(https://never.fetched/x)."))
+    assert len(_sanitize_llm_patches(art, [p2], req)) == 1
