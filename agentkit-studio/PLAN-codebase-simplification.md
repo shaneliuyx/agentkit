@@ -59,9 +59,10 @@ conditions preserved verbatim.
 expand guards COMPOSE these instead of re-implementing. Per-guard unit tests move to
 one file.
 
-### S4 — delete/move stale scripts (TRIVIAL)
-`e2e_demo_fix*.py`, `calib_*.py`, `a2_live_validate.py`, `editor_*_check.py` → delete
-(git history keeps them). Anything still referenced by docs → `backend/probes/`.
+### S4 — delete/move stale scripts — RESOLVED AS NO-OP (2026-07-05)
+Verified: all probe/demo scripts live under `backend/tmp/` which is gitignored — the
+REPO is already clean; the audit's Pyright sweep saw local disk, not tracked files.
+Local probes are kept deliberately (L6 probe-before-wire values them). No action.
 
 ### S5 — measured efficiency wins (ONLY with numbers)
 - Memoize `rubric_score`/`score_breakdown` per text-hash within a run (called from
