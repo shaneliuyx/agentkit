@@ -575,6 +575,7 @@ any push, kill/fix/retest on live defects.
 | **L3 review fixes** | committed | Reviewer MEDIUM: the no-content skip in latest_with_content was still silent → now logs version+reason (no silent path); LOW: median test comment corrected (self-inclusive, not leave-one-out). 163 targeted tests green |
 | **Observability triple (extraction groups / per-branch compliance verdicts / L0 _accept criterion)** | committed | Next live run shows exactly what was extracted, every covers-X verdict, and which criterion vetoes an L0 insertion — closes run-1537's three blind spots |
 | **Format repairs: fence-line contamination + doubled citation** | committed | New lint #13 (fence line carries trailing content — none of the 12 prior lints caught it) + deterministic repairs sharing ONE predicate (textutil.fence_rest_contaminated) so lint and repair cannot disagree; doubled `[title](url) url` collapsed on exact norm_url match, punctuation preserved. Verified against run-1537's real artifact: line-93 lint fires and repairs clean, line-105 duplicate collapses. Suite 874. Side effect: the fence lint was the pre-existing lints_before=1 that made _accept veto L0's diagram — repair runs BEFORE structural_producer in the pass order, so diagram insertion is unblocked next run |
+| **Fence-survival instrumentation (per-pass fences= + L0 write-through before/after)** | committed | Run v5's contradiction (L0 changed=True insertion, all later passes changed=False, zero fences recorded) was unresolvable statically — offline reproduction of the section write-through preserves the fence on both fresh and copied-live workspaces. Next run names the eraser pass mechanically |
 
 **Lineage scoreboard** (task 492bae60177b, honest cold chain): v1 0.145 → v2 0.304 (guards+salvage) → v3 0.657 (L0 code fence) → v4 0.433 (attempt 7 — no crash, fence survived, zero junk, but ZERO web searches issued: run rode inherited evidence, so the covers-Craft loop was never exercised; score dip is one epoch of synthesis rejects on a seeded run). **Attempt 8 (after L3 commit + restart onto S2 code) is the decisive verification**: S2 pass-sequence E2E diff + visible covers-Craft verdicts + L0 diagram veto reason, all in one run.
 
@@ -599,11 +600,11 @@ nothing to act on this run (lints_before=6 were other kinds — repair_lints mus
 lint NAMES when changed=False).
 
 ### Attempt-9 fix slate (ordered)
-1. **rebuild_references erasure** — trace + fix the source-of-truth bug (BLOCKER for
+1. **rebuild_references erasure** — ◐ IN PROGRESS: instrumentation committed (per-pass fences= trace); offline repro EXONERATED write_section_workspace (fresh + live-copy both preserve); next run pinpoints. Original suspect statement kept below for the record (BLOCKER for
    all structural content; everything else is moot while inserted blocks get erased).
-2. Diagram insertion carries explanatory prose (kills the 6→7 lint veto).
-3. repair_lints logs lint names when it cannot act.
-4. covers-X deterministic downgrade gate (mention-vs-substance).
+2. Diagram insertion carries explanatory prose (kills the 6→7 lint veto). — ◐ BUILDING (l3-builder)
+3. repair_lints logs lint names when it cannot act. — ◐ BUILDING (l3-builder)
+4. covers-X deterministic downgrade gate (mention-vs-substance). — ◐ BUILDING (l3-builder; run-8 evidence: judge verdict wobbled SATISFIED→NOT on identical mention-only content)
 5. Writeback-normalize fence repair (mid-run cleanliness; formatter-after-repairs
    invariant pinned by test — mdformat/Flowmark/PyMarkdown all launder broken fences,
    evidenced 2026-07-05; Flowmark and PyMarkdown evaluated and rejected).
