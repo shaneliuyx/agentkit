@@ -647,3 +647,31 @@ content-after-References — ONE disease behind the swallowed docs, deleted
 subsections, and write-through erasure. A+B bundle (synth fence guard + duplicate
 birth-fix + merge repair) in build; attempt 10 = first run where structural content
 should survive end-to-end.
+
+## 15. OUTCOME-FIRST RE-PRIORITIZATION (2026-07-05 night, user-directed: "need to see different outcome")
+
+Six runs of honest scores (0.145→0.30→0.66→0.43→0.41→0.49) say the machinery half
+is fixed but the READ REPORT hasn't changed character: no Craft, shallow sections,
+generic diagram. Re-ranked by visible outcome delta:
+
+1. **P1-core coverage actor** (was slice 5, now immediate): deterministic
+   zero-sources check per covers-X subject (evidence/ + cache scan for subject
+   tokens); when zero, inject an IMPERATIVE search directive into the tool-loop/
+   worker prompts ("no sources exist for <subject>: issue web_search '<subject> …'
+   and web_fetch the top result BEFORE writing") — not another reducer notice.
+   Verdicts without an actor produced 0 Craft searches across 3 runs.
+2. **Depth contract relaxation** (NEW slice — root cause documented since §5 but
+   never scheduled): loosen findings.py one-sentence contract to 2–3 grounded
+   sentences per finding + revisit the density cap. The anti-quote-wall guards that
+   motivated the over-correction now exist independently (junk floor, citation
+   guards, salvage) — the ceiling is no longer needed at this severity.
+3. **8b requirement-conditioned diagram**: build_components_prompt receives the
+   requirement branch + subject list; diagram targets what was asked (full value
+   only after #1 supplies Craft content).
+4. A+B eraser bundle — in build, lands first (protects everything above).
+5. Deferred: verdict memoization, AST lint, L1 editorial pass, S3 guards — internal;
+   resume after the report visibly changes.
+
+Success check for the pivot: attempt 11 artifact must contain (a) ≥1 Craft-specific
+cited source, (b) sections averaging materially more substance, (c) a diagram whose
+nodes include both Pi and Craft. Anything less = pivot not achieved, rediagnose.
