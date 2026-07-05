@@ -154,3 +154,24 @@ def has_code_fence(text: str) -> bool:
         for i, info in enumerate(fences)
         if i % 2 == 0
     )
+
+
+#: A fence line ``optional-indent + ``` + trailing content`` — matches both an
+#: opener (``` ```python``` ``) and a closer. Shared by the lint check
+#: (studio.artifact_lint) and the deterministic repair (studio.artifact_text) so
+#: the two can never drift on what counts as contamination.
+FENCE_LINE_RE = re.compile(r"^(?P<indent>[ \t]*)```(?P<rest>[^\n]*)$", re.MULTILINE)
+
+
+def fence_rest_contaminated(rest: str, *, is_opening: bool) -> bool:
+    """True when a fence line's trailing content (after the ``` marker) is invalid.
+
+    A CLOSING fence must carry nothing after the marker — any non-empty trailing
+    content (observed shape: a citation URL glued on by the model, e.g. ` ``` https:
+    //example.com`) is contamination. An OPENING fence's trailing content is
+    normally a legal language tag (```` ```python ````), so it's only contamination
+    when it contains a URL scheme (a language name never does)."""
+    rest = rest.strip()
+    if not is_opening:
+        return bool(rest)
+    return "://" in rest

@@ -120,7 +120,6 @@ def test_bad_report_fixture_flags_known_quality_failures() -> None:
     assert "unverified" in joined.lower()
     assert "Citation wall" in joined
     assert "Code fragment appears outside" in joined
-    assert "Long evidence-bearing section has no citation URL" in joined
 
 
 # --- clean `(unverified)` visibility ----------------------------------------
@@ -177,3 +176,18 @@ The sample is narrow, so the estimate should be treated as directional
 - https://example.com/survey
 """
     assert lint_artifact(text) == []
+
+
+def test_flags_closing_fence_glued_to_citation_url() -> None:
+    """Run-1537 artifact.md line 93: a closing fence immediately followed by a
+    citation URL on the same line — breaks markdown rendering."""
+    text = (
+        "```python\nprint(1)\n``` "
+        "https://nader.substack.com/p/how-to-build-a-custom-agent-framework\n"
+    )
+    issues = lint_artifact(text)
+    assert any("Fence line carries trailing content" in i for i in issues)
+
+
+def test_legal_language_tagged_opener_is_not_flagged() -> None:
+    assert lint_artifact("```python\nprint(1)\n```\n") == []

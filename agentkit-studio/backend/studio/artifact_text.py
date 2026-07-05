@@ -13,7 +13,10 @@ import re as _re
 from typing import TYPE_CHECKING
 
 from studio.textutil import dbg as _dbg
+from studio.textutil import FENCE_LINE_RE as _FENCE_LINE_RE
+from studio.textutil import fence_rest_contaminated as _fence_rest_contaminated
 from studio.textutil import MERMAID_BLOCK_RE as _MERMAID_BLOCK_RE
+from studio.textutil import norm_url as _norm_url
 from studio.textutil import norm_urls as _norm_urls
 
 if TYPE_CHECKING:
@@ -696,11 +699,106 @@ def reconcile_outline(text: str, template: list[str]) -> str:
 # fenced ```mermaid block, captured whole for block-level repair + deterministic splice.
 
 
+def _repair_fence_contamination(text: str) -> tuple[str, bool]:
+    """Split a fence line that carries trailing content glued after the ``` marker
+    onto its own line (run-1537 line 93: a closing fence immediately followed by a
+    citation URL — ```` ``` https://nader.substack.com/... ````, breaking markdown
+    rendering). Detection is shared with ``studio.artifact_lint`` via
+    ``textutil.fence_rest_contaminated`` so the two can never disagree on what counts.
+
+    A CLOSING fence's trailing content moves to its own line AFTER the fence (it was
+    written right after the code, so that's where it reads naturally). An OPENING
+    fence's trailing content moves BEFORE the fence instead — dropping it after
+    would land it as the first line of actual code, corrupting the block body. If
+    the line before an opening fence is non-blank (e.g. "...as shown below:"), a
+    blank line is inserted first so the moved citation doesn't fuse into that
+    sentence's paragraph. The moved line is prefixed with the fence's own `indent`
+    so a citation moved out of an indented (list-item) fence doesn't de-indent to
+    the margin. Idempotent: after the split, no fence line carries trailing
+    content, so a second pass is a no-op.
+    """
+    src = text or ""
+    out: list[str] = []
+    pos = 0
+    changed = False
+    is_opening = True
+    for m in _FENCE_LINE_RE.finditer(src):
+        rest = m.group("rest")
+        if _fence_rest_contaminated(rest, is_opening=is_opening):
+            indent = m.group("indent")
+            rest_stripped = rest.strip()
+            prefix = src[pos:m.start()]
+            if is_opening:
+                # Keep a legal language token (if any) on the fence; only the part
+                # beyond it — the glued URL — moves, and it moves BEFORE the fence.
+                lang, _, extra = rest_stripped.partition(" ")
+                moved, lang = (rest_stripped, "") if "://" in lang else (extra.strip(), lang)
+                sep = "" if not prefix or prefix.endswith("\n\n") else "\n"
+                out.append(prefix)
+                out.append(f"{sep}{indent}{moved}\n{indent}```{lang}")
+            else:
+                out.append(prefix)
+                out.append(f"{indent}```\n{indent}{rest_stripped}")
+            pos = m.end()
+            changed = True
+        is_opening = not is_opening
+    out.append(src[pos:])
+    return ("".join(out), True) if changed else (src, False)
+
+
+#: A markdown link immediately followed by a bare URL that duplicates its own
+#: target — `[title](URL) URL` (run-1537 line 105: the reducer echoed the same
+#: source both as a link and as a trailing bare citation).
+#: KNOWN LIMITATION: `[^)\s]+` is the same narrow char-class shape S1 already
+#: replaced twice in textutil (see extract_urls's docstring) — it mis-captures a
+#: URL with an internal paren, e.g. `.../wiki/Pi_(number)`, truncating at the `(`.
+#: Fail-SAFE here (a missed repair, not a corruption): the doubled bare URL just
+#: won't match and is left alone. Real fix is balanced-paren handling; out of
+#: scope for this repair pass.
+_MD_LINK_RE = _re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)\)")
+_BARE_URL_AFTER_RE = _re.compile(r"(\s+)(https?://\S+)")
+
+
+def _repair_doubled_citations(text: str) -> tuple[str, bool]:
+    """Drop a bare URL that immediately follows a markdown link and duplicates the
+    link's own target (normalized via ``textutil.norm_url``). Only an EXACT
+    normalized match is dropped — an adjacent DIFFERENT URL is left untouched.
+    Any trailing sentence punctuation the bare URL carried (e.g. a wrapping `).`)
+    is preserved, since that belongs to the surrounding prose, not the citation.
+    """
+    src = text or ""
+    out: list[str] = []
+    pos = 0
+    changed = False
+    for m in _MD_LINK_RE.finditer(src):
+        out.append(src[pos:m.end()])
+        pos = m.end()
+        tail_m = _BARE_URL_AFTER_RE.match(src, pos)
+        if not tail_m:
+            continue
+        raw_bare = tail_m.group(2)
+        bare_core = _norm_url(raw_bare)
+        if _norm_url(m.group(2)) != bare_core:
+            continue  # a different adjacent URL — never touch it
+        out.append(raw_bare[len(bare_core):])  # keep trailing punctuation only
+        pos = tail_m.end()
+        changed = True
+    out.append(src[pos:])
+    return ("".join(out), True) if changed else (src, False)
+
+
 def _repair_lints(
     text: str, client: "LLMClient | None", requirement: str
 ) -> tuple[str, bool]:
-    """Repair a malformed mermaid diagram in the OUTPUT — root-cause fix for the reported
-    served-broken-diagram bug (DESIGN §14.6).
+    """Repair deterministic format defects, then a malformed mermaid diagram via
+    the model — root-cause fix for the reported served-broken-diagram bug and
+    run-1537's fence/citation glue (DESIGN §14.6).
+
+    The two deterministic sub-repairs (fence-line contamination, doubled
+    citations) run FIRST and unconditionally — they are pure text fixes, need no
+    LLM, and their own correctness doesn't depend on lint count improving (a
+    fence split or dedup is always right when it fires). The mermaid repair below
+    is unchanged: LLM-based, gated on ``client``, and self-verifying via lint count.
 
     Why on the output, in-run: the reducer is told to "preserve verbatim", and the §14.6
     repair clause is built only from ``lint_artifact(_seed_text)`` (the SEED). A defect BORN
@@ -721,13 +819,18 @@ def _repair_lints(
     """
     from studio.artifact_lint import _MERMAID_GLUED_EDGE, lint_artifact
     src = text or ""
-    if not src.strip() or client is None:
+    if not src.strip():
         return src, False
-    before = len(lint_artifact(src))
+    out, fence_fixed = _repair_fence_contamination(src)
+    out, dup_fixed = _repair_doubled_citations(out)
+    changed = fence_fixed or dup_fixed
+    if client is None:
+        return (out, True) if changed else (src, False)
+    before = len(lint_artifact(out))
     if before == 0:
-        return src, False
-    out = src
-    for block in _MERMAID_BLOCK_RE.findall(src):
+        return (out, True) if changed else (src, False)
+    before_mermaid = out
+    for block in _MERMAID_BLOCK_RE.findall(out):
         if not _MERMAID_GLUED_EDGE.search(block):
             continue  # this diagram is well-formed — leave it
         prompt = (
@@ -745,10 +848,11 @@ def _repair_lints(
         if not fixed or _MERMAID_GLUED_EDGE.search(fixed):
             continue  # model didn't return a clean block — keep the original
         out = out.replace(block, fixed, 1)
-    # Accept only on a strict improvement; the deterministic splice cannot touch prose/URLs.
-    if out != src and len(lint_artifact(out)) < before:
+    # Accept the mermaid splice only on a strict improvement; the deterministic
+    # sub-repairs above are already-verified fixes and always count as `changed`.
+    if out != before_mermaid and len(lint_artifact(out)) < before:
         return out, True
-    return src, False
+    return (before_mermaid, True) if changed else (src, False)
 
 
 def _strip_preamble(text: str) -> str:

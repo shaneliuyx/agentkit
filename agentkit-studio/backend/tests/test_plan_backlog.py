@@ -133,6 +133,61 @@ def test_repair_lints_rejects_when_reply_has_no_block():
     assert not changed and out == _BROKEN
 
 
+# --- deterministic format repairs: fence-line glue + doubled citation ---------
+# Run-1537 artifact.md line 93 (closing fence immediately followed by a citation
+# URL) and line 105 (`[title](url) url` duplicate) — both purely mechanical text
+# fixes, so _repair_lints must apply them even with client=None.
+
+_FENCE_GLUED = (
+    "```python\nprint(1)\n``` "
+    "https://nader.substack.com/p/how-to-build-a-custom-agent-framework\n\n"
+    "Next paragraph.\n"
+)
+_DOUBLED_CITATION = (
+    "Traces help ([GitHub - x](https://github.com/earendil-works/pi) "
+    "https://github.com/earendil-works/pi)."
+)
+
+
+def test_repair_lints_fixes_fence_line_glue_without_a_client():
+    out, changed = _repair_lints(_FENCE_GLUED, None, "task")
+    assert changed
+    assert "``` https://nader" not in out
+    assert "https://nader.substack.com/p/how-to-build-a-custom-agent-framework" in out
+
+
+def test_repair_lints_fixes_doubled_citation_without_a_client():
+    out, changed = _repair_lints(_DOUBLED_CITATION, None, "task")
+    assert changed
+    assert out == "Traces help ([GitHub - x](https://github.com/earendil-works/pi))."
+
+
+def test_repair_lints_format_fixes_are_idempotent():
+    once, _ = _repair_lints(_FENCE_GLUED + _DOUBLED_CITATION, None, "task")
+    twice, changed_again = _repair_lints(once, None, "task")
+    assert twice == once
+    assert not changed_again
+
+
+def test_repair_lints_leaves_legal_python_opener_untouched():
+    clean = "```python\nprint(1)\n```\n"
+    out, changed = _repair_lints(clean, None, "task")
+    assert not changed and out == clean
+
+
+def test_repair_lints_leaves_adjacent_different_url_untouched():
+    text = "See [a](https://a.com/1) https://b.com/2 for context."
+    out, changed = _repair_lints(text, None, "task")
+    assert not changed and out == text
+
+
+def test_fence_split_preserves_every_citation_url():
+    from studio.textutil import norm_urls
+    before = norm_urls(_FENCE_GLUED)
+    out, _ = _repair_lints(_FENCE_GLUED, None, "task")
+    assert before <= norm_urls(out)
+
+
 # --- item 1B: analysis criterion exists and quote density is down-weighted ----
 
 def test_analysis_criterion_present_and_weights_normalized():

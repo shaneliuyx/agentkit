@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 import ast
 
+from studio.textutil import FENCE_LINE_RE, fence_rest_contaminated
+
 #: A mermaid edge label `|...|` must attach to a link operator (``-->``, ``---``,
 #: ``-.->``, ``==>`` …). When the char immediately before the opening ``|`` is a
 #: node-identifier char, the node is glued straight to the label — the exact
@@ -308,6 +310,25 @@ def _references_terminal_issues(text: str) -> list[str]:
     return []
 
 
+def _fence_contamination_issues(text: str) -> list[str]:
+    """A fence marker (```` ``` ````) with trailing content glued onto the same
+    line — e.g. a closing fence immediately followed by a citation URL. Breaks
+    markdown rendering and is the shared trigger for the deterministic repair in
+    ``studio.artifact_text``."""
+    lines = (text or "").split("\n")
+    issues: list[str] = []
+    is_opening = True
+    for m in FENCE_LINE_RE.finditer(text or ""):
+        if fence_rest_contaminated(m.group("rest"), is_opening=is_opening):
+            line_idx = text.count("\n", 0, m.start())
+            issues.append(
+                f"[{_section_at(lines, line_idx)}] Fence line carries trailing "
+                f"content after the ``` marker: {lines[line_idx].strip()[:60]}"
+            )
+        is_opening = not is_opening
+    return issues
+
+
 def lint_artifact(text: str) -> list[str]:
     """Return content-validity weaknesses for *text* (empty list when clean).
 
@@ -324,6 +345,7 @@ def lint_artifact(text: str) -> list[str]:
       10. Mermaid diagrams without nearby explanatory prose.
       11. Obvious Python fenced-block syntax errors.
       12. References section followed by more body sections.
+      13. Fence line carries trailing content after the ``` marker.
     """
     if not text:
         return []
@@ -360,6 +382,7 @@ def lint_artifact(text: str) -> list[str]:
     issues.extend(_mermaid_explanation_issues(text))
     issues.extend(_python_code_issues(text))
     issues.extend(_references_terminal_issues(text))
+    issues.extend(_fence_contamination_issues(text))
 
     return _dedupe(issues)
 
