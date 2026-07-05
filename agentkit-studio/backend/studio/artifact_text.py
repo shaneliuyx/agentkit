@@ -55,8 +55,17 @@ def _derive_title_from_requirement(requirement: str) -> str:
         topic = first_sentence.strip(" .:;-") or "Research Report"
     topic = _re.sub(r"\s+", " ", topic)
     words = topic.split()
-    if len(words) > 14:
-        topic = " ".join(words[:14])
+    # 18, not 14: the stop-anchor above already trims the requirement's clause
+    # tail, so what reaches here is the real topic phrase — a 14-word cap chopped
+    # "… create a research report" to "… create a research" (live H1, 2026-07-05).
+    if len(words) > 18:
+        words = words[:18]
+        # a cut must not strand a dangling connective/article as the last word
+        while words and words[-1].lower() in {
+            "a", "an", "the", "and", "or", "to", "of", "for", "in", "on", "with",
+        }:
+            words.pop()
+        topic = " ".join(words)
     return topic[:1].upper() + topic[1:]
 
 

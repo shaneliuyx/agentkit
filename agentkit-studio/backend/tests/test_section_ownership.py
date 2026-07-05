@@ -705,11 +705,26 @@ def test_resolve_report_title_keeps_use_as_core_topic_word() -> None:
         "report, need to include example code or design architecture.",
     )
 
-    # 15 words after the stop-clause is dropped; the 14-word cap trims the last one.
+    # The stop-clause drop leaves a clean 15-word topic; the old 14-word cap
+    # then chopped "report" off mid-noun-phrase (live H1, 2026-07-05). The cap
+    # is now 18 words and must never cut inside the topic phrase.
     assert out.startswith(
-        "# Study how to use Pi and Craft to develop agents and create a research\n\n"
+        "# Study how to use Pi and Craft to develop agents and create a research report\n\n"
     )
     assert "example code" not in out.splitlines()[0]
+
+
+def test_resolve_report_title_cut_never_ends_on_dangling_word() -> None:
+    doc = "# Research Report\n\n## Executive Summary\nBody.\n"
+    out = resolve_report_title(
+        doc,
+        "Evaluate the throughput scaling limits observed when running large distributed "
+        "training clusters across heterogeneous accelerator fleets and summarize the "
+        "impact of interconnect topology and the",
+    )
+    title = out.splitlines()[0]
+    assert len(title.split()) <= 19  # "# " + max 18 words
+    assert title.split()[-1].lower() not in {"a", "an", "the", "and", "or", "to", "of"}
 
 
 def test_resolve_report_title_drops_long_context_clause() -> None:
