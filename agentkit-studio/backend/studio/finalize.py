@@ -325,10 +325,29 @@ def _pass_structural_producer(state: FinalizeState) -> FinalizeState:
                         # compliance with every pass reporting changed=False — this
                         # line splits "eraser is the write-through" from "eraser is
                         # a later pass" definitively.
+                        _fences_post = (state.scored_text or "").count("```")
                         _dbg(
                             f"structural_producer write-through: fences "
-                            f"{_fences_pre}→{(state.scored_text or '').count('```')}"
+                            f"{_fences_pre}→{_fences_post}"
                         )
+                        if _fences_post < _fences_pre:
+                            # Attempt 9 caught the section round-trip DROPPING an
+                            # inserted block live (4→2; the doc carried duplicate
+                            # ## sections that confuse the splitter). Losing
+                            # verified content is worse than skipping the section
+                            # sync: keep the inserted text and write it to disk
+                            # directly so all three sources stay aligned.
+                            _dbg(
+                                "structural_producer write-through: REVERTED — "
+                                "section round-trip lost fenced blocks; keeping "
+                                "inserted text verbatim"
+                            )
+                            state.scored_text = sp_text
+                            state.result_output = sp_text
+                            try:
+                                state.art_file.write_text(sp_text, encoding="utf-8")
+                            except Exception:  # noqa: BLE001 — disk sync best-effort
+                                pass
                         _update_active_template_from_artifact(state.session, state.scored_text)
                         state.verified_urls = _verified_urls_from_cache(state.scored_text)
                 except Exception:  # noqa: BLE001 — write-back is best-effort

@@ -629,6 +629,11 @@ lint NAMES when changed=False).
 6. P1-core: subject ledger + unmet-subject search directive into worker/tool-loop
    prompts (Craft searches need an ACTOR, not another verdict).
 7. Compliance-verdict memoization per text-hash (17 wasted rounds).
+8b. Diagram requirement-conditioning (user finding, attempt 9): the produced
+   diagram is a generic component sketch, not the REQUIRED "integration of Pi and
+   Craft" architecture — build_components_prompt never receives the requirement
+   branch text (E7 birth-certificate conditioning); ALSO downstream of the Craft
+   coverage gap (can't diagram integration with zero Craft content — P1 again).
 8. AST swallowed-content lint via markdown-it-py (already a transitive dep) — catches
    the giant-fence-swallows-headings class generically.
 

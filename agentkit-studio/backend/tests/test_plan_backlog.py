@@ -1,6 +1,12 @@
 """PLAN items 1, 5, 6, 8: synthesis guardrail, lineage identity, weakness filter, status."""
 from studio.task_runs import _is_non_weakness, base_identity, task_hash
-from studio.runner import _epoch_status, _repair_lints, _synthesize_analysis
+from studio.runner import (
+    _epoch_status,
+    _repair_doubled_citations,
+    _repair_fence_contamination,
+    _repair_lints,
+    _synthesize_analysis,
+)
 from studio.rubric import DEFAULT_WEIGHTS, score_breakdown
 
 
@@ -220,6 +226,36 @@ def test_fence_split_preserves_every_citation_url():
     before = norm_urls(_FENCE_GLUED)
     out, _ = _repair_lints(_FENCE_GLUED, None, "task")
     assert before <= norm_urls(out)
+
+
+# --- §14 slate item 5 (user-escalated): per-step writeback normalize path -----
+# The deterministic fence/citation repairs used to run only at finalize, so a
+# glued fence broke markdown for the REST OF THE RUN (every later step, and the
+# GUI mid-run, inherited it). studio/runner.py's per-step normalize block (the
+# "normalize step=" _dbg line) now applies BOTH repairs, last, after
+# normalize_artifact + strip_satisfied_placeholders — this mirrors that exact
+# composition to pin it without driving a full multi-step Runner.run().
+
+def _normalize_then_repair(text: str) -> str:
+    from studio.artifact_text import normalize_artifact, strip_satisfied_placeholders
+    out = strip_satisfied_placeholders(normalize_artifact(text))
+    out, _ = _repair_fence_contamination(out)
+    out, _ = _repair_doubled_citations(out)
+    return out
+
+
+def test_normalize_path_repairs_a_glued_fence():
+    text = "# Report\n\n## Body\n\n```python\nprint(1)\n``` https://example.com/report\n"
+    out = _normalize_then_repair(text)
+    assert "``` https://example.com/report" not in out
+    assert "https://example.com/report" in out  # citation kept, just moved off the fence
+
+
+def test_normalize_path_repair_is_idempotent():
+    text = "# Report\n\n## Body\n\n```python\nprint(1)\n``` https://example.com/report\n"
+    once = _normalize_then_repair(text)
+    twice = _normalize_then_repair(once)
+    assert twice == once
 
 
 # --- item 1B: analysis criterion exists and quote density is down-weighted ----

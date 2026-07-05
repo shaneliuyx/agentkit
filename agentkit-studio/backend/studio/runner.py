@@ -270,6 +270,8 @@ from studio.artifact_text import (  # noqa: E402,F401
     _ends_cleanly,
     _gap_sections,
     _merge_missing_sections,
+    _repair_doubled_citations,
+    _repair_fence_contamination,
     _repair_lints,
     _refine_readability,
     _strip_preamble,
@@ -3595,6 +3597,16 @@ class Runner:
                 try:
                     _cur_norm = _art_path.read_text()
                     _normed = strip_satisfied_placeholders(normalize_artifact(_cur_norm))
+                    # §14 slate item 5 (user-escalated): the deterministic fence/citation
+                    # repairs used to run only at finalize, so a glued fence broke markdown
+                    # for the REST of the run (GUI shows a swallowed document, every later
+                    # step inherits it). Applied LAST, after normalize, so they see the
+                    # final per-step text — deterministic + idempotent, no LLM mermaid
+                    # repair here (that stays finalize-only, studio/finalize.py).
+                    _normed, _fence_fixed = _repair_fence_contamination(_normed)
+                    _normed, _dup_fixed = _repair_doubled_citations(_normed)
+                    if _fence_fixed or _dup_fixed:
+                        _dbg("normalize: fence/citation repairs applied")
                     if _normed != _cur_norm:
                         _normed = _write_artifact_through_sections(
                             session, _eff_ws2, _normed, requirement
