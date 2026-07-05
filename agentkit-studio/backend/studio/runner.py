@@ -2992,6 +2992,13 @@ class Runner:
         """
         cancelled = False
         final_output = ""
+        # P0-2b strong-model reducer: the reducer is where synthesis is actually
+        # COMPOSED — the two stuck rubric rows (Evidence synthesis, Analytical
+        # depth) live or die on its patches, and the weak generation model is the
+        # suspected ceiling (run 1531). Same degrade-to-base pattern as hybrid
+        # planning: judge spec (default haiku) when available, base client in
+        # tests / on backend failure. Spokes stay on the session model.
+        _reducer_client = self._build_judge_client(base_client)
         # Reset per-epoch relevance state (studio.relevance) — read by
         # _postrun_score_and_record via these instance attrs (mirrors the existing
         # self._last_scorecard_100 cross-method bridge). Cleared every epoch so a
@@ -3434,7 +3441,7 @@ class Runner:
                             base_client, self._task_requirements, _partial_artifact
                         )
                 _reducer = _make_section_reducer(
-                    client, _cur_art, getattr(session, "weaknesses", []) or [],
+                    _reducer_client, _cur_art, getattr(session, "weaknesses", []) or [],
                     embedder=self._embedder,   # F1: dedup near-duplicate findings
                     scoring_rules=format_scoring_rules(_full_scoring_matrix(session)),
                     # Fetched materials handoff: same FETCHED EVIDENCE FILES the final step
