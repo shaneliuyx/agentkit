@@ -3455,6 +3455,7 @@ class Runner:
                     # iteration-prefixed `requirement` — the prefix boilerplate
                     # dilutes the vocabulary overlap ~10x and false-drops sources.
                     requirement=base_requirement,
+                    fallback_client=client,  # call-time degrade if the judge flakes
                 )
 
             try:

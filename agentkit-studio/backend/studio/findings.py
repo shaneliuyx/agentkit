@@ -213,6 +213,7 @@ def _make_section_reducer(
     requirement_clause: str = "",
     timing_sink=None,
     requirement: str = "",
+    fallback_client=None,
 ):
     """Build the section-aware STAR reducer closure (DESIGN §4.5; Lever 3).
 
@@ -304,7 +305,17 @@ def _make_section_reducer(
             "Nothing else — no document, no preamble, no commentary."
         )
         _t_red = time.monotonic()  # T1: reducer LLM inference (dominant reduce cost)
-        res = client.chat([{"role": "user", "content": prompt}])
+        try:
+            res = client.chat([{"role": "user", "content": prompt}])
+        except Exception:  # noqa: BLE001 — judge backend flake must not kill the run
+            # P0-2b call-time degrade: _build_judge_client only degrades at BUILD
+            # time; a transient connection failure at CHAT time crashed a whole
+            # cold run (s_15ee85a7f2b4, LLMUnavailable through run_plan). One
+            # retry on the generation client restores the pre-P0-2b behavior.
+            if fallback_client is None or fallback_client is client:
+                raise
+            _dbg("reduce: judge client failed → degrading to generation client")
+            res = fallback_client.chat([{"role": "user", "content": prompt}])
         if timing_sink is not None:
             timing_sink("reducer", time.monotonic() - _t_red)
         # Capture the reducer prompt+output so the runner can persist it to
