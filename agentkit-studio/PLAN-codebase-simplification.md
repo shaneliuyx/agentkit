@@ -577,3 +577,41 @@ any push, kill/fix/retest on live defects.
 | **Format repairs: fence-line contamination + doubled citation** | committed | New lint #13 (fence line carries trailing content — none of the 12 prior lints caught it) + deterministic repairs sharing ONE predicate (textutil.fence_rest_contaminated) so lint and repair cannot disagree; doubled `[title](url) url` collapsed on exact norm_url match, punctuation preserved. Verified against run-1537's real artifact: line-93 lint fires and repairs clean, line-105 duplicate collapses. Suite 874. Side effect: the fence lint was the pre-existing lints_before=1 that made _accept veto L0's diagram — repair runs BEFORE structural_producer in the pass order, so diagram insertion is unblocked next run |
 
 **Lineage scoreboard** (task 492bae60177b, honest cold chain): v1 0.145 → v2 0.304 (guards+salvage) → v3 0.657 (L0 code fence) → v4 0.433 (attempt 7 — no crash, fence survived, zero junk, but ZERO web searches issued: run rode inherited evidence, so the covers-Craft loop was never exercised; score dip is one epoch of synthesis rejects on a seeded run). **Attempt 8 (after L3 commit + restart onto S2 code) is the decisive verification**: S2 pass-sequence E2E diff + visible covers-Craft verdicts + L0 diagram veto reason, all in one run.
+
+
+## 14. ATTEMPT-8 RESULTS (run recorded v5 0.41, 2026-07-05 late) — new top suspect
+
+S2's per-pass ledger paid off in one run: `structural_producer_l0: changed=True`
+(code inserted, bytes verified) → `rebuild_references: changed=True` → passes 8–17
+all changed=False — yet compliance at pass 14 saw NO fence and the recorded text has
+zero fences. **Only rebuild_references changed text between the verified insertion
+and the verified absence → prime suspect for structural-content erasure** (stale-
+source overwrite or section-split swallowing the appended block — the dual-source
+class the S2 spec flagged). Pre-S2 this was undiagnosable.
+
+Also confirmed this run: extraction 12 groups correct live; covers-Craft
+NOT_SATISFIED honest but NO actor issues Craft searches (0 all run) — P1-core is the
+fix, not more verdicts; diagram veto precisely attributed (`_accept: lint count
+worse 6→7` — inserted diagram trips the explanatory-prose lint; fix = insert WITH
+prose); editor retry burned ~17 identical 12-branch judge rounds on unchanged text
+(compliance-verdict memoization per text-hash, L5); fence-contamination repair had
+nothing to act on this run (lints_before=6 were other kinds — repair_lints must log
+lint NAMES when changed=False).
+
+### Attempt-9 fix slate (ordered)
+1. **rebuild_references erasure** — trace + fix the source-of-truth bug (BLOCKER for
+   all structural content; everything else is moot while inserted blocks get erased).
+2. Diagram insertion carries explanatory prose (kills the 6→7 lint veto).
+3. repair_lints logs lint names when it cannot act.
+4. covers-X deterministic downgrade gate (mention-vs-substance).
+5. Writeback-normalize fence repair (mid-run cleanliness; formatter-after-repairs
+   invariant pinned by test — mdformat/Flowmark/PyMarkdown all launder broken fences,
+   evidenced 2026-07-05; Flowmark and PyMarkdown evaluated and rejected).
+6. P1-core: subject ledger + unmet-subject search directive into worker/tool-loop
+   prompts (Craft searches need an ACTOR, not another verdict).
+7. Compliance-verdict memoization per text-hash (17 wasted rounds).
+8. AST swallowed-content lint via markdown-it-py (already a transitive dep) — catches
+   the giant-fence-swallows-headings class generically.
+
+Lineage: 0.145 → 0.304 → 0.657 → 0.433 → 0.41 (decline driven by the erasure bug +
+uncovered subject; L3 gate keeps v5 seed-eligible — median floor not tripped).
