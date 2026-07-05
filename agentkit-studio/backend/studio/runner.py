@@ -279,6 +279,7 @@ from studio.artifact_text import (  # noqa: E402,F401
     _unresolved_block,
     add_missing_section_citations,
     dedupe_sections,
+    merge_duplicate_sections,
     normalize_artifact,
     reconcile_outline,
     resolve_report_title,
@@ -3605,8 +3606,15 @@ class Runner:
                     # repair here (that stays finalize-only, studio/finalize.py).
                     _normed, _fence_fixed = _repair_fence_contamination(_normed)
                     _normed, _dup_fixed = _repair_doubled_citations(_normed)
+                    # §14 slate item B: duplicate ## sections (born in _synthesize_windowed,
+                    # fixed at source there — this is the same defense-in-depth pattern as
+                    # the fence/citation pair above, for a doc that arrives ALREADY duplicated
+                    # via an older seed or a reducer patch echo).
+                    _normed, _dupsec_fixed = merge_duplicate_sections(_normed)
                     if _fence_fixed or _dup_fixed:
                         _dbg("normalize: fence/citation repairs applied")
+                    if _dupsec_fixed:
+                        _dbg("normalize: duplicate-section merge applied")
                     if _normed != _cur_norm:
                         _normed = _write_artifact_through_sections(
                             session, _eff_ws2, _normed, requirement

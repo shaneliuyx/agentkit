@@ -317,8 +317,14 @@ def _synthesize_windowed(
     headings = "\n".join(f"- {h}" for h, _b in sections)
     out_parts: list[str] = []
     any_changed = False
-    for heading, body in sections:
-        whole = f"{heading}\n{body}" if heading else body
+    for _heading, body in sections:
+        # BIRTH BUG (§14 slate B, fixed at source): split_sections' body ALREADY
+        # INCLUDES the heading line (its own documented contract) — prepending
+        # `_heading` again duplicated it verbatim ("## X\n## X\n...") in the text
+        # sent to the model, which then either echoed it back or, on ANY guard
+        # rejection, fell back to this already-doubled `whole` — a 100%
+        # deterministic duplicate-heading birth needing no weak-model echo at all.
+        whole = body
         new, changed = _synthesize_block(
             whole, client, requirement, context=headings, directive=directive,
             min_ratio=min_ratio,
@@ -407,17 +413,22 @@ def _norm_para(p: str) -> str:
 
 
 def _dedup_paragraphs(text: str) -> str:
-    """Drop verbatim-duplicate paragraphs (§4d lexical dedup), preserving order and any
-    paragraph that carries a URL (citations never deduped away). Headings are never dropped."""
+    """Drop a paragraph that is an EXACT repeat (normalized) of one already kept
+    (§4d lexical dedup) — regardless of URL: an identical copy loses nothing, so
+    keeping it only multiplies the same citation (§14 slate B review fix — 3
+    byte-identical echoes of a section used to survive as 3 copies of its URL).
+    A SIMILAR-but-different paragraph is never dropped even if it shares a URL
+    with an already-kept one — the never-drop rule protects DISTINCT citations,
+    not identical copies, and two different sentences normalize to different
+    keys. Headings are never dropped. Preserves order."""
     seen: set[str] = set()
     out: list[str] = []
     for para in (text or "").split("\n\n"):
         key = _norm_para(para)
         is_heading = para.lstrip().startswith("#")
-        has_url = "http://" in para or "https://" in para
-        if key and key in seen and not is_heading and not has_url:
+        if key and key in seen and not is_heading:
             continue
-        if key and not has_url:
+        if key:
             seen.add(key)
         out.append(para)
     return "\n\n".join(out)
@@ -642,12 +653,21 @@ def dedupe_sections(text: str) -> str:
         counts[_heading_key(h)] = counts.get(_heading_key(h), 0) + 1
     if all(c == 1 for c in counts.values()):
         return text  # no duplicates → no-op
-    # richest body per key
-    richest: dict[str, tuple[str, str]] = {}
+    # §14 slate B: fold every occurrence's content into the first (never pick one
+    # richest body and DISCARD the rest wholesale — a code fence or ### subsection
+    # living only in the shorter duplicate must not silently vanish). Paragraph-
+    # level dedup drops an exact-repeat regardless of URL (review fix — a byte-
+    # identical echo must not multiply its own citation).
+    merged: dict[str, tuple[str, str]] = {}  # key -> (first heading text, merged body)
     for h, b in pairs:
         k = _heading_key(h)
-        if k not in richest or len((b or "").strip()) > len((richest[k][1] or "").strip()):
-            richest[k] = (h, b)
+        if k not in merged:
+            merged[k] = (h, (b or "").rstrip("\n"))
+        else:
+            first_h, first_b = merged[k]
+            if _norm_para(b or "") == _norm_para(first_b):
+                continue  # byte-identical occurrence — nothing new to fold in
+            merged[k] = (first_h, _dedup_paragraphs(f"{first_b}\n\n{(b or '').strip()}"))
     seen: set[str] = set()
     out = [pre.rstrip()] if pre.strip() else []
     for h, _b in pairs:
@@ -655,7 +675,7 @@ def dedupe_sections(text: str) -> str:
         if k in seen:
             continue
         seen.add(k)
-        rh, rb = richest[k]
+        rh, rb = merged[k]
         out.append(f"{rh}\n{rb}".rstrip())
     return ("\n\n".join(out)).rstrip() + "\n"
 
@@ -813,6 +833,66 @@ def _log_residual_lints(lints: list[str]) -> None:
         _dbg(f"repair_lints: residual ({len(lints)}): {names}")
 
 
+def merge_duplicate_sections(text: str) -> tuple[str, bool]:
+    """Merge ``##`` sections sharing the same heading (§14 slate B) — birth is fixed
+    at source in ``_synthesize_windowed``, but a doc already carrying duplicates
+    (an old seed, a reducer patch echo) still needs deterministic repair.
+
+    Same heading-identity key as ``artifact_lint._duplicate_heading_issues`` (numbering-
+    and case-insensitive) so this repair actually clears the lint that names the
+    defect. FIRST occurrence's POSITION wins; every later occurrence's content is
+    appended after it (its own heading line dropped) and the later occurrence is
+    removed from its own position. ``_dedup_paragraphs`` then drops any paragraph
+    that's an EXACT repeat of one already kept (regardless of URL — an identical
+    copy loses nothing) while a similar-but-different citation paragraph is never
+    touched — so every DISTINCT fence and citation survives (see the assert-
+    superset test), but a byte-identical echo never multiplies its own URL."""
+    from agentkit.artifacts.sections import split_sections
+    from studio.artifact_lint import _heading_key
+    src = text or ""
+    if not src.strip():
+        return src, False
+    sections = split_sections(src)
+    groups: dict[str, list[str]] = {}
+    for heading, body in sections:
+        if heading == "(intro)":
+            continue
+        groups.setdefault(_heading_key(heading), []).append(body)
+    dup_keys = {k for k, bodies in groups.items() if len(bodies) > 1}
+    if not dup_keys:
+        return src, False
+
+    merged_bodies: dict[str, str] = {}
+    for key in dup_keys:
+        bodies = groups[key]
+        merged = bodies[0].rstrip("\n")
+        for extra in bodies[1:]:
+            if _norm_para(extra) == _norm_para(bodies[0]):
+                continue  # byte-identical occurrence — nothing new to fold in
+            # Drop the extra occurrence's own heading line — only its CONTENT
+            # (everything after the first line) gets folded in.
+            _, _, extra_content = extra.partition("\n")
+            merged += "\n\n" + extra_content.strip()
+        merged_bodies[key] = _dedup_paragraphs(merged).rstrip() + "\n"
+
+    seen: set[str] = set()
+    out_parts: list[str] = []
+    for heading, body in sections:
+        if heading == "(intro)":
+            out_parts.append(body)
+            continue
+        key = _heading_key(heading)
+        if key not in dup_keys:
+            out_parts.append(body)
+            continue
+        if key in seen:
+            continue  # a later duplicate occurrence — already folded into the first
+        seen.add(key)
+        out_parts.append(merged_bodies[key])
+    rebuilt = "".join(out_parts)
+    return (rebuilt, True) if rebuilt != src else (src, False)
+
+
 def _repair_lints(
     text: str, client: "LLMClient | None", requirement: str
 ) -> tuple[str, bool]:
@@ -820,11 +900,12 @@ def _repair_lints(
     the model — root-cause fix for the reported served-broken-diagram bug and
     run-1537's fence/citation glue (DESIGN §14.6).
 
-    The two deterministic sub-repairs (fence-line contamination, doubled
-    citations) run FIRST and unconditionally — they are pure text fixes, need no
-    LLM, and their own correctness doesn't depend on lint count improving (a
-    fence split or dedup is always right when it fires). The mermaid repair below
-    is unchanged: LLM-based, gated on ``client``, and self-verifying via lint count.
+    The three deterministic sub-repairs (fence-line contamination, doubled
+    citations, duplicate sections) run FIRST and unconditionally — they are pure
+    text fixes, need no LLM, and their own correctness doesn't depend on lint
+    count improving (a fence split, dedup, or section merge is always right when
+    it fires). The mermaid repair below is unchanged: LLM-based, gated on
+    ``client``, and self-verifying via lint count.
 
     Why on the output, in-run: the reducer is told to "preserve verbatim", and the §14.6
     repair clause is built only from ``lint_artifact(_seed_text)`` (the SEED). A defect BORN
@@ -849,7 +930,8 @@ def _repair_lints(
         return src, False
     out, fence_fixed = _repair_fence_contamination(src)
     out, dup_fixed = _repair_doubled_citations(out)
-    changed = fence_fixed or dup_fixed
+    out, merge_fixed = merge_duplicate_sections(out)
+    changed = fence_fixed or dup_fixed or merge_fixed
     if client is not None:
         before = len(lint_artifact(out))
         if before > 0:

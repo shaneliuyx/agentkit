@@ -1,11 +1,17 @@
-"""Tests for the two deterministic run-1537 format repairs in studio.artifact_text:
-fence-line contamination (a ``` marker with trailing content glued on) and doubled
-citations (``[title](URL) URL`` where the bare URL duplicates the link target).
-Both are pure text transforms — no LLM, no fixtures beyond inline strings.
+"""Tests for the deterministic run-1537/§14-slate format repairs in studio.artifact_text:
+fence-line contamination (a ``` marker with trailing content glued on), doubled
+citations (``[title](URL) URL`` where the bare URL duplicates the link target), and
+duplicate ## sections (merge_duplicate_sections). All pure text transforms — no LLM,
+no fixtures beyond inline strings.
 """
 from __future__ import annotations
 
-from studio.artifact_text import _repair_doubled_citations, _repair_fence_contamination
+from studio.artifact_text import (
+    _repair_doubled_citations,
+    _repair_fence_contamination,
+    merge_duplicate_sections,
+)
+from studio.textutil import norm_urls
 
 
 def test_repairs_closing_fence_with_glued_citation() -> None:
@@ -105,3 +111,91 @@ def test_doubled_citation_repair_is_idempotent() -> None:
     out2, changed2 = _repair_doubled_citations(out1)
     assert out2 == out1
     assert not changed2
+
+
+# --- §14 slate B: duplicate ## sections -------------------------------------
+
+_DUP_DOC = (
+    "# Report\n\n"
+    "## Design Architecture\n\n"
+    "```python\ndef run():\n    pass\n```\n\n"
+    "### Data Flow\n\nHow data moves through the system. https://a.com/flow\n\n"
+    "## Findings\n\nSome findings with https://a.com/x.\n\n"
+    "## Design Architecture\n\n"
+    "This section restates the overall system design in prose only, with no "
+    "code or diagrams, just further discussion of the same architecture.\n\n"
+    "## References\n\n- https://a.com/x\n- https://a.com/flow\n"
+)
+
+
+def test_merge_duplicate_sections_collapses_to_one_heading_and_keeps_content():
+    out, changed = merge_duplicate_sections(_DUP_DOC)
+    assert changed
+    assert out.count("## Design Architecture") == 1
+    assert "```python" in out
+    assert "### Data Flow" in out
+    assert "This section restates" in out  # second occurrence's content folded in
+
+
+def test_merge_duplicate_sections_never_drops_a_url():
+    out, _ = merge_duplicate_sections(_DUP_DOC)
+    assert norm_urls(_DUP_DOC) <= norm_urls(out)
+
+
+def test_merge_duplicate_sections_is_idempotent():
+    once, _ = merge_duplicate_sections(_DUP_DOC)
+    twice, changed_again = merge_duplicate_sections(once)
+    assert twice == once
+    assert not changed_again
+
+
+def test_merge_duplicate_sections_noop_on_a_clean_doc():
+    clean = "# Report\n\n## A\n\nbody.\n\n## B\n\nbody2 https://x.com\n"
+    out, changed = merge_duplicate_sections(clean)
+    assert not changed and out == clean
+
+
+def test_merge_duplicate_sections_matches_the_lint_key_numbering_insensitive():
+    """Same identity key as artifact_lint._duplicate_heading_issues (numbering-
+    and case-insensitive) — this repair must actually clear THAT lint, not a
+    stricter exact-text match that misses the shape the lint flags."""
+    doc = (
+        "## Executive Summary\n\nFirst version. https://a.com/1\n\n"
+        "## 2. EXECUTIVE SUMMARY\n\nSecond version. https://a.com/2\n"
+    )
+    out, changed = merge_duplicate_sections(doc)
+    assert changed
+    assert out.lower().count("executive summary") == 1
+    assert norm_urls(doc) <= norm_urls(out)
+
+
+# --- review fix: exact-duplicate echoes must not multiply a citation ---------
+
+def test_two_byte_identical_sections_keep_the_citation_exactly_once():
+    doc = (
+        "## Findings\n\nSame text here. https://a.com/x\n\n"
+        "## Findings\n\nSame text here. https://a.com/x\n"
+    )
+    out, changed = merge_duplicate_sections(doc)
+    assert changed
+    assert out.count("https://a.com/x") == 1
+
+
+def test_three_byte_identical_sections_keep_the_citation_exactly_once():
+    doc = "## Findings\n\nSame text here. https://a.com/x\n\n" * 3
+    out, changed = merge_duplicate_sections(doc)
+    assert changed
+    assert out.count("https://a.com/x") == 1
+
+
+def test_similar_but_different_url_paragraphs_are_both_kept():
+    """The never-drop rule protects DISTINCT citations, not identical copies —
+    two different sentences sharing the same URL are not an exact duplicate."""
+    doc = (
+        "## Findings\n\nFirst point. https://a.com/x\n\n"
+        "## Findings\n\nSecond, different point. https://a.com/x\n"
+    )
+    out, changed = merge_duplicate_sections(doc)
+    assert changed
+    assert out.count("https://a.com/x") == 2
+    assert "First point." in out and "Second, different point." in out

@@ -724,12 +724,25 @@ def test_n1_reconcile_drops_empty_template_duplicate():
     assert "Source References" in out                # populated section kept
 
 
-def test_s4d_dedup_drops_verbatim_paragraph_keeps_urls():
+def test_s4d_dedup_drops_verbatim_paragraph_including_url_bearing():
+    """§14 slate B review fix: an EXACT duplicate paragraph is dropped regardless
+    of URL — an identical copy loses nothing, so keeping it only multiplies the
+    same citation (was: URL-bearing paragraphs were never deduped, even
+    byte-identical ones, which let 3 identical echoes triple a citation)."""
     from studio.artifact_text import _dedup_paragraphs
     text = "Same para.\n\nSame para.\n\nSee http://x.com\n\nSee http://x.com"
     out = _dedup_paragraphs(text)
     assert out.count("Same para.") == 1             # verbatim dup dropped
-    assert out.count("http://x.com") == 2           # URL-bearing paras never deduped
+    assert out.count("http://x.com") == 1           # exact-duplicate URL para also dropped
+
+
+def test_s4d_dedup_keeps_similar_but_different_url_paragraphs():
+    """The never-drop protection is for DISTINCT citations, not identical
+    copies — two different sentences sharing a URL are never deduped away."""
+    from studio.artifact_text import _dedup_paragraphs
+    text = "See http://x.com for the first point.\n\nSee http://x.com for a second, different point."
+    out = _dedup_paragraphs(text)
+    assert out.count("http://x.com") == 2
 
 
 # --- N1 anti-accumulation: collapse duplicate section headings ---------------

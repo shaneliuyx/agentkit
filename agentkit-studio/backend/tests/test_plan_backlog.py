@@ -128,6 +128,26 @@ def test_synthesis_accepts_when_fence_count_preserved():
     assert changed and out == better
 
 
+def test_synthesize_windowed_never_doubles_a_section_heading():
+    """§14 slate B birth mechanism: split_sections' body ALREADY includes the
+    heading line (its documented contract) — _synthesize_windowed used to
+    prepend the heading a SECOND time when rebuilding each window, baking a
+    duplicate ("## X\\n## X\\n...") into the very text sent to the model. 100%
+    deterministic, no weak-model echo needed: a doc whose per-window rewrite is
+    REJECTED (any guard) falls back to that already-doubled text. Reproduced by
+    a client that echoes the whole document back for every window."""
+    from studio.artifact_text import _synthesize_windowed
+
+    doc = (
+        "## Executive Summary\n\nOriginal summary padding padding padding padding.\n\n"
+        "## Findings\n\nOriginal findings https://a.com/x padding padding padding.\n"
+    )
+    out, changed = _synthesize_windowed(doc, _FakeClient(doc), "task")
+    assert changed
+    assert out.count("## Executive Summary") == 1
+    assert out.count("## Findings") == 1
+
+
 # --- §14.6 root cause: block-level mermaid repair + deterministic splice ------
 # Whole-doc repair truncates a large artifact, so _repair_lints sends ONLY the broken
 # ```mermaid block to the model and splices the corrected block back; the surrounding
@@ -253,19 +273,37 @@ def test_fence_split_preserves_every_citation_url():
     assert before <= norm_urls(out)
 
 
+def test_repair_lints_merges_duplicate_sections():
+    """§14 slate B.2: merge_duplicate_sections is wired into _repair_lints'
+    deterministic block alongside the fence/citation pair."""
+    text = (
+        "## Findings\n\nFirst version. https://a.com/1\n\n"
+        "## Findings\n\nSecond version. https://a.com/2\n"
+    )
+    out, changed = _repair_lints(text, None, "task")
+    assert changed
+    assert out.count("## Findings") == 1
+    assert "https://a.com/1" in out and "https://a.com/2" in out
+
+
 # --- §14 slate item 5 (user-escalated): per-step writeback normalize path -----
 # The deterministic fence/citation repairs used to run only at finalize, so a
 # glued fence broke markdown for the REST OF THE RUN (every later step, and the
 # GUI mid-run, inherited it). studio/runner.py's per-step normalize block (the
-# "normalize step=" _dbg line) now applies BOTH repairs, last, after
+# "normalize step=" _dbg line) now applies these repairs, last, after
 # normalize_artifact + strip_satisfied_placeholders — this mirrors that exact
 # composition to pin it without driving a full multi-step Runner.run().
 
 def _normalize_then_repair(text: str) -> str:
-    from studio.artifact_text import normalize_artifact, strip_satisfied_placeholders
+    from studio.artifact_text import (
+        merge_duplicate_sections,
+        normalize_artifact,
+        strip_satisfied_placeholders,
+    )
     out = strip_satisfied_placeholders(normalize_artifact(text))
     out, _ = _repair_fence_contamination(out)
     out, _ = _repair_doubled_citations(out)
+    out, _ = merge_duplicate_sections(out)
     return out
 
 
@@ -274,6 +312,16 @@ def test_normalize_path_repairs_a_glued_fence():
     out = _normalize_then_repair(text)
     assert "``` https://example.com/report" not in out
     assert "https://example.com/report" in out  # citation kept, just moved off the fence
+
+
+def test_normalize_path_merges_duplicate_sections():
+    text = (
+        "# Report\n\n## Findings\n\nFirst version. https://a.com/1\n\n"
+        "## Findings\n\nSecond version. https://a.com/2\n"
+    )
+    out = _normalize_then_repair(text)
+    assert out.count("## Findings") == 1
+    assert "https://a.com/1" in out and "https://a.com/2" in out
 
 
 def test_normalize_path_repair_is_idempotent():

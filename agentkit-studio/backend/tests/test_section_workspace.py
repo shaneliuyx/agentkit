@@ -155,6 +155,28 @@ def test_reducer_h1_dump_folds_into_single_sections(tmp_path) -> None:
     assert "### 1. The Power of the Agent Loop" in assembled
 
 
+def test_duplicate_section_content_survives_write_section_workspace_roundtrip(tmp_path) -> None:
+    """§14 slate B.3: a heading-level dup used to pick the LONGER raw body and
+    silently DISCARD the shorter one — real content (a code fence) living in
+    the shorter occurrence must never vanish, even before merge_duplicate_sections
+    (studio.artifact_text) runs upstream in the normal pipeline."""
+    artifact = (
+        "# Report\n\n"
+        "## Design Architecture\n\n"
+        "```python\ndef run():\n    pass\n```\n\n"
+        "## Findings\n\nSome findings with https://a.com/x.\n\n"
+        "## Design Architecture\n\n"
+        "This restates the design in prose only, at some length, to be the longer duplicate.\n\n"
+        "## References\n\n- https://a.com/x\n"
+    )
+    write_section_workspace(
+        tmp_path, artifact, ["Design Architecture", "Findings", "References"]
+    )
+    assembled = assemble_artifact_from_sections(tmp_path)
+    assert "```python" in assembled
+    assert "def run():" in assembled
+
+
 def test_assignment_queue_clears_only_completed_rows(tmp_path) -> None:
     rows = (
         {"agent_id": "agent-001", "section": "## A", "file": "sections/001-a.md", "status": "queued"},

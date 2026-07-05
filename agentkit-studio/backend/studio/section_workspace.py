@@ -110,8 +110,28 @@ def split_artifact_to_sections(
         if key not in section_bodies:
             order.append(title)
             section_bodies[key] = body
-        elif len((body or "").strip()) > len((section_bodies[key] or "").strip()):
-            section_bodies[key] = body  # heading-level dup: keep the richer body
+        else:
+            # §14 slate B.3: a heading-level dup used to keep only the LONGER raw
+            # body and silently DISCARD the other — real content (a code fence,
+            # a ### subsection) living in the shorter occurrence vanished whenever
+            # the longer duplicate happened to be prose padding with no structure.
+            # Never drop real content: keep the FIRST occurrence's heading, strip
+            # the placeholder marker out of EITHER side's content (a real fixture
+            # has one occurrence mixing genuine prose with a leftover stub marker
+            # — that marker must not survive, but the prose next to it must), and
+            # join whatever real content remains. If both sides are placeholder-
+            # only, fall back to a single placeholder (matches _section_body's own
+            # empty-body convention). Per-paragraph LEXICAL dedup across the two
+            # is studio.artifact_text.merge_duplicate_sections' job upstream in
+            # the normal pipeline; this is just the safety net that guarantees
+            # content survives SOMEWHERE even if that never ran.
+            existing = section_bodies[key] or ""
+            existing_head, _, existing_content = existing.partition("\n")
+            _, _, extra_content = (body or "").partition("\n")
+            existing_clean = existing_content.replace(PLACEHOLDER, "").strip()
+            extra_clean = extra_content.replace(PLACEHOLDER, "").strip()
+            merged = "\n\n".join(c for c in (existing_clean, extra_clean) if c)
+            section_bodies[key] = f"{existing_head}\n\n{merged or PLACEHOLDER}\n"
 
     outline_titles: list[str] = []
     seen: set[str] = set()
