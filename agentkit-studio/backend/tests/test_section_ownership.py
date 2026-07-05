@@ -391,6 +391,63 @@ def test_refine_readability_rejects_url_drop():
     assert changed is False and out == src      # citation-dropping rewrite rejected
 
 
+class _ScriptedText:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def chat(self, messages, tools=None):
+        from agentkit.types import ChatResult
+        return ChatResult(text=self._text, total_tokens=1)
+
+
+def test_synthesis_rejects_refusal_prose_on_citation_free_section():
+    # Live run 1530 (score 0.97 → 0.087): a URL-free window makes the URL guard
+    # vacuous (∅ == ∅), so gemma's meta-refusal — which QUOTED heading names —
+    # was accepted and its quoted headings became fake sections after References.
+    from studio.artifact_text import _synthesize_analysis
+    refusal = (
+        'I understand the hard rules (e.g. "The result must be at least as long '
+        'as the draft.", never drop content after "## Implications or '
+        'Recommendations").\n\nAnd never reorder anything after "## References"). '
+        "Once you provide the text containing the citations and information, I "
+        "will immediately transform it into the flowing, synthesized prose you "
+        "described while adhering to all your hard rules."
+    )
+    src = "## Implications or Recommendations\nShort uncited paragraph.\n"
+    out, changed = _synthesize_analysis(src, _ScriptedText(refusal), "study a topic")
+    assert changed is False and out == src
+
+
+def test_synthesis_rejects_invented_headings():
+    from studio.artifact_text import _synthesize_analysis
+    src = "## Key Findings\nFinding text citing http://x.com here.\n"
+    invented = (
+        "## Key Findings\nFinding text citing http://x.com here, now analyzed at length "
+        "with cross-source comparison and additional interpretation of trade-offs.\n"
+        "## Bonus Section\nInvented structure.\n"
+    )
+    out, changed = _synthesize_analysis(src, _ScriptedText(invented), "t")
+    assert changed is False and out == src      # synthesis must never INVENT a heading
+
+
+def test_synthesis_accepts_real_rewrite_on_citation_free_section():
+    # The overlap guard must not over-trigger: genuine analysis prose that
+    # paraphrases but keeps the draft's topic vocabulary is still accepted.
+    from studio.artifact_text import _synthesize_analysis
+    src = (
+        "## Implications or Recommendations\nThe toolkit separates the agent loop "
+        "from session persistence, and adoption depends on operational simplicity.\n"
+    )
+    rewrite = (
+        "## Implications or Recommendations\nTaken together, the findings suggest a "
+        "layered adoption path: the toolkit's agent loop comes first, with session "
+        "persistence added once needed. The trade-off is flexibility against "
+        "operational simplicity, and the sources consistently favour starting simple.\n"
+    )
+    out, changed = _synthesize_analysis(src, _ScriptedText(rewrite), "t")
+    assert changed is True and "layered adoption path" in out
+
+
 def test_s4d_small_doc_unchanged_when_client_noop():
     # Below the window: single block. A client that drops a URL → rejected (unchanged).
     class DropURL:

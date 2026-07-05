@@ -198,7 +198,44 @@ def _synthesize_block(
     # (ratio ~0.4) — so it may come back shorter, but every URL must survive.
     if not urls_before <= urls_after or not urls_after <= urls_before or len(out) < int(min_ratio * len(src)):
         return src, False
+    # The URL/length guards are BLIND on a citation-free window (∅ == ∅), which let a
+    # weak model's meta-refusal — "Once you provide the text … I will immediately
+    # transform it…", QUOTING heading names like `## References").` — be accepted and
+    # written into the document as fake sections (live run 1530, score 0.97 → 0.087).
+    # Two STRUCTURAL guards (no hardcoded phrasing — task-neutral guardrail):
+    # 1. Synthesis must never INVENT a heading — new heading lines are how the
+    #    refusal's quoted section names became fake sections on reassembly.
+    headings_before = set(_re.findall(r"(?m)^#{1,3}\s.*$", src))
+    if set(_re.findall(r"(?m)^#{1,3}\s.*$", out)) - headings_before:
+        return src, False
+    # 2. A REWRITE must preserve the draft's own content vocabulary. Genuine
+    #    synthesis paraphrases but keeps the topic's terms; prose ABOUT the task
+    #    (refusals, rule restatements, requests for input) shares almost none of
+    #    the draft's words — in any phrasing, so no phrase list can rot.
+    if _content_word_overlap(src, out) < _SYNTH_MIN_OVERLAP:
+        return src, False
     return out, True
+
+
+#: Minimum fraction of the draft's content words a rewrite must retain. Low on
+#: purpose: the readability pass legitimately condenses and paraphrases; a
+#: refusal/meta reply scores near zero, so the margin is wide.
+_SYNTH_MIN_OVERLAP = 0.3
+
+
+def _content_word_overlap(src: str, out: str) -> float:
+    """Fraction of *src*'s content vocabulary present in *out*.
+
+    Heading lines are excluded from the source vocabulary — a meta-reply that
+    QUOTES section names must not earn overlap credit for them."""
+    src_body = "\n".join(
+        ln for ln in (src or "").splitlines() if not ln.lstrip().startswith("#")
+    )
+    src_words = {w for w in _re.findall(r"[a-z]{4,}", src_body.lower())}
+    if not src_words:
+        return 1.0
+    out_words = set(_re.findall(r"[a-z]{4,}", (out or "").lower()))
+    return len(src_words & out_words) / len(src_words)
 
 
 def _synthesize_windowed(
