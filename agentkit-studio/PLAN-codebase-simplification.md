@@ -95,3 +95,112 @@ one file.
 4. S3 guards → suite → commit.
 5. S5 with before/after timing numbers → commit.
 6. Codex review, then user decides on push (~45 commits ahead by then).
+
+---
+
+## 5. LOOP-HEALTH ANALYSIS — why self-improvement underdelivers (2026-07-05, user + article)
+
+**Reference frame:** the loop canon — DISCOVER→PLAN→EXECUTE→VERIFY→ITERATE, where
+VERIFY is the heart, STATE is the memory, stop-conditions are the sanity, and
+writer/reviewer separation is most of the quality. Measured against it, the studio
+over-built EXECUTE/ITERATE and under-built VERIFY/STATE.
+
+### 5.1 Root causes (ranked, all live-evidenced)
+
+**RC1 — Verifier quality gap (the heart is the weakest organ).**
+Self-improvement = improvement_signal × iterations. The signal comes ONLY from verify,
+and studio's verify (a) passed wrong work — run 1529 scored 0.97 on prose-about-code,
+zero fences; (b) uses crude proxies — "Analytical depth" is a discourse-marker count;
+(c) is fail-open — a compliance/scorer error silently skips the gate; (d) LLM
+self-scores are so noisy the seeder had to switch to latest-not-best. A loop iterating
+on a noisy/inflated signal converges on nothing — the article's "AI nodding at itself."
+
+**RC2 — Silent-failure disease (Ralph Wiggum mode).**
+83 bare `except Exception` in runner.py; the editor pass, both depth passes, and the
+synthesis pass were each discovered DEAD only by human archaeology (0.00s timers, byte-
+identical rows). The loop kept "iterating" without the passes that were supposed to
+improve it — running ≠ progressing, and nothing in the system could tell the difference.
+
+**RC3 — State without an immune system.**
+The corrupted 0.087 run (1530) became lineage-latest and would have seeded the next
+epoch; goal-attach rotates task_hash into a cold start; every recovery so far has been
+manual sqlite surgery. The article's "little notebook" must be poison-resistant or the
+loop LEARNS the poison.
+
+**RC4 — Execute-contract ceilings the loop cannot cross.**
+One-sentence-per-source weave, cited-URL drops, density caps, prose-only reducer
+patches (all deliberate anti-regression choices) put a hard ceiling on depth. The same
+two weakness rows repeated FIVE runs unchanged — the loop kept pushing against an
+invariant wall with no way to notice "this weakness is not fixable by another epoch."
+
+**RC5 — Untracked economics.**
+No cost-per-accepted-change metric. The first accepted editor round EVER was run 1531;
+before that, every editor round was attempted, rejected, and paid for invisibly.
+Acceptance below ~50% means the loop costs more than it saves — nobody could see it.
+
+### 5.2 Expectation calibration (the four-condition test)
+
+The article's条件 4 — "done is objective" — is only PARTIALLY true for research
+reports: fences/citations/sections are objective (and now gated); prose depth is
+judged by proxies. So "fully autonomous self-improvement to excellence" will
+asymptote by design. The honest target: **converge to high-0.8s with zero corruption,
+zero silent stalls, and every stall explained in the run report.**
+
+## 6. LOOP-HEALTH WORKSTREAMS (combine with S1–S5; L2 = S2)
+
+### L1 — Verify hardening (RC1) [after S1/S2 land]
+- Deterministic gates FIRST, LLM judgment second: every requirement-shaped check gets
+  a hard oracle where one exists (fences, mermaid, citations — landed 2026-07-05;
+  extend to tables/word-counts when asked for).
+- Scorer on the judge model, not the generator (writer/reviewer separation at the
+  SCORE, same degrade-to-base pattern as the reducer).
+- Distinguish "verified bad" from "could not verify" everywhere (the
+  ComplianceCheckUnavailable pattern, applied to scorer + publish gate): fail-open may
+  skip an action, but must never RECORD a pass.
+- Tiny fixed eval set (3 requirement-shaped tasks with known-good properties) run as a
+  probe script after scorer/rubric changes — rubric changes get calibrated, not vibed.
+
+### L2 — Dead-pass detector (RC2) — this IS S2's pass-list, plus one rule
+Every pass emits ran/changed/reason via the uniform wrapper (S2). Add: postrun
+diagnostics flag any pass with N consecutive no-op epochs on a task ("pass X inert 3
+epochs — investigate or expected?"). Silence is no longer indistinguishable from health.
+
+### L3 — Lineage immune system (RC3)
+Deterministic seed-eligibility gate in `latest_with_content`: a row is seed-eligible
+only if its artifact passes lint + has ≥1 citation + score not >50% below lineage
+median. Ineligible rows stay recorded (history) but are skipped for seeding — no more
+manual backup-and-delete surgery. Plus: goal/constraints NEVER rotate task identity
+(already fixed) — add a regression test if missing.
+
+### L4 — Repeat-weakness escalation (RC4)
+When the SAME weakness row survives K=3 epochs byte-identical, stop retrying the same
+lever: escalate deterministically — (1) route to the structural editor with the
+weakness named, (2) relax the specific execute-contract cap for that section for one
+epoch (e.g. allow multi-sentence weave from under-used sources), (3) if still stuck,
+mark "app-limit reached" in the run report and STOP burning epochs on that row. The
+loop learns to notice its own walls instead of spinning at them.
+
+### L5 — Acceptance economics (RC5)
+Per-run postrun block: per-pass attempted/accepted counts + tokens spent per accepted
+change (data already flows through timing_sink/_dbg; aggregate it). Feeds S5: passes
+with chronic ~0% acceptance are candidates for removal or redesign — measured, not
+guessed.
+
+### L6 — Probe-before-wire (process rule, institutionalize today's lesson)
+No new pass/guard/threshold enters the loop without a standalone probe script proving
+ONE manual run behaves (the article's "get one manual run reliable first"). The
+2026-07-05 probes (synthesis guards, topical-floor calibration) are the template —
+both found the assumption wrong before it shipped deeper.
+
+## 7. Combined sequencing (supersedes §4)
+
+1. Attempt-4 cold run records (baseline for everything).
+2. S4 stale scripts → S1 textutil (shared primitives).
+3. S2 finalize pass-list == L2 dead-pass detector (one workstream).
+4. L3 lineage immune system (small, high leverage, isolated in task_runs.py).
+5. L1 verify hardening (scorer on judge model + never-record-on-unverified).
+6. S3 guard primitives, then L4 repeat-weakness escalation (builds on S3).
+7. L5 economics in postrun + S5 measured efficiency wins.
+8. Codex adversarial review of the whole branch; user decides push.
+
+Each step: full suite green + probe where applicable; after 3 and 5: cold E2E compare.
