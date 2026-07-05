@@ -1,9 +1,8 @@
 # HANDOFF — Dynamic sections, auto-mode depth passes, synthesis guards
 
-**Date:** 2026-07-05
-**Branch:** `build-research-report-generator-plan`, **~37 commits ahead of origin, NOT pushed.**
-**Tests:** 815 backend passed, 4 deselected (full suite green at `684c040`).
-**One run IN FLIGHT at handoff time** — see "The in-flight measurement run" below.
+**Date:** 2026-07-05 (updated same day: run 1531 landed — see "P0-1 RESULT" below)
+**Branch:** `build-research-report-generator-plan`, **~39 commits ahead of origin, NOT pushed.**
+**Tests:** 818 backend passed, 4 deselected (full suite green at `4541797`).
 Companion docs: `PLAN-CONSOLIDATED.md` (master requirement/design/code reconciliation + backlog,
 written this session — read it before trusting any other doc's status claims) and
 `ARCHITECTURE-doc-generation-pipeline.md` §3/§5/§7/§9.5 (re-traced 2026-07-04).
@@ -74,43 +73,62 @@ written this session — read it before trusting any other doc's status claims) 
    **A refusal-phrase regex was explicitly rejected by the user (no-hardcoding principle)** — do
    not reintroduce one; structural properties only.
 
-## The in-flight measurement run (P0-1)
+9. **`4541797` — References is a deterministic bibliography of body-cited URLs (P2-8).**
+   References was spoke-filled PROSE, catching junk findings (a self-rationalizing off-topic
+   π-Wikipedia note). `rebuild_references_section` (artifact_text.py) replaces it at finalization:
+   body-cited URLs post-neutralize, first-appearance order, titles from body markdown links; a
+   URL cited only inside References drops with the prose. Fail-open. Wired on scored AND served
+   text just before `score_result`. **Landed AFTER run 1531 launched — first live exercise is the
+   NEXT run.**
 
-Launched at handoff: cold Pi/Craft run on backend17 (all fixes above live), background task
-`bccj5txi7`, experiment driver `scratchpad/experiment_pi_craft.py`, diag at `scratchpad/diag17.log`.
-This is the REAL depth measurement — run 1530's attempt measured an unguarded synthesis pass.
-
-**Score ladder to compare against** (all cold starts, same requirement, task_hash `492bae60177b`):
+## P0-1 RESULT — run 1531 (all fixes 1–8 live; cold start)
 
 | Run | Config delta | Score | Notes |
 |---|---|---|---|
 | 1527 | through auto-fetch | 0.6083 | 1106 words, 1 mermaid, 0 code |
 | 1528 | + hybrid haiku planning | 0.582 | proves deliverable gap was structural, not model |
 | 1529 | + Workstream P sections | 0.97 | sections filled BUT prose-about-code, 0 fences (inflated) |
-| 1530 | + depth passes UNGUARDED | 0.087 | refusal-prose corruption (now fixed) |
-| next | + synthesis guards etc. | ? | ← the number that matters |
+| 1530 | + depth passes UNGUARDED | 0.087 | refusal-prose corruption (fixed in `684c040`) |
+| **1531** | + synthesis guards, sub-section ownership, title fix | **0.714** | 1607 words, 1 mermaid, 0 code fences, 10 URLs, 12 evidence files |
 
-**Readouts:** Evidence-synthesis / Analytical-depth rubric rows (were 2.5/14.7 and 1.8/10.5);
-fenced code in `### Code Implementation Examples`; mermaid survival; References stays last;
-H1 says "…research report" (title fix); whether workers (not just the reducer) touch the
-sub-sections (grep spoke `io/*.in.md` for "REQUIRED SUB-SECTIONS").
+**Wins:** first-ever ACCEPTED editor round on this task (0.676→0.714, weak 5→4); guards held (no
+corruption, 4 clean weaknesses); ownership fix live (2 spoke assignments carried REQUIRED
+SUB-SECTIONS); first real Craft source ever found (`github.com/craft-ai-agents/craft-agents-oss`)
+plus deep Pi docs (`pi.dev/docs/latest/quickstart`).
+
+**The verdict that sets the next move — depth rows did NOT move, byte-identical to 1527:**
+```
+Evidence synthesis 2.5/14.7    Analytical depth 1.8/10.5
+```
+The un-gated `_synthesize_analysis`/`expand_underdeveloped_sections` changed nothing on the rows
+they exist to fix. Two hypotheses, undiagnosable today because the passes' accept/reject decisions
+have ZERO logging (the same blindness that hid the dead editor pass):
+(a) their rewrites are silently rejected by the guards (URL/length/overlap), or
+(b) gemma cannot produce synthesis the scorer recognizes (a model ceiling, like the settled
+citation-integrity negative — in which case P0-2b strong-model reducer is the lever).
 
 **Lineage hygiene:** runs 1526–1530 rows were backed up then DELETED for cold-start comparability —
-backups in scratchpad (`task_runs_backup_492bae60177b.json`, `_1529.json`, `_1530.json`). The
-in-flight run will re-record; delete its row too (after backup) if another cold start is needed.
-NEVER leave a corrupted row as the latest — `latest_with_content` will seed the next run from it.
+backups in scratchpad (`task_runs_backup_492bae60177b.json`, `_1529.json`, `_1530.json`). Run
+1531's row is now the lineage latest (healthy — fine to keep for warm-start work; back up + delete
+only if another COLD comparison is needed). NEVER leave a corrupted row as the latest —
+`latest_with_content` will seed the next run from it.
 
-## Next steps (priority order — mirrors PLAN-CONSOLIDATED §3)
+## Next steps (priority order)
 
-1. **Read the in-flight run's result** (task `bccj5txi7` output, per-run stats printed by driver).
-   If depth rows still stuck → P0-2 (relax findings.py one-sentence contract) and/or P0-2b
-   (strong-model reducer on the judge client — same pattern as `runner.py:2198`).
-2. **Code-shaped compliance downgrade** (backlog P2-8b): "include example code" scored SATISFIED on
+1. **Instrument the depth passes** — `_dbg`-style accept/reject logging in `_synthesize_block`
+   (which guard rejected, overlap value) and `expand_underdeveloped_sections`. Observability
+   BEFORE more fixes: distinguish hypothesis (a) silent guard rejects from (b) model ceiling.
+   (In-progress at handoff-update time.)
+2. **P0-2b — strong-model reducer** (recovered Lever 4): build the section reducer's client from
+   the judge spec (same degrade-to-base pattern as hybrid planning, `runner.py:2198`); spokes stay
+   on the session model. The reducer is where synthesis is actually composed — if (b) is true this
+   is the lever that moves the two stuck rows. Then ONE cold run measures both changes.
+3. **Code-shaped compliance downgrade** (backlog P2-8b): "include example code" scored SATISFIED on
    prose describing code, zero fences, while evidence/ held actual `.ts` source. Mirror
    `_DIAGRAM_SHAPED_RE`/`_MERMAID_BLOCK_RE` in `requirement_compliance.py` for code-shaped branches.
-3. **Codex review** of this session's ~10 commits (user's standing workflow loop — not yet done).
-4. **Push** — 37 commits ahead; user's call.
-5. Presentation ladder Phases 1–2 (classifier wiring, table/list generators, frontend judge
+4. **Codex review** of this session's ~11 commits (user's standing workflow loop — not yet done).
+5. **Push** — ~39 commits ahead; user's call.
+6. Presentation ladder Phases 1–2 (classifier wiring, table/list generators, frontend judge
    selector) — PLAN-content-and-shallowness-execution.
 
 ## Gotchas that cost time this session (avoid repeating)
