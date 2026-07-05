@@ -6,6 +6,24 @@ hierarchy/layers, improve efficiency, do not downgrade original features."
 **Status:** PLANNED — audit done (evidence below); execution starts AFTER the attempt-4
 cold run records (refactoring during a measurement run muddies both).
 
+## STATUS BY CHAPTER (updated 2026-07-05 late)
+
+| Ch. | Topic | Status |
+|-----|-------|--------|
+| 1 | Audit evidence | ✅ done — drove S1–S5 |
+| 2 | S-workstreams | S1 ✅ · S2 ✅ · S3 ⬜ (after attempt 9) · S4 ✅ no-op · S5 ◐ |
+| 3 | Verification protocol | ✅ in force — suite 836→890, reviewer pass per slice, live E2E per behavior change |
+| 4, 7 | Sequencing (old) | superseded by §12 |
+| 5 | Loop-health diagnosis RC1–5 | ✅ complete — every RC now has live evidence + a workstream |
+| 6 | L-workstreams | L1 ⬜ (slice 6) · L2 ✅ · L3 ✅ · L4 ⬜ · L5 ◐ · L6 ✅ adopted |
+| 8 | L0 structural producer | ✅ committed — code path verified live (v3 0.657); diagram veto attributed, prose fix in review round |
+| 9 | Writer reference process P1–P4 | ⬜ — P1 bundle is next major slice (5); prerequisite covers-X extraction ✅ live |
+| 10 | Editorial gate E1–E11 | ◐ ~5/11 rows covered (E1/E4/E6/E11 ✅, E3/E5 partial); L1 unifier not started |
+| 11 | Design workstreams D1–D5 | ⬜ — D-B's fractal-critic principle partially delivered via S2 ledger + gate logging |
+| 12 | Unified execution order | ACTIVE tracker — slices 1–4 committed; current work = §14 slate |
+| 13 | Execution log | living log — one row per committed fix with measured result |
+| 14 | Attempt-8 results + attempt-9 slate | item 1 instrumented (trace armed) · items 2–4 built, reviewer MEDIUMs in fix round · items 5–8 queued |
+
 ## 0. Objective & success metric
 
 - **Objective:** behavior-preserving structural cleanup. Every existing feature, guard,
