@@ -18,30 +18,18 @@ original text unchanged.
 """
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Any
 
-from studio.artifact_text import _norm_urls
 from studio.requirement_compliance import (
     _CODE_SHAPED_RE,
     _DIAGRAM_SHAPED_RE,
     _MERMAID_BLOCK_RE,
     _has_code_fence,
 )
-
-
-def _dbg(msg: str) -> None:
-    """Local copy of ``studio.runner._dbg`` (importing back would be circular)."""
-    path = os.environ.get("OMC_THROUGHPUT_DEBUG")
-    if not path:
-        return
-    try:
-        with open(path, "a") as fh:
-            fh.write(msg + "\n")
-    except OSError:
-        pass
+from studio.textutil import dbg as _dbg
+from studio.textutil import norm_urls as _norm_urls
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +300,14 @@ def produce_missing_structures(
                             else "no groundable code source (evidence/LLM)"
                         )
 
-            if not produced and diagram_branches and not diagram_done:
+            if produced and diagram_branches and not diagram_done:
+                # This group had BOTH a code and a diagram alternative; code just
+                # satisfied it, so the diagram side is intentionally skipped, not
+                # silently dropped — the "same OR group satisfied by code
+                # insertion" case a reviewer flagged as indistinguishable from a
+                # real failure without this note.
+                stats["reason"]["diagram"] = "same OR group satisfied by code insertion"
+            elif not produced and diagram_branches and not diagram_done:
                 if client is None:
                     stats["diagram"] = "skipped"
                     stats["reason"]["diagram"] = "no client"

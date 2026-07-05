@@ -21,11 +21,10 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
-_URL_RE = re.compile(r"https?://[^\s)>\]\"'`]+")
-
-
-def _urls(text: str) -> list[str]:
-    return [u.rstrip(".,;:)") for u in _URL_RE.findall(text or "")]
+# S1: moved to studio.textutil.extract_urls (aliased so both call sites below —
+# _source_primary_url's "first URL" and body_urls' occurrence-COUNTING — keep
+# their un-deduplicated list, unchanged).
+from studio.textutil import extract_urls as _urls
 
 
 def _words(text: str) -> int:

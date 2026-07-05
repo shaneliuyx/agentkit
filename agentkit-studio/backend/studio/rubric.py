@@ -29,34 +29,14 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
+# S1: moved to studio.textutil.mask_fenced_code; re-exported here (name unchanged)
+# so every existing `from studio.rubric import mask_fenced_code` keeps working.
+from studio.textutil import mask_fenced_code
+
 _URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
 _HEADING_RE = re.compile(r"(?m)^#{1,4}\s+\S")
 _HEADING_TEXT_RE = re.compile(r"(?m)^#{1,4}\s+(.+)$")
 _BLOCKQUOTE_RE = re.compile(r"(?m)^\s*>\s+\S")
-_FENCE_RE = re.compile(r"^\s*```")
-
-
-def mask_fenced_code(text: str) -> str:
-    """Blank out fenced code regions, preserving line count (PLAN N4).
-
-    Heading scans (``^#{1,6}``) otherwise count a python comment like
-    ``# --- MOCK ---`` inside a ```` ```python ```` block as an H1, polluting the
-    structure signal, ``sections_present``, and gap detection. Replacing each
-    fenced line (fences included) with an empty line keeps every real heading's
-    line position intact while hiding in-code ``#`` lines. An unterminated fence
-    masks to end-of-text (a truncated block has no real headings anyway).
-    """
-    if "```" not in (text or ""):
-        return text or ""
-    out: list[str] = []
-    in_fence = False
-    for ln in (text or "").split("\n"):
-        if _FENCE_RE.match(ln):
-            in_fence = not in_fence
-            out.append("")          # the fence line itself is not a heading
-            continue
-        out.append("" if in_fence else ln)
-    return "\n".join(out)
 
 #: Stopwords dropped when reducing a section name / heading to its content tokens, so
 #: "Evidence and Analysis" → {evidence, analysi}. Keeps the head nouns that carry meaning.

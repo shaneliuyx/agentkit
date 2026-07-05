@@ -12,25 +12,12 @@ from __future__ import annotations
 import re as _re
 from typing import TYPE_CHECKING
 
+from studio.textutil import dbg as _dbg
+from studio.textutil import MERMAID_BLOCK_RE as _MERMAID_BLOCK_RE
+from studio.textutil import norm_urls as _norm_urls
+
 if TYPE_CHECKING:
     from agentkit.types import LLMClient
-
-
-def _dbg(msg: str) -> None:
-    """Append a diagnostic line to the file named by OMC_THROUGHPUT_DEBUG (no-op unless set).
-
-    Local copy of ``studio.runner._dbg`` — runner imports this module, so importing back
-    would be circular. Added because the synthesis pass's accept/reject decisions were
-    invisible (run 1531: depth rows byte-identical, undiagnosable without this)."""
-    import os
-    path = os.environ.get("OMC_THROUGHPUT_DEBUG")
-    if not path:
-        return
-    try:
-        with open(path, "a") as fh:
-            fh.write(msg + "\n")
-    except OSError:
-        pass
 
 
 _TITLE_PLACEHOLDER_RE = _re.compile(
@@ -197,14 +184,6 @@ def _salvage_section_echo(src: str, out: str, tag: str) -> str:
                  f"({len(body)} chars of {len(out)})")
             return f"{head.strip()}\n{body}".strip()
     return out
-
-
-def _norm_urls(text: str) -> set[str]:
-    """URL set for the anti-regression compare, NORMALIZED. Probe 2026-07-05:
-    unnormalized tokens made a markdown-link wrap or trailing punctuation look
-    like a lost+gained URL pair — 4 of 5 synthesis rejects on run 1531's real
-    artifact were this artifact, not real citation loss."""
-    return {u.rstrip(".,;:)]>\"'") for u in _re.findall(r"https?://\S+", text or "")}
 
 
 def _synthesize_block(
@@ -487,14 +466,12 @@ _REFERENCE_PLACEHOLDER_RE = _re.compile(
 
 
 def _urls_in_order(text: str) -> list[str]:
-    seen: set[str] = set()
-    urls: list[str] = []
-    for raw in _re.findall(r"https?://[^\s)>\]]+", text or ""):
-        url = raw.rstrip(".,;:")
-        if url and url not in seen:
-            seen.add(url)
-            urls.append(url)
-    return urls
+    """Unique URLs, first-appearance order. Built on ``textutil.extract_urls``
+    (S1) — that helper is intentionally NOT deduplicated (other callers count
+    occurrences), so dedup happens here via ``dict.fromkeys``."""
+    from studio.textutil import extract_urls
+
+    return list(dict.fromkeys(extract_urls(text or "")))
 
 
 def strip_satisfied_placeholders(text: str) -> str:
@@ -715,8 +692,8 @@ def reconcile_outline(text: str, template: list[str]) -> str:
     return kept.rstrip() + "\n"
 
 
-#: A fenced ```mermaid block, captured whole for block-level repair + deterministic splice.
-_MERMAID_BLOCK_RE = _re.compile(r"```mermaid\b.*?```", _re.DOTALL)
+# S1: _MERMAID_BLOCK_RE moved to studio.textutil (imported at module top) — a
+# fenced ```mermaid block, captured whole for block-level repair + deterministic splice.
 
 
 def _repair_lints(

@@ -72,6 +72,30 @@ def test_code_branch_grounds_from_evidence_and_places_under_designated_section(t
     assert out.index("## Example Code") < out.index("```ts") < out.index("## References")
 
 
+def test_diagram_skip_in_same_or_group_as_satisfied_code_is_not_silent(tmp_path):
+    """An OR group with BOTH a code and a diagram alternative: once code satisfies
+    it, the diagram side is never attempted — but that must be a recorded reason,
+    not indistinguishable from an unexplained failure (reviewer finding)."""
+    text = "# Report\n\n## Body\n\n_(pending)_\n\n## References\n\n- https://real.example/doc\n"
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "source-001.md").write_text(
+        f"URL: https://good.example/src\n\n{_TS_SNIPPET}", encoding="utf-8"
+    )
+
+    out, stats = sp.produce_missing_structures(
+        text,
+        [["include example code", "include a design architecture diagram"]],
+        client=_client(_DIAGRAM_REPLY),
+        evidence_dir=evidence_dir,
+    )
+
+    assert stats["code"] == "inserted"
+    assert stats["diagram"] == "skipped"
+    assert stats["reason"]["diagram"] == "same OR group satisfied by code insertion"
+    assert "```mermaid" not in out
+
+
 def test_diagram_branch_uses_a2_machinery_and_inserts_mermaid():
     out, stats = sp.produce_missing_structures(
         _REPORT_WITH_ARCH,

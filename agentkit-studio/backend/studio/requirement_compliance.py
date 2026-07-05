@@ -51,6 +51,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from studio.textutil import MERMAID_OPEN_RE as _MERMAID_BLOCK_RE
+from studio.textutil import has_code_fence as _has_code_fence
+
 #: Cap on task text sent to the extractor — a task description is short; this
 #: only guards against a pathological paste.
 _MAX_TASK_CHARS = 4000
@@ -81,7 +84,8 @@ _VERDICT_RE = re.compile(r"REQUIREMENT\s+(\d+)\s*:\s*(SATISFIED|NOT[_\s]?SATISFI
 _DIAGRAM_SHAPED_RE = re.compile(
     r"(?i)\b(diagram|architecture|topology|blueprint|wireframe|flow\s*chart)\b"
 )
-_MERMAID_BLOCK_RE = re.compile(r"```mermaid\b")
+# S1: _MERMAID_BLOCK_RE moved to studio.textutil.MERMAID_OPEN_RE (imported at
+# module top, aliased under this module's original name).
 
 #: Code-shaped requirement phrasing gets the same stricter bar (P2-8b): run 1531
 #: scored "include example code" SATISFIED on prose DESCRIBING code — zero fenced
@@ -97,20 +101,6 @@ _CODE_REQUIRED_NOTE = (
     " (real code — a fenced ``` code block — is required; prose describing the "
     "code does not satisfy this)"
 )
-
-
-def _has_code_fence(text: str) -> bool:
-    """True when the artifact contains a fenced block that is NOT mermaid.
-
-    Fence lines alternate opener/closer; an opener whose info-string is not
-    ``mermaid`` counts, labeled or not — so an unlabeled real code block passes
-    and a mermaid diagram alone does not."""
-    fences = re.findall(r"(?m)^\s*```([^\n`]*)$", text or "")
-    return any(
-        not info.strip().lower().startswith("mermaid")
-        for i, info in enumerate(fences)
-        if i % 2 == 0
-    )
 
 
 class ComplianceCheckUnavailable(Exception):
@@ -130,16 +120,33 @@ def _extract_prompt(task: str) -> str:
         "objectively confirm was done or not done. Examples: 'include a diagram', "
         "'include example code', 'cite at least 3 sources', 'keep it under 800 "
         "words', 'must cover both X and Y', 'include a comparison table'.\n\n"
-        "Some requirements are phrased as an ALTERNATIVE — the user offers a "
-        "CHOICE where satisfying ANY ONE option is enough ('include example code "
-        "OR a design architecture', 'a table or a chart'). For such a requirement, "
-        "put ALL the alternative options on ONE line separated by ' || ' (e.g. "
-        "'include example code || include a design architecture'). A requirement "
-        "with no alternative goes on its own line as a single check.\n\n"
         "Do NOT list vague quality goals that cannot be objectively checked "
         "('be thorough', 'make it good', 'research it well', 'be clear'). Do NOT "
         "invent requirements the task did not state. Extract ONLY what is "
-        "literally asked for.\n\n"
+        "literally asked for — the ALTERNATIVE, AND/OR, and SUBJECT COVERAGE "
+        "rules below define what 'literally asked for' INCLUDES; they are not "
+        "exceptions to this rule.\n\n"
+        "Some requirements are phrased as an ALTERNATIVE — the user offers a "
+        "CHOICE where satisfying ANY ONE option is enough (e.g. 'include a bar "
+        "chart or a pie chart'). For such a requirement, put ALL the alternative "
+        "options on ONE line separated by ' || ' (e.g. 'include a bar chart || "
+        "include a pie chart'). A requirement with no alternative goes on its own "
+        "line as a single check.\n\n"
+        "CRITICAL — 'and' vs 'or': 'X and Y' (also 'X, plus Y', 'both X and Y') "
+        "means BOTH are separately required — list them as TWO SEPARATE lines, "
+        "never joined with ' || '. Use ' || ' ONLY when the task itself offers a "
+        "genuine choice ('or', 'either... or', 'any one of', 'alternatively'). "
+        "When unsure whether a connector is 'and' or 'or', prefer two separate "
+        "lines — a real requirement silently dropped is worse than one extra.\n\n"
+        "SUBJECT COVERAGE: when the task names SPECIFIC subjects, products, or "
+        "technologies to study, compare, or use ('study X and Y', 'compare A "
+        "with B', 'using T1 and T2'), each named subject is its OWN checkable "
+        "requirement: 'covers <subject>'. List each as a SEPARATE line — never "
+        "joined with ' || ' — covering one named subject never excuses omitting "
+        "another (the same 'must cover both X and Y' pattern from the examples "
+        "above, applied to the task's own named subjects). Do NOT turn generic "
+        "role words ('agents', 'a research report', 'the system', 'the topic') "
+        "into subjects — only the specific named things count.\n\n"
         f"TASK:\n{task}\n\n"
         "List each explicit checkable requirement on its own line (using ' || ' "
         "between the options when the requirement is a choice), worded as a short "

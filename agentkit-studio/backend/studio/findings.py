@@ -489,14 +489,11 @@ def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = 
 #: metrics saturate; a constrained binary classification does not).
 _OFFTOPIC_HARD_DENSITY = 0.010   # below → drop deterministically
 _OFFTOPIC_CLEAR_DENSITY = 0.030  # above → keep deterministically
-_OFFTOPIC_MIN_REQ_WORDS = 8
 _OFFTOPIC_VERDICT_RE = _re.compile(r"\b(IRRELEVANT|RELEVANT)\b", _re.IGNORECASE)
 
-
-def _req_content_words(requirement: str) -> set[str]:
-    """Content-word STEMS of the CLEAN task text; empty set = too thin to judge."""
-    words = {w.rstrip("s") for w in _re.findall(r"[a-z]{4,}", (requirement or "").lower())}
-    return words if len(words) >= _OFFTOPIC_MIN_REQ_WORDS else set()
+# S1: moved to studio.textutil.content_word_stems (same 8-word threshold, now
+# named `_MIN_CONTENT_WORDS` there); aliased under this module's original name.
+from studio.textutil import content_word_stems as _req_content_words
 
 
 def _offtopic_url(url: str, req_words: set[str], requirement: str = "",

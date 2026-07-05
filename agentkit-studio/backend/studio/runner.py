@@ -732,21 +732,10 @@ def _pick_scored_source(art_file: Path, result_output: str) -> str:
     return result_output
 
 
-def _dbg(msg: str) -> None:
-    """Append a throughput-diagnostic line to the file named by OMC_THROUGHPUT_DEBUG.
-
-    A no-op unless that env var is set, so production and tests write nothing. Used to
-    localize where findings are lost between the spokes and the artifact (raw findings →
-    grounded floor patches → patches actually applied → grow-only writeback)."""
-    import os
-    path = os.environ.get("OMC_THROUGHPUT_DEBUG")
-    if not path:
-        return
-    try:
-        with open(path, "a") as fh:
-            fh.write(msg + "\n")
-    except OSError:
-        pass
+# S1: moved to studio.textutil.dbg (was copy-pasted into artifact_text.py and
+# structural_producer.py to dodge a circular import back to this module — kept as
+# a thin alias so every existing `from studio.runner import _dbg` keeps working.
+from studio.textutil import dbg as _dbg
 
 
 def _build_template_skeleton(

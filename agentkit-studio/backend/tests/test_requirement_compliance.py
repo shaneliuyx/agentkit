@@ -21,6 +21,7 @@ import pytest
 FIXTURES_ROOT = pathlib.Path(__file__).parent.parent / "tmp"
 
 from studio.requirement_compliance import (
+    _extract_prompt,
     extract_requirements,
     requirement_compliance_issues,
 )
@@ -85,6 +86,83 @@ def test_extract_requirements_parses_or_alternatives_into_one_group() -> None:
         ["include example code", "include a design architecture"],
         ["cite at least 3 primary sources"],
     ]
+
+
+def test_extract_prompt_contains_and_or_contrast_rule() -> None:
+    """Regression (root cause of a live diagram-requirement miss): the prompt's OWN
+    OR-example used to read 'include example code OR a design architecture', which
+    collided with a live task phrased as 'include example code AND design
+    architecture' — the model pattern-matched the AND onto the OR example and
+    emitted one OR group instead of two mandatory ones. The example must use
+    generic, task-unrelated content, and the prompt must explicitly contrast
+    'and' vs 'or'."""
+    prompt = _extract_prompt("some task")
+    # The OR-alternative EXAMPLE no longer pairs "example code" with "design
+    # architecture" — the exact collision that made a live AND-task's wording
+    # pattern-match onto the OR example.
+    assert "design architecture" not in prompt.lower()
+    assert "'and' vs 'or'" in prompt
+    assert "TWO SEPARATE lines" in prompt
+
+
+def test_extract_requirements_parses_two_separate_lines_for_and_conjunction() -> None:
+    """Parse behavior is UNCHANGED by the prompt fix: two lines with no ' || '
+    delimiter still become two separate single-branch (mandatory) groups, never
+    merged into one OR group — this is what makes the AND/OR fix effective."""
+    client = _ScriptedExtractor(
+        "1. include example code\n"
+        "2. include a design architecture\n"
+    )
+    reqs = extract_requirements(client, "include example code and a design architecture")
+    assert reqs == [
+        ["include example code"],
+        ["include a design architecture"],
+    ]
+
+
+def test_extract_prompt_contains_subject_coverage_rule() -> None:
+    """Regression (run 1534): 'Study how to use Pi and Craft' produced a report
+    covering ONLY Pi — extraction never emitted a 'covers Craft' line, so the
+    gap was invisible to compliance and hill-climb carry-forward locked in the
+    one-sided artifact. The prompt must tell the model to split named subjects
+    into separate 'covers <subject>' lines, generically (no task words)."""
+    prompt = _extract_prompt("some task")
+    assert "SUBJECT COVERAGE" in prompt
+    assert "covers <subject>" in prompt
+    assert "Pi" not in prompt and "Craft" not in prompt  # no task-specific hardcoding
+
+
+def test_extract_requirements_parses_subject_coverage_lines_separately() -> None:
+    """Parse behavior is UNCHANGED: two 'covers X' lines with no ' || ' stay two
+    separate mandatory groups, exactly like any other unrelated pair of lines."""
+    client = _ScriptedExtractor(
+        "1. covers Pi\n"
+        "2. covers Craft\n"
+    )
+    reqs = extract_requirements(client, "study how to use Pi and Craft to develop agents")
+    assert reqs == [["covers Pi"], ["covers Craft"]]
+
+
+def test_extract_prompt_names_generic_role_word_guardrail_examples() -> None:
+    """The SUBJECT COVERAGE guardrail must name concrete generic-role examples
+    (not just an abstract warning) so a weak model has something to pattern
+    against — 'agents' and 'the system' are the two the reviewer asked to pin."""
+    prompt = _extract_prompt("some task")
+    assert "'agents'" in prompt
+    assert "'the system'" in prompt
+
+
+def test_extract_requirements_generic_nouns_produce_no_covers_group() -> None:
+    """A task naming only generic role words, correctly NOT split into 'covers X'
+    lines by the model, must parse with zero coverage groups — pins the parser
+    half of the guardrail contract (the prompt half is covered by the live probe)."""
+    client = _ScriptedExtractor(
+        "1. build the system\n"
+        "2. write a research report\n"
+        "3. improve agents\n"
+    )
+    reqs = extract_requirements(client, "build the system, write a research report, improve agents")
+    assert not any(b.lower().startswith("covers ") for group in reqs for b in group)
 
 
 def test_extract_requirements_strips_bullet_markers() -> None:
