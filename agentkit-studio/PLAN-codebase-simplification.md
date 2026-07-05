@@ -205,3 +205,52 @@ both found the assumption wrong before it shipped deeper.
 8. Codex adversarial review of the whole branch; user decides push.
 
 Each step: full suite green + probe where applicable; after 3 and 5: cold E2E compare.
+
+---
+
+## 8. STRUCTURAL-CONTENT ROOT CAUSE — why diagrams/tables/code never ship (2026-07-05)
+
+**User observation (correct):** many rounds of diagram/table testing, essentially zero
+structural content in any final artifact.
+
+### 8.1 The architectural fault (three compounding decisions)
+
+1. **Generation-time ban.** The reducer patch contract is prose-only (anti-regression
+   invariant) — structural content can never enter during the phases that produce 95%
+   of the artifact. Everything hangs on post-hoc passes.
+2. **Post-hoc = conjunction of conservative gates.** A diagram must survive warrant
+   detection → generation → grounding guard → score non-regression → weakness-count
+   improvement → local-debt drop. Five independent rejection points multiply into
+   "almost never ships." Run 1532: editor round IMPROVED score 0.145→0.167, still
+   reverted (weak count flat).
+3. **Misaligned acceptance oracle.** The rubric is sourcing/verification-heavy; a
+   diagram/code block adds no URLs, so it barely moves score or weakness count — the
+   protection rules systematically reject the required deliverable class. Meanwhile
+   evidence/ holds actual source code no pass ever uses.
+
+Proof by contrast: `rebuild_references_section` — deterministic finalize step
+(build → validate → insert → fail-open) — worked on its FIRST live run and every run
+since. Nothing structural uses that pattern.
+
+### 8.2 Fix — L0: requirement-driven deterministic structural producer (NEW TOP ITEM)
+
+At finalization, for each still-unmet code/diagram/table-shaped requirement branch
+(the compliance downgrades now detect these deterministically):
+
+- **diagram** → existing A2 path (COMPONENT/EDGE lines from the bare model →
+  `diagram_render` renders + grounds + inserts deterministically) — run it HERE,
+  unconditionally on the unmet branch, not behind the opportunity routing.
+- **code** → grounded snippet: prefer a real excerpt from evidence/ source files
+  (attributed, fenced, language-tagged); LLM fallback generates from the fetched
+  evidence with the same grounding guard.
+- **table** → findings/ranking table from already-parsed findings (the ranking-table
+  machinery exists).
+
+Acceptance = structural validity only: mermaid lint passes, fences balanced, no
+citation lost, compliance branch flips to satisfied. NO score/weak-count conditions —
+burden of proof moves from producer to rejector, matching References. Fail-open per
+branch. Placement: the section the planner designated for it (dynamic sections /
+REQUIRED SUB-SECTIONS), else the best-matching section.
+
+Sequencing: L0 implements immediately after attempt 5 records (its diag shows which
+gate kills the routed retry, informing how much of the old path L0 replaces).
