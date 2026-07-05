@@ -749,12 +749,25 @@ def _dbg(msg: str) -> None:
         pass
 
 
-def _build_template_skeleton(sections: list[str] | tuple[str, ...]) -> str:
-    body = "".join(
-        f"## {str(section).strip().lstrip('#').strip()}\n_(pending - needs sourced content)_\n\n"
-        for section in sections
-        if str(section).strip()
-    )
+def _build_template_skeleton(
+    sections: list[str] | tuple[str, ...],
+    subsections: dict[str, list[str]] | None = None,
+) -> str:
+    """Skeleton of ``##`` placeholder sections; *subsections* (Workstream P,
+    planner ``subsection`` decisions) adds ``###`` placeholders under the named
+    parent — matched case-insensitively; an unmatched parent is dropped (the
+    planner named a section that does not exist — fail-open, never invent one)."""
+    subs = {k.strip().lower(): v for k, v in (subsections or {}).items()}
+    blocks: list[str] = []
+    for section in sections:
+        title = str(section).strip().lstrip("#").strip()
+        if not title:
+            continue
+        block = f"## {title}\n_(pending - needs sourced content)_\n\n"
+        for sub in subs.get(title.lower(), []):
+            block += f"### {str(sub).strip()}\n_(pending - needs sourced content)_\n\n"
+        blocks.append(block)
+    body = "".join(blocks)
     return "# _(deliverable title - generated from the findings below)_\n\n" + body.rstrip() + "\n"
 
 
@@ -2196,6 +2209,42 @@ class Runner:
         # to base_client when the judge backend is unavailable or tests inject one
         # client, so this never adds a hard dependency.
         _planner_client = MaxTokensClient(judge_client, _model_profile.planner_max_tokens)
+        # Workstream P: the template is only the STARTING outline. The planner
+        # reviews it against the requirement's deliverable-shaped asks (example
+        # code, design architecture, …) and may add a section or a sub-section —
+        # additions land on rc["active_template"] (the live outline the skeleton,
+        # assignments, and publish gate read); the frozen scoring_template /
+        # scoring_matrix are never touched (no moving target). 0 LLM calls when
+        # the requirement names no form deliverable; fail-open on review errors.
+        self._dyn_subsections = {}
+        try:
+            _rc_p = getattr(session, "rubric_config", None)
+            if _rc_p is not None and (_rc_p.get("active_template") or _rc_p.get("template")):
+                from studio.planning import (
+                    apply_section_decisions,
+                    requirement_section_decisions,
+                )
+
+                _p_decisions = requirement_section_decisions(
+                    _planner_client,
+                    _active_template(session),
+                    _base_requirement,
+                    weaknesses=tuple(getattr(session, "weaknesses", []) or [])[:6],
+                )
+                if _p_decisions:
+                    _added, self._dyn_subsections = apply_section_decisions(
+                        _rc_p, _p_decisions
+                    )
+                    for _d in _p_decisions:
+                        _dbg(
+                            f"section review: {_d['deliverable']!r} → {_d['action']}"
+                            f" {_d['title']!r}"
+                            + (f" under {_d['parent']!r}" if _d.get("parent") else "")
+                        )
+                    if _added:
+                        _dbg(f"dynamic sections added to active outline: {_added}")
+        except Exception:  # noqa: BLE001 — outline review must never block a run
+            pass
         # Wrap in a web_search tool loop when tools are enabled (run_plan stays
         # unchanged — it sees a plain LLMClient that happens to run a tool loop).
         # When a prior artifact was seeded, also offer read_artifact/patch_artifact
@@ -2378,7 +2427,9 @@ class Runner:
         if not _artifact_copied and _tmpl_sections:
             _eff_ws2 = _eff_ws2 or self._workspace_root or workspace_root()
             if _eff_ws2 is not None:
-                _skel = _build_template_skeleton(_tmpl_sections)
+                _skel = _build_template_skeleton(
+                    _tmpl_sections, getattr(self, "_dyn_subsections", None)
+                )
                 _skel_file = _eff_ws2 / session.session_id / "artifact.md"
                 _skel_file.parent.mkdir(parents=True, exist_ok=True)
                 _skel_file.write_text(_skel)

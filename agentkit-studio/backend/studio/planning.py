@@ -640,3 +640,192 @@ class EpochResult:
     score: float
     delta: float
     status: str
+
+
+# ---------------------------------------------------------------------------
+# Workstream P — planner-reviewed requirement-driven dynamic sections.
+# The template is only the STARTING outline; the planner reviews it against the
+# requirement's deliverable-shaped asks and may add a section or a sub-section.
+# Scoring stays frozen (rc["scoring_template"]/["scoring_matrix"] are never
+# touched here) — additions land on rc["active_template"] only, the live-outline
+# store that assignment/publish/export already read.
+# ---------------------------------------------------------------------------
+
+#: Form/structure deliverables a requirement can literally ask for. Deliberately
+#: keyword-narrow (like _DIAGRAM_SHAPED_RE): a match means the user asked for a
+#: CONTENT FORM the outline may need a home for — never a count/length
+#: constraint ("under 800 words", "at least 3 sources").
+_FORM_DELIVERABLE_RE = _re.compile(
+    r"(?i)\b("
+    r"example code|code example|sample code|design architecture|architecture design|"
+    r"solution architecture|reference architecture|diagram|comparison table|"
+    r"flow ?chart|checklist|timeline|roadmap|glossary|appendix|case stud(?:y|ies)|"
+    r"benchmark"
+    r")\b"
+)
+
+#: Hard cap on planner-injected top-level sections per run (outline-bloat guard).
+_MAX_DYNAMIC_SECTIONS = 3
+
+_VALID_SECTION_ACTIONS = ("existing", "new_section", "subsection")
+
+
+def deliverable_candidates(requirement: str) -> list[str]:
+    """Deterministic deliverable-shaped phrases literally present in *requirement*.
+
+    No LLM: this is the fallback extractor AND the trigger gate — when it finds
+    nothing, the planner review is skipped entirely (0 extra LLM calls)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _FORM_DELIVERABLE_RE.finditer(requirement or ""):
+        phrase = m.group(1).lower()
+        if phrase not in seen:
+            seen.add(phrase)
+            out.append(phrase)
+    return out
+
+
+def _fallback_section_decisions(
+    outline: list[str], candidates: list[str]
+) -> list[dict[str, Any]]:
+    """No-LLM decisions: concept-token match against the outline → existing,
+    else a new top-level section titled from the deliverable phrase."""
+    from studio.rubric import _content_tokens
+
+    outline_tokens = [(_content_tokens(t), t) for t in outline]
+    decisions: list[dict[str, Any]] = []
+    for cand in candidates:
+        toks = _content_tokens(cand)
+        hit = next((t for o_toks, t in outline_tokens if toks & o_toks), None)
+        if hit is not None:
+            decisions.append(
+                {"deliverable": cand, "action": "existing", "title": hit, "parent": None}
+            )
+        else:
+            decisions.append(
+                {"deliverable": cand, "action": "new_section",
+                 "title": cand.title(), "parent": None}
+            )
+    return decisions
+
+
+def _section_review_prompt(
+    outline: list[str], requirement: str, candidates: list[str],
+    weaknesses: list[str] | tuple[str, ...],
+) -> str:
+    outline_block = "\n".join(f"- {t}" for t in outline) or "- (empty)"
+    weak_block = "\n".join(f"- {w}" for w in list(weaknesses)[:6])
+    return (
+        "You review a report OUTLINE against the deliverables the task explicitly "
+        "asks for, and decide where each deliverable should live.\n\n"
+        f"TASK:\n{(requirement or '').strip()[:2000]}\n\n"
+        f"CURRENT OUTLINE (top-level sections):\n{outline_block}\n\n"
+        + (f"KNOWN WEAKNESSES:\n{weak_block}\n\n" if weak_block else "")
+        + "DELIVERABLES THE TASK ASKS FOR:\n"
+        + "\n".join(f"- {c}" for c in candidates)
+        + "\n\nFor EACH deliverable decide ONE of:\n"
+        '- "existing": an existing outline section already is the natural home '
+        '(set "title" to that EXACT section title)\n'
+        '- "new_section": the outline needs a NEW top-level section (set "title" '
+        "to a short task-specific section title)\n"
+        '- "subsection": a sub-section under an existing section is enough (set '
+        '"title" to the sub-section title and "parent" to the EXACT existing '
+        "section title)\n\n"
+        "Reply with ONLY a JSON array, one object per deliverable:\n"
+        '[{"deliverable": "...", "action": "existing|new_section|subsection", '
+        '"title": "...", "parent": null or "..."}]'
+    )
+
+
+def requirement_section_decisions(
+    client: Any,
+    outline: list[str] | tuple[str, ...],
+    requirement: str,
+    weaknesses: list[str] | tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    """Planner review (Workstream P): where should each deliverable live?
+
+    ONE LLM call on the planner/judge client; every failure path (no client, LLM
+    error, unparseable/invalid JSON) falls back to the deterministic
+    concept-token decisions. Returns [] when the requirement asks for no
+    form-shaped deliverable — the common case, costing 0 LLM calls."""
+    outline_list = [str(t).strip() for t in outline if str(t).strip()]
+    candidates = deliverable_candidates(requirement)
+    if not candidates:
+        return []
+    if client is None:
+        return _fallback_section_decisions(outline_list, candidates)
+    try:
+        reply = client.chat([{
+            "role": "user",
+            "content": _section_review_prompt(outline_list, requirement, candidates, weaknesses),
+        }])
+        text = str(getattr(reply, "text", "") or "")
+        m = _re.search(r"\[.*\]", text, _re.DOTALL)
+        raw = _json.loads(m.group(0)) if m else None
+        decisions: list[dict[str, Any]] = []
+        for item in raw or []:
+            action = str(item.get("action") or "").strip().lower()
+            title = str(item.get("title") or "").strip().lstrip("#").strip()
+            parent = item.get("parent")
+            if action not in _VALID_SECTION_ACTIONS or not title:
+                raise ValueError(f"invalid decision: {item!r}")
+            if action == "subsection" and not str(parent or "").strip():
+                raise ValueError(f"subsection without parent: {item!r}")
+            decisions.append({
+                "deliverable": str(item.get("deliverable") or title),
+                "action": action,
+                "title": title,
+                "parent": str(parent).strip() if parent else None,
+            })
+        if not decisions:
+            raise ValueError("empty decision list")
+        return decisions
+    except Exception:  # noqa: BLE001 — review is an optimization, never a blocker
+        return _fallback_section_decisions(outline_list, candidates)
+
+
+def apply_section_decisions(
+    rubric_config: dict[str, Any],
+    decisions: list[dict[str, Any]],
+    *,
+    max_new: int = _MAX_DYNAMIC_SECTIONS,
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Apply planner decisions to the LIVE outline; never touch frozen scoring.
+
+    Grows ``rubric_config["active_template"]`` with accepted new sections
+    (additive-only, capped, concept-deduped against the current outline) and
+    returns ``(added_titles, subsections)`` where *subsections* maps a parent
+    section title to its ``###`` placeholder titles (consumed by the cold-start
+    skeleton builder; seeded runs get no subsection injection in v1).
+    ``scoring_template`` / ``scoring_matrix`` / ``template`` are read-only here —
+    the no-moving-target contract."""
+    from studio.rubric import _content_tokens
+
+    outline = [
+        str(t) for t in (
+            rubric_config.get("active_template") or rubric_config.get("template") or []
+        )
+    ]
+    outline_tokens = [_content_tokens(t) for t in outline]
+    added: list[str] = []
+    subsections: dict[str, list[str]] = {}
+    for d in decisions:
+        action = d.get("action")
+        title = str(d.get("title") or "").strip()
+        if not title:
+            continue
+        if action == "new_section" and len(added) < max_new:
+            toks = _content_tokens(title)
+            if any(toks & o for o in outline_tokens):
+                continue  # concept already present — planner said new, dedupe says no
+            outline.append(title)
+            outline_tokens.append(toks)
+            added.append(title)
+        elif action == "subsection":
+            parent = str(d.get("parent") or "").strip()
+            if parent:
+                subsections.setdefault(parent, []).append(title)
+    if added:
+        rubric_config["active_template"] = outline
+    return added, subsections
