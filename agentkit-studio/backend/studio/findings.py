@@ -325,7 +325,8 @@ def _make_section_reducer(
         _io_capture["output"] = res.text or ""
         tokens = int(getattr(res, "total_tokens", 0) or 0)
         llm_patches = _sanitize_llm_patches(
-            art_block, _parse_patches_from_output(res.text or ""), requirement
+            art_block, _parse_patches_from_output(res.text or ""), requirement,
+            judge=client,
         )
         # Deterministic floor: convert the workers' own RESEARCH_FINDING blocks to
         # additive patches. Guarantees grounded progress when the model emits no
@@ -363,7 +364,7 @@ def _make_section_reducer(
         # Topical-relevance floor (run 1531): a genuinely-fetched, quote-verified
         # π-Wikipedia note self-rationalized its way into the body — grounding is
         # not relevance. Judged against the SOURCE PAGE, which cannot rationalize.
-        findings, n_offtopic = _drop_offtopic_findings(findings, requirement)
+        findings, n_offtopic = _drop_offtopic_findings(findings, requirement, judge=client)
         floor_patches = _findings_to_patches(findings)
         patches = llm_patches + floor_patches
         if not patches:
@@ -398,7 +399,8 @@ def _make_section_reducer(
     return reduce
 
 
-def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = "") -> list:
+def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = "",
+                          judge=None) -> list:
     """Keep only scoped, sourced reducer patches before structural merge.
 
     The active failure mode is a weak reducer returning a whole document or skeleton
@@ -448,7 +450,8 @@ def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = 
         raw_urls = _re.findall(r"https?://\S+", content)
         req_words = _req_content_words(requirement)
         if req_words and raw_urls:
-            verdicts = [_offtopic_url(u.rstrip(".,);]"), req_words) for u in raw_urls]
+            verdicts = [_offtopic_url(u.rstrip(".,);]"), req_words, requirement, judge)
+                        for u in raw_urls]
             if all(v is True for v in verdicts):
                 continue
         if _re.search(r"(?m)^#{1,6}\s+", content):
@@ -461,36 +464,64 @@ def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = 
     return out
 
 
-#: Minimum fraction of the requirement's content vocabulary a finding's SOURCE
-#: PAGE must share to be woven into the report. Calibration anchor (run 1531):
-#: the Pi-Wikipedia math page shares ~0 of an agent-framework requirement's
-#: words; a genuine framework article shares well over a third. Wide margin on
-#: both sides; fail-open when the page was never cached or the requirement is
-#: too thin to carry signal.
-_OFFTOPIC_MIN_OVERLAP = 0.15
+#: Topical floor calibration (2026-07-05, .web_cache.json of the live Pi/Craft
+#: task — 40 real pages). SET-OVERLAP of requirement words is BROKEN for this:
+#: the 23K-token π-Wikipedia page incidentally hits 8/13 common requirement
+#: words (0.62 — above many genuine pages). What separates junk is DENSITY:
+#: occurrences of requirement-word stems per page token.
+#:   junk:    π-Wikipedia 0.0019, dictionary/use 0.0067, dictionary/limitation 0.0136
+#:   genuine: 0.0124 (a nav page) … 0.32; bulk ≥ 0.018
+#: The bands overlap in [0.010, 0.030], so that gray zone goes to a binary LLM
+#: verdict on the page excerpt (same lesson as studio.relevance: lexical
+#: metrics saturate; a constrained binary classification does not).
+_OFFTOPIC_HARD_DENSITY = 0.010   # below → drop deterministically
+_OFFTOPIC_CLEAR_DENSITY = 0.030  # above → keep deterministically
 _OFFTOPIC_MIN_REQ_WORDS = 8
+_OFFTOPIC_VERDICT_RE = _re.compile(r"\b(IRRELEVANT|RELEVANT)\b", _re.IGNORECASE)
 
 
 def _req_content_words(requirement: str) -> set[str]:
-    """Content vocabulary of the CLEAN task text; empty set = too thin to judge."""
-    words = {w for w in _re.findall(r"[a-z]{4,}", (requirement or "").lower())}
+    """Content-word STEMS of the CLEAN task text; empty set = too thin to judge."""
+    words = {w.rstrip("s") for w in _re.findall(r"[a-z]{4,}", (requirement or "").lower())}
     return words if len(words) >= _OFFTOPIC_MIN_REQ_WORDS else set()
 
 
-def _offtopic_url(url: str, req_words: set[str]) -> bool | None:
+def _offtopic_url(url: str, req_words: set[str], requirement: str = "",
+                  judge=None) -> bool | None:
     """Judge a cited URL by its CACHED PAGE: True = off-topic, False = on-topic,
     None = unknown (never cached → cannot judge; the grounding oracle owns
-    fabrication). Structural, no phrase lists."""
+    fabrication). Density two-tier + LLM gray zone (see calibration above).
+    Fail-open: gray zone without a judge, or a judge error, keeps the URL."""
     from studio.tools import _page_for_url
 
     page = _page_for_url(url)
     if not page:
         return None
-    page_words = set(_re.findall(r"[a-z]{4,}", page.lower()))
-    return (len(req_words & page_words) / len(req_words)) < _OFFTOPIC_MIN_OVERLAP
+    toks = _re.findall(r"[a-z]{4,}", page.lower())
+    if not toks:
+        return None
+    density = sum(1 for t in toks if t.rstrip("s") in req_words) / len(toks)
+    if density < _OFFTOPIC_HARD_DENSITY:
+        return True
+    if density > _OFFTOPIC_CLEAR_DENSITY:
+        return False
+    if judge is None:
+        return False
+    try:
+        reply = judge.chat([{"role": "user", "content": (
+            "You judge whether a fetched SOURCE PAGE is about the SPECIFIC "
+            "subject of a task, or merely shares common words with it.\n\n"
+            f"TASK: {requirement[:400]}\n\n"
+            f"SOURCE PAGE EXCERPT (from {url}):\n{page[:2000]}\n\n"
+            "Answer on the last line with exactly one word: RELEVANT or IRRELEVANT."
+        )}])
+        matches = _OFFTOPIC_VERDICT_RE.findall(getattr(reply, "text", "") or "")
+        return matches[-1].upper() == "IRRELEVANT" if matches else False
+    except Exception:  # noqa: BLE001 — relevance judging is best-effort; keep on failure
+        return False
 
 
-def _drop_offtopic_findings(findings: list, requirement: str) -> tuple[list, int]:
+def _drop_offtopic_findings(findings: list, requirement: str, judge=None) -> tuple[list, int]:
     """Drop findings whose cached source page shares almost none of the
     requirement's content vocabulary (grounding is not relevance — run 1531's
     π-Wikipedia note was genuinely fetched AND quote-verified, and its finding
@@ -502,7 +533,8 @@ def _drop_offtopic_findings(findings: list, requirement: str) -> tuple[list, int
     kept: list = []
     dropped = 0
     for f in findings:
-        if _offtopic_url(getattr(f, "url", "") or "", req_words) is True:
+        if _offtopic_url(getattr(f, "url", "") or "", req_words,
+                         requirement, judge) is True:
             dropped += 1
         else:
             kept.append(f)

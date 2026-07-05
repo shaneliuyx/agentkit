@@ -485,6 +485,7 @@ Never trade correctness for cheapness (keyword grounding was rejected for this r
 grounded per-section component-list before wiring), then implement + live-validate a mermaid LANDS via
 the production path; (2) TABLE path (same pattern, simpler render); (3) paragraph/list reformatting
 layer (separate report-quality workstream, deferred). `studio/diagram_render.py` (deterministic render)
+
 + `tests/test_diagram_render.py` already built; the tool-call-bypass wiring + detection are pending the
 prompt-test checkpoint.
 
@@ -493,3 +494,74 @@ Canada CCDR (tables=precise/comparison, figures=trends/relationships/process); C
 (table data-ink); Google Tech Writing + Microsoft Style Guide + Cornell CHEC (list vs paragraph,
 parallelism, 2-7 items); UK DfE + WSDOT (headings, accessibility, no spacing hacks). STORM/ScaffoldAgent
 (per-section population + polish never free-rewrites).
+
+---
+
+## 11. DEPTH-STALL DIAGNOSIS — fundamentals verified (2026-07-05, probe + calibration)
+
+**Question (user):** is the shallow report (Evidence synthesis 2.5/14.7, Analytical depth
+1.8/10.5, byte-identical 1527→1531) a weak-model ceiling or application logic? Never
+directly tested before — the strong-model reducer (P0-2b) was built on the untested
+assumption. Verified today with two controlled probes.
+
+### 11.1 What the "depth" rows actually are
+
+Not an LLM judgment. Both rows map to ONE deterministic signal in `studio/rubric.py`:
+`analysis = count(_ANALYSIS_MARKERS) / 6` — discourse-marker density ("however",
+"in contrast", "this implies", "compared to", …). Run 1531's 1607-word report contained
+**one marker** in total. Full credit needs six. This is a low bar, not a reasoning test.
+
+### 11.2 Probe result — model ceiling is FALSE
+
+`scratchpad/probe_synthesis.py`: run 1531's real artifact through the PRODUCTION
+`_synthesize_analysis` path (same windowing, same guards, same directive) on the real
+gemma client:
+
+```
+BEFORE  markers=1  analysis=0.17  Evidence synthesis 2.33/14  Analytical depth 1.67/10
+AFTER   markers=5  analysis=0.83  Evidence synthesis 11.67/14 Analytical depth 8.33/10
+```
+
+Gemma synthesizes fine. 4/9 sections accepted; the 5 rejects are GUARD BUGS, not model
+failures (probe_diag.log):
+
+1. **invented-headings false positive** — gemma added example code; `#`-comments inside
+   the fenced block match the heading regex (guard scans raw text, not code-masked).
+   Also explains dying code fences. Fix: `mask_fenced_code` before heading extraction.
+2. **URL set-compare unnormalized** — `lost=2 gained=2` pairs are the SAME URLs
+   re-tokenized (markdown-link wrap, trailing punctuation). Fix: normalize
+   (rstrip `.,);]`) both sides before compare. 4 of 5 rejects show this signature.
+
+### 11.3 Off-topic floor calibration — set-overlap fundamentally broken
+
+Calibrated against 40 real cached pages of the Pi/Craft task (.web_cache.json):
+π-Wikipedia scores set-overlap **0.62 — above most genuine pages** (23K tokens hit
+8/13 common requirement words incidentally). The 0.15 set-overlap floor shipped earlier
+today could never work; live attempt 3 confirmed (pi_wiki=True, dict=True, offtopic=0).
+
+Density (req-word-stem occurrences / page tokens) separates: junk 0.0019–0.0136,
+genuine 0.0124–0.32 — one overlap point (dictionary/limitation 0.0136 vs a genuine nav
+page 0.0124). Landed: density two-tier + LLM gray zone (drop <0.010, keep >0.030,
+judge-client binary verdict between; fail-open). Same lesson as `studio/relevance.py`:
+lexical metrics saturate; constrained binary classification doesn't.
+
+### 11.4 Plan (ordered)
+
+1. ~~Density+gray-zone topical floor on findings AND reducer LLM patches~~ (landed,
+   tested — pending live verification).
+2. Fix `_synthesize_block` guards: code-mask before invented-heading check; normalize
+   URLs before set-compare. Re-run probe — expect ≥8/9 sections accepted, live analysis
+   signal ≈0.8 without any model upgrade.
+3. Keep P0-2b strong-model reducer (already landed with call-time degrade) as
+   composition-quality lever — it was NOT the depth lever; the guards were.
+4. Fresh cold run (attempt 4) measuring: depth rows move, no π/dictionary citations,
+   code fence + mermaid present (compliance downgrades force the editor loop),
+   filled dynamic sections, no escape-flood.
+5. Session fixes already landed en route: depth-pass observability (`synth[...]`
+   accept/reject + expand stats), code-shaped compliance downgrade (P2-8b), QUOTE
+   escape-flood normalization, reducer judge-flake degrade.
+
+**Meta-lesson (user rule, reaffirmed):** verify fundamentals BEFORE building on a
+hypothesis — the depth stall was 100% app logic; the untested "weak model" assumption
+nearly shipped a model upgrade as the fix. Calibrate every deterministic threshold
+against real data before trusting it.

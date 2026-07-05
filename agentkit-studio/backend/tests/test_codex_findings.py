@@ -314,3 +314,33 @@ def test_quote_escape_flood_normalized_at_parse():
     assert len(fs) == 1
     assert "\\n" not in fs[0].quote
     assert fs[0].quote == "send end"
+
+
+def test_offtopic_gray_zone_goes_to_llm_judge():
+    """Density in [0.010, 0.030] is lexically inseparable (calibrated live:
+    dictionary/limitation 0.0136 vs a genuine nav page 0.0124) — the binary
+    LLM verdict decides; no judge or judge error keeps the URL (fail-open)."""
+    from types import SimpleNamespace
+
+    from studio.findings import _drop_offtopic_findings
+
+    class _Judge:
+        def __init__(self, verdict): self.verdict = verdict
+        def chat(self, messages, tools=None):
+            return SimpleNamespace(text=f"reasoning...\n{self.verdict}")
+
+    tools._fetch_cache.clear()
+    req = ("Research how to build a custom agent framework with the pi-ai "
+           "package, covering the agent loop, tool calling, and example code")
+    # 2 requirement-word hits in ~100 tokens → density ~0.02 (gray zone).
+    gray_page = ("agent example " + "lorem ipsum dolor amet consectetur "
+                 "adipiscing elit sed eiusmod tempor incididunt " * 7)
+    tools._fetch_cache["https://gray.example|"] = (gray_page, 9)
+    f = SimpleNamespace(url="https://gray.example")
+
+    kept, dropped = _drop_offtopic_findings([f], req, judge=_Judge("IRRELEVANT"))
+    assert kept == [] and dropped == 1
+    kept, dropped = _drop_offtopic_findings([f], req, judge=_Judge("RELEVANT"))
+    assert kept == [f] and dropped == 0
+    kept, dropped = _drop_offtopic_findings([f], req, judge=None)
+    assert kept == [f] and dropped == 0

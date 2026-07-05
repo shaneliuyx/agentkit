@@ -174,6 +174,14 @@ _DIRECTIVE_READABILITY = (
 )
 
 
+def _norm_urls(text: str) -> set[str]:
+    """URL set for the anti-regression compare, NORMALIZED. Probe 2026-07-05:
+    unnormalized tokens made a markdown-link wrap or trailing punctuation look
+    like a lost+gained URL pair — 4 of 5 synthesis rejects on run 1531's real
+    artifact were this artifact, not real citation loss."""
+    return {u.rstrip(".,;:)]>\"'") for u in _re.findall(r"https?://\S+", text or "")}
+
+
 def _synthesize_block(
     block: str, client: "LLMClient", requirement: str, *, context: str,
     directive: str | None = None, min_ratio: float = 0.9,
@@ -188,7 +196,7 @@ def _synthesize_block(
     src = block or ""
     if not src.strip():
         return src, False
-    urls_before = set(_re.findall(r"https?://\S+", src))
+    urls_before = _norm_urls(src)
     _ctx = f"DOCUMENT SECTIONS (for cross-section comparison):\n{context}\n\n" if context else ""
     prompt = (
         (directive or _DIRECTIVE_ANALYSIS)
@@ -212,7 +220,7 @@ def _synthesize_block(
     if not out:
         _dbg(f"synth[{_tag}]: REJECT empty-reply")
         return src, False
-    urls_after = set(_re.findall(r"https?://\S+", out))
+    urls_after = _norm_urls(out)
     # Reject regressions: a dropped citation (always), or shrinking below ``min_ratio`` of the
     # block. Analysis ADDS (ratio 0.9); the readability/summarize pass CONDENSES repeated quotes
     # (ratio ~0.4) — so it may come back shorter, but every URL must survive.
@@ -231,8 +239,12 @@ def _synthesize_block(
     # Two STRUCTURAL guards (no hardcoded phrasing — task-neutral guardrail):
     # 1. Synthesis must never INVENT a heading — new heading lines are how the
     #    refusal's quoted section names became fake sections on reassembly.
-    headings_before = set(_re.findall(r"(?m)^#{1,3}\s.*$", src))
-    _invented = set(_re.findall(r"(?m)^#{1,3}\s.*$", out)) - headings_before
+    # Probe 2026-07-05: scan CODE-MASKED text — a `# comment` inside a fenced
+    # example gemma legitimately added matched the heading regex and killed the
+    # rewrite (one reason code fences never survived synthesis).
+    from studio.rubric import mask_fenced_code as _mask
+    headings_before = set(_re.findall(r"(?m)^#{1,3}\s.*$", _mask(src)))
+    _invented = set(_re.findall(r"(?m)^#{1,3}\s.*$", _mask(out))) - headings_before
     if _invented:
         _dbg(f"synth[{_tag}]: REJECT invented-headings={sorted(_invented)[:3]}")
         return src, False
@@ -306,8 +318,8 @@ def _synthesize_windowed(
     # where an embedder is wired.
     rebuilt = _dedup_paragraphs(rebuilt)
     # Final whole-doc guard: never return something that dropped a URL or shrank overall.
-    urls_before = set(_re.findall(r"https?://\S+", src))
-    urls_after = set(_re.findall(r"https?://\S+", rebuilt))
+    urls_before = _norm_urls(src)
+    urls_after = _norm_urls(rebuilt)
     if not urls_before <= urls_after or not urls_after <= urls_before:
         return src, False
     if len(rebuilt) < int(min(min_ratio, 0.80) * len(src)):
@@ -354,7 +366,7 @@ def _refine_readability(
     if not any_changed:
         return src, False
     rebuilt = _dedup_paragraphs("\n\n".join(out_parts))
-    if not set(_re.findall(r"https?://\S+", src)) <= set(_re.findall(r"https?://\S+", rebuilt)):
+    if not _norm_urls(src) <= _norm_urls(rebuilt):
         return src, False
     return rebuilt, True
 
