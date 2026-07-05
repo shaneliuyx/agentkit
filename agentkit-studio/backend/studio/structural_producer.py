@@ -46,12 +46,21 @@ def _accept(before: str, after: str) -> bool:
     if after == before:
         return True
     if not _fences_balanced(after):
+        _dbg("structural_producer._accept: REJECT — fences unbalanced after insertion")
         return False
     if not _norm_urls(before) <= _norm_urls(after):
+        _dbg("structural_producer._accept: REJECT — citation URL lost by insertion")
         return False
     from studio.artifact_lint import lint_artifact
 
-    return len(lint_artifact(after)) <= len(lint_artifact(before))
+    lints_before, lints_after = len(lint_artifact(before)), len(lint_artifact(after))
+    if lints_after > lints_before:
+        _dbg(
+            f"structural_producer._accept: REJECT — lint count worse "
+            f"{lints_before}→{lints_after}"
+        )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

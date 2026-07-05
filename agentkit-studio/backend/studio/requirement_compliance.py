@@ -52,6 +52,7 @@ import re
 from typing import Any
 
 from studio.textutil import MERMAID_OPEN_RE as _MERMAID_BLOCK_RE
+from studio.textutil import dbg as _dbg
 from studio.textutil import has_code_fence as _has_code_fence
 
 #: Cap on task text sent to the extractor — a task description is short; this
@@ -183,6 +184,10 @@ def extract_requirements(client: Any, task_text: str) -> list[list[str]]:
         branches = [b.strip() for b in _ALT_SEP_RE.split(req) if b.strip()]
         if branches:
             groups.append(branches)
+    # Observability (RC2): the extracted groups drive compliance, structural retry,
+    # and L0 — an unlogged wrong extraction is invisible until an artifact ships
+    # one-sided (run 1537: what the live run extracted was unknowable).
+    _dbg(f"extract_requirements: {len(groups)} groups: {groups}")
     return groups
 
 
@@ -353,6 +358,16 @@ def requirement_compliance_issues(
             if verdicts.get(fi) and _CODE_SHAPED_RE.search(branch):
                 verdicts[fi] = False
                 downgrade_note[fi] = _CODE_REQUIRED_NOTE
+    # Observability (RC2): per-branch verdicts, post-downgrade — without this line
+    # "check never ran" and "judge wrongly said SATISFIED" are indistinguishable in
+    # the diag log (run 1537: the covers-Craft outcome was unknowable).
+    for fi, (_, _branch) in enumerate(flat, 1):
+        if fi in verdicts:
+            _dbg(
+                f"compliance[{_branch[:60]}]: "
+                f"{'SATISFIED' if verdicts[fi] else 'NOT_SATISFIED'}"
+                f"{' (downgraded: no structural block)' if fi in downgrade_note else ''}"
+            )
     # Aggregate branch verdicts back per group (only branches that got a verdict).
     per_group: dict[int, list[tuple[str, bool, str]]] = {}
     for fi, (gi, branch) in enumerate(flat, 1):
