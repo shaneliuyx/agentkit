@@ -314,7 +314,7 @@ def _make_section_reducer(
         _io_capture["output"] = res.text or ""
         tokens = int(getattr(res, "total_tokens", 0) or 0)
         llm_patches = _sanitize_llm_patches(
-            art_block, _parse_patches_from_output(res.text or "")
+            art_block, _parse_patches_from_output(res.text or ""), requirement
         )
         # Deterministic floor: convert the workers' own RESEARCH_FINDING blocks to
         # additive patches. Guarantees grounded progress when the model emits no
@@ -387,7 +387,7 @@ def _make_section_reducer(
     return reduce
 
 
-def _sanitize_llm_patches(artifact_text: str, patches: list) -> list:
+def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = "") -> list:
     """Keep only scoped, sourced reducer patches before structural merge.
 
     The active failure mode is a weak reducer returning a whole document or skeleton
@@ -429,6 +429,17 @@ def _sanitize_llm_patches(artifact_text: str, patches: list) -> list:
         target_seen = set(section_urls.get(anchor, set())) | seen_by_anchor.setdefault(anchor, set())
         if urls & target_seen:
             continue
+        # Topical floor (same oracle as _drop_offtopic_findings): the aborted
+        # 2026-07-05 run showed the π-Wikipedia citation riding an LLM patch —
+        # the floor on findings alone leaves this door open. Drop a patch only
+        # when EVERY cited URL is positively judged off-topic by its own cached
+        # page (an uncached URL is unknown → the patch stays).
+        raw_urls = _re.findall(r"https?://\S+", content)
+        req_words = _req_content_words(requirement)
+        if req_words and raw_urls:
+            verdicts = [_offtopic_url(u.rstrip(".,);]"), req_words) for u in raw_urls]
+            if all(v is True for v in verdicts):
+                continue
         if _re.search(r"(?m)^#{1,6}\s+", content):
             continue
         if _re.search(r"(?i)_\((?:pending|to be completed)\s*[-—][^)]*\)_", content):
@@ -449,29 +460,41 @@ _OFFTOPIC_MIN_OVERLAP = 0.15
 _OFFTOPIC_MIN_REQ_WORDS = 8
 
 
+def _req_content_words(requirement: str) -> set[str]:
+    """Content vocabulary of the CLEAN task text; empty set = too thin to judge."""
+    words = {w for w in _re.findall(r"[a-z]{4,}", (requirement or "").lower())}
+    return words if len(words) >= _OFFTOPIC_MIN_REQ_WORDS else set()
+
+
+def _offtopic_url(url: str, req_words: set[str]) -> bool | None:
+    """Judge a cited URL by its CACHED PAGE: True = off-topic, False = on-topic,
+    None = unknown (never cached → cannot judge; the grounding oracle owns
+    fabrication). Structural, no phrase lists."""
+    from studio.tools import _page_for_url
+
+    page = _page_for_url(url)
+    if not page:
+        return None
+    page_words = set(_re.findall(r"[a-z]{4,}", page.lower()))
+    return (len(req_words & page_words) / len(req_words)) < _OFFTOPIC_MIN_OVERLAP
+
+
 def _drop_offtopic_findings(findings: list, requirement: str) -> tuple[list, int]:
     """Drop findings whose cached source page shares almost none of the
     requirement's content vocabulary (grounding is not relevance — run 1531's
     π-Wikipedia note was genuinely fetched AND quote-verified, and its finding
     prose self-rationalized the topic link; the source page cannot do that).
-    Structural, no phrase lists. Fail-open on any missing signal."""
-    from studio.tools import _page_for_url
-
-    req_words = {w for w in _re.findall(r"[a-z]{4,}", (requirement or "").lower())}
-    if len(req_words) < _OFFTOPIC_MIN_REQ_WORDS:
+    Fail-open on any missing signal."""
+    req_words = _req_content_words(requirement)
+    if not req_words:
         return findings, 0
     kept: list = []
     dropped = 0
     for f in findings:
-        page = _page_for_url(getattr(f, "url", "") or "")
-        if not page:
-            kept.append(f)  # never cached → cannot judge → keep (grounding oracle owns fabrication)
-            continue
-        page_words = set(_re.findall(r"[a-z]{4,}", page.lower()))
-        if len(req_words & page_words) / len(req_words) >= _OFFTOPIC_MIN_OVERLAP:
-            kept.append(f)
-        else:
+        if _offtopic_url(getattr(f, "url", "") or "", req_words) is True:
             dropped += 1
+        else:
+            kept.append(f)
     return kept, dropped
 
 

@@ -272,3 +272,29 @@ def test_offtopic_filter_fails_open_on_missing_signal():
     j = SimpleNamespace(url="http://pi.wikipedia")
     kept, dropped = _drop_offtopic_findings([j], "do it")
     assert kept == [j] and dropped == 0
+
+
+def test_offtopic_llm_patch_dropped_by_source_page_vocabulary():
+    """The aborted 2026-07-05 run showed the π citation riding an LLM PATCH —
+    _sanitize_llm_patches applies the same page-vocabulary oracle: a patch whose
+    every cited URL is judged off-topic is dropped; an uncached URL keeps it."""
+    from types import SimpleNamespace
+
+    from studio.findings import _sanitize_llm_patches
+
+    tools._fetch_cache.clear()
+    req = ("Research how to build a custom agent framework with the pi-ai "
+           "package, covering the agent loop, tool calling, and example code")
+    tools._fetch_cache["https://pi.wikipedia|"] = (
+        "The number pi is a mathematical constant, the ratio of a circle's "
+        "circumference to its diameter, used in geometry and trigonometry.", 9)
+    art = "## Evidence and Analysis\n\nbody\n"
+
+    def _p(url):
+        return SimpleNamespace(op="insert_after", anchor="## Evidence and Analysis",
+                               content=f"A grounded claim ({url}).")
+
+    kept = _sanitize_llm_patches(art, [_p("https://pi.wikipedia")], req)
+    assert kept == []
+    kept = _sanitize_llm_patches(art, [_p("https://never.fetched/x")], req)
+    assert len(kept) == 1
