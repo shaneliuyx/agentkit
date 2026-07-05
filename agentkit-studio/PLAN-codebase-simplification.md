@@ -22,7 +22,7 @@ cold run records (refactoring during a measurement run muddies both).
 | 11 | Design workstreams D1–D5 | ⬜ — D-B's fractal-critic principle partially delivered via S2 ledger + gate logging |
 | 12 | Unified execution order | ACTIVE tracker — slices 1–4 committed; current work = §14 slate |
 | 13 | Execution log | living log — one row per committed fix with measured result |
-| 14 | Attempt-8 results + attempt-9 slate | item 1 instrumented (trace armed) · items 2–4 built, reviewer MEDIUMs in fix round · items 5–8 queued |
+| 14 | Attempt-8 results + attempt-9 slate | item 1 instrumented (trace armed) · items 2–4 ✅ committed · items 5–8 queued · attempt 9 launching |
 
 ## 0. Objective & success metric
 
@@ -620,9 +620,9 @@ lint NAMES when changed=False).
 ### Attempt-9 fix slate (ordered)
 1. **rebuild_references erasure** — ◐ IN PROGRESS: instrumentation committed (per-pass fences= trace); offline repro EXONERATED write_section_workspace (fresh + live-copy both preserve); next run pinpoints. Original suspect statement kept below for the record (BLOCKER for
    all structural content; everything else is moot while inserted blocks get erased).
-2. Diagram insertion carries explanatory prose (kills the 6→7 lint veto). — ◐ BUILDING (l3-builder)
-3. repair_lints logs lint names when it cannot act. — ◐ BUILDING (l3-builder)
-4. covers-X deterministic downgrade gate (mention-vs-substance). — ◐ BUILDING (l3-builder; run-8 evidence: judge verdict wobbled SATISFIED→NOT on identical mention-only content)
+2. Diagram insertion carries explanatory prose (kills the 6→7 lint veto). — ✅ COMMITTED (deterministic sentence from node labels; block format centralized in diagram_render.build_diagram_block)
+3. repair_lints logs lint names when it cannot act. — ✅ COMMITTED (unconditional residual logging, single tail exit, cap 10)
+4. covers-X deterministic downgrade gate (mention-vs-substance). — ✅ COMMITTED (distance-based contexts ≥100 chars apart + citation within 120 chars; fails open ≤2-char subjects)
 5. Writeback-normalize fence repair (mid-run cleanliness; formatter-after-repairs
    invariant pinned by test — mdformat/Flowmark/PyMarkdown all launder broken fences,
    evidenced 2026-07-05; Flowmark and PyMarkdown evaluated and rejected).
