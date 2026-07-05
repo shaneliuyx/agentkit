@@ -19,11 +19,13 @@ import hashlib
 import json
 import re
 import sqlite3
+import statistics
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from studio.textutil import URL_RE, dbg
 from studio.workspace import workspace_root
 
 
@@ -526,6 +528,61 @@ def outputs_from_evidence_rows(rows: list[dict] | None) -> dict[str, str]:
     }
 
 
+# --- L3: lineage immune system (PLAN §6 L3 / §12 slice 4) --------------------
+# A poisoned row (crashed, malformed, uncited, or an outlier-low score) must never
+# seed the next run — it would silently propagate forever. latest_with_content()
+# walks newest-to-oldest and skips any ineligible row instead of trusting whichever
+# one merely happens to be latest.
+
+#: A completed run scoring more than this fraction below its lineage's median is an
+#: outlier (a bad epoch), not a healthy checkpoint — excluded as a seed.
+_SEED_MEDIAN_FLOOR_RATIO = 0.5
+#: Below this many scored rows a median isn't a reliable signal, so the median
+#: criterion is skipped rather than rejecting seeds off a sample of 1-2.
+_SEED_MEDIAN_MIN_ROWS = 3
+
+
+def _lineage_median_score(runs: list[TaskRun]) -> float | None:
+    """Median score over this lineage's scored (score > 0) rows, or None when there
+    are fewer than ``_SEED_MEDIAN_MIN_ROWS`` of them (median criterion skipped)."""
+    scores = [r.score for r in runs if r.score > 0.0]
+    if len(scores) < _SEED_MEDIAN_MIN_ROWS:
+        return None
+    return statistics.median(scores)
+
+
+def _seed_ineligible_reason(run: TaskRun, median: float | None) -> str | None:
+    """Why ``run`` cannot seed a new run, or None when it is eligible.
+
+    A ``failed_partial`` row is EXEMPT from all three checks below: its ``status``
+    already flags it as a known crash (entry 166), and its partial content is
+    DELIBERATELY still usable as salvage seed content ("ARE eligible seed content
+    via latest_with_content()" — see that method's docstring). These checks exist
+    to catch a ``completed`` row that is secretly broken, not to further restrict a
+    row already known to be one.
+
+    NO lint check here (REVISED 2026-07-05 — dropped from the original spec): L3
+    exists to block rows that would POISON the next version, and a lint-broken
+    artifact is not poison — it is the designed INPUT to DESIGN §14.6's in-run
+    self-healing (the reducer gets the lint finding as a repair instruction,
+    verified 5/5; see ``test_bad_mermaid_seed_reaches_reducer_with_repair_instruction``).
+    Gating on lint here would silently break that contract. A crashed, content-free,
+    or collapsed-score row is still caught by the three checks below; a middle
+    ground (some lint findings block, others don't) needs a lint-classification
+    allowlist — the exact hardcoded-exemption-list pattern already rejected once
+    during this feature's review as gaming a specific failing test.
+    """
+    if run.status != "completed":
+        return None
+    if run.score <= 0.0:
+        return "score<=0.0 (crashed-run signature until status tracks it — PLAN §12 L1)"
+    if not URL_RE.search(run.result_text or ""):
+        return "no citation URL in result_text"
+    if median is not None and run.score < median * _SEED_MEDIAN_FLOOR_RATIO:
+        return f"score {run.score} < {_SEED_MEDIAN_FLOOR_RATIO} of lineage median {median}"
+    return None
+
+
 class TaskRunStore:
     """SQLite store for cross-session task run history."""
 
@@ -743,15 +800,30 @@ class TaskRunStore:
         NO status filter (entry 166): this MAY return a ``failed_partial`` row, and that
         is the carry-forward win — when a run died mid-flight its partial artifact is the
         best available seed, strictly better than cold-starting from nothing.
+
+        L3 lineage immune system (PLAN §6/§12.4): a ``completed`` row that is lint-broken,
+        uncited, crashed (score<=0), or an outlier-low score is INELIGIBLE and skipped
+        (see ``_seed_ineligible_reason``) — it stays in the DB as history, it just never
+        seeds. Walks all the way back to the oldest run; returns None (cold start) only
+        when every row is either ineligible or empty, never seeding from a poisoned row.
         """
         from studio.workspace import workspace_root as _ws_root  # noqa: PLC0415
         root = ws_root or _ws_root()
-        for run in reversed(self.all_runs(task_hash_str)):
+        runs = self.all_runs(task_hash_str)
+        median = _lineage_median_score(runs)
+        for run in reversed(runs):
             art = root / run.session_id / "artifact.md"
-            if art.exists() and art.stat().st_size > 0:
-                return run
-            if (run.result_text or "").strip():
-                return run
+            has_content = (art.exists() and art.stat().st_size > 0) or bool(
+                (run.result_text or "").strip()
+            )
+            if not has_content:
+                dbg(f"[L3] latest_with_content skip v{run.version} ({run.session_id}): no content")
+                continue
+            reason = _seed_ineligible_reason(run, median)
+            if reason is not None:
+                dbg(f"[L3] latest_with_content skip v{run.version} ({run.session_id}): {reason}")
+                continue
+            return run
         return None
 
     def all_runs(self, task_hash_str: str) -> list[TaskRun]:

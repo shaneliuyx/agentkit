@@ -169,7 +169,9 @@ epochs — investigate or expected?"). Silence is no longer indistinguishable fr
 ### L3 — Lineage immune system (RC3)
 Deterministic seed-eligibility gate in `latest_with_content`: a row is seed-eligible
 only if its artifact passes lint + has ≥1 citation + score not >50% below lineage
-median. Ineligible rows stay recorded (history) but are skipped for seeding — no more
+median. (REVISED 2026-07-05: lint criterion dropped — lint-broken rows are §14.6
+self-heal input, not poison; see `task_runs._seed_ineligible_reason` comment.)
+Ineligible rows stay recorded (history) but are skipped for seeding — no more
 manual backup-and-delete surgery. Plus: goal/constraints NEVER rotate task identity
 (already fixed) — add a regression test if missing.
 

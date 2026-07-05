@@ -2103,7 +2103,7 @@ def test_seeded_final_step_gets_scoring_weaknesses_and_evidence_paths(tmp_path, 
         weaknesses=["[document] Missing limitations."],
         artifact_path="",
         requirement=requirement,
-        result_text="# Seed Report\n\n## Executive Summary\nPrior sourced report.",
+        result_text="# Seed Report\n\n## Executive Summary\nPrior sourced report. https://example.com/prior",
         config={"auto_improve": True, "max_epochs": 1},
     ))
     _fetch_cache["https://example.com/a|"] = (
@@ -2351,14 +2351,15 @@ def test_latest_with_content_falls_back_to_result_text(tmp_path, monkeypatch) ->
     # artifact.md to disk — exactly the failing real-world run (score 0.41, no file).
     store.record(TaskRun(
         task_hash=th, session_id="s_prior", version=1, score=0.41, weaknesses=[],
-        artifact_path="", requirement=req, result_text="# Good Report\nbody",
+        artifact_path="", requirement=req,
+        result_text="# Good Report\nbody https://example.com/good-report",
     ))
     assert not (ws_root / "s_prior" / "artifact.md").exists()  # precondition
 
     prior = store.latest_with_content(th, ws_root=ws_root)
     assert prior is not None  # was None before the fix → cold start → gate skipped
     assert prior.session_id == "s_prior"
-    assert prior.result_text == "# Good Report\nbody"
+    assert prior.result_text == "# Good Report\nbody https://example.com/good-report"
 
 
 def test_task_run_store_persists_evidence_rows(tmp_path, monkeypatch) -> None:
@@ -2382,7 +2383,8 @@ def test_task_run_store_persists_evidence_rows(tmp_path, monkeypatch) -> None:
     }]
     store.record(TaskRun(
         task_hash=th, session_id="s1", version=1, score=0.7, weaknesses=[],
-        artifact_path="", requirement=req, result_text="# Report\nbody",
+        artifact_path="", requirement=req,
+        result_text="# Report\nbody https://example.com/framework-a",
         evidence=evidence,
     ))
 
@@ -2581,6 +2583,13 @@ def test_bad_mermaid_seed_reaches_reducer_with_repair_instruction(
     store.record(TaskRun(
         task_hash=task_hash(req), session_id="s_prior", version=1, score=0.4,
         weaknesses=[], artifact_path="", requirement=req, result_text=bad_seed,
+        # L3 (PLAN §6/§12.4): a `completed` row with a hard lint (this malformed
+        # mermaid) or no citation is now correctly INELIGIBLE to seed — it would
+        # never reach the reducer at all, defeating this test's purpose. This seed
+        # models exactly the salvage case status="failed_partial" exists for
+        # (entry 166): a died-mid-flight row whose partial/broken content is still
+        # carried forward for the self-heal repair backstop to fix, not rejected.
+        status="failed_partial",
     ))
 
     class _Capturing:
@@ -4588,7 +4597,7 @@ def test_epoch_gate_baseline_is_the_seed_not_this_epochs_own_output(
     # fresh epoch output below.
     seed_text = (
         "# Seed Report\n\n## Executive Summary\n"
-        "SEED_SENTINEL_PRIOR_BASELINE — the prior report body."
+        "SEED_SENTINEL_PRIOR_BASELINE — the prior report body. https://example.com/seed"
     )
     TaskRunStore().record(TaskRun(
         task_hash=thash,
