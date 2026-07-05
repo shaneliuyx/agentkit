@@ -2719,6 +2719,89 @@ This plan (dated 2026-06-30) does not carry a per-item completion checkbox schem
 - **Production-risk hardening from an independent adversarial review** (`/codex challenge`, 6 findings, all fixed): unauthenticated catalog-template mutation routes + stale embedding on replace (touches this plan's "Catalog Management For Local And Remote Loops/Skills" workstream — that workstream's original scope did not specify authentication, which the review found necessary before those routes should be considered production-safe); per-run global state in `agentkit/topology/dynamic.py` and a process-global fetch cache, both converted to `contextvars` for concurrent-session isolation; a race condition in hill-climb version allocation (`task_runs.py`, now `UNIQUE(task_hash, version)` + retry-on-conflict); a premature `last_run` publish that could serve stale unvalidated output; and a fail-open URL-verification path that could not distinguish "no citations" from "couldn't check during an outage" (now emits a distinguishable warning while preserving the deliberate fail-open). None of these were anticipated by this plan's original security/concurrency assumptions, which did not model concurrent sessions or an unauthenticated-by-default catalog surface.
 - **Deferred, not fixed:** a sustained LLM-backend outage during a run loses all progress (nothing persisted to `task_runs.db`) because of a single top-level catch-all in `runner.py`. Logged as WORKLOG entry 166, explicitly deferred given session cost — not in scope for this plan revision either, but worth a future workstream if run-death-loses-progress recurs.
 
+## Workstream P — Planner-Reviewed Requirement-Driven Dynamic Sections (2026-07-05)
+
+Completes the unbuilt half of Workstream 9's live-active-outline contract ("the hub … may create
+new section files when the report needs structure not present in the initial template"). Everything
+downstream of section creation already works — `split_artifact_to_sections` unions new headings
+into `active_outline.json`, assignments read `active_outline_titles`, `reconcile_outline` drops
+empty template duplicates in favor of populated agent sections, and the scoring baseline is frozen
+at run start. What was never built is the **initiator**: no component ever proposes a section, so
+the outline stays exactly as the profile template initialized it.
+
+Evidence (runs 1527 pure-gemma-cold and 1528 hybrid-haiku-planning-cold, requirement "Study how to
+use Pi and Craft … need to include example code and design architecture."): both runs delivered
+**0 code blocks and no solution-architecture section** despite run 1528 fetching
+`pi/…/examples/sdk/11-sessions.ts` (actual example code) into evidence — the material arrived and
+had no section to land in. Hybrid planning changed nothing: the gap is structural, not
+model-capability. Every phase assignment was the unmodified template skeleton.
+
+### Design
+
+1. **Deliverable extraction (deterministic).** `requirement_compliance.py` already parses the
+   requirement into branches (it powers the diagram-shaped compliance downgrade). Expose a helper
+   returning deliverable-shaped phrases (e.g. "example code", "design architecture") from the
+   parsed branches. No LLM call.
+
+2. **Planner review step (LLM, on the judge/strong model).** At plan time — the planner already
+   runs on `judge_client` (hybrid planning, 2026-07-04) — a single structured review call receives:
+   the frozen template outline, the extracted deliverable candidates, and the requirement. For each
+   candidate it decides one of:
+   - `existing` — the deliverable maps to an existing section (concept-level match, no change);
+   - `new_section` — a top-level `##` section is needed; planner supplies the title;
+   - `subsection` — a `###` sub-section under a named existing parent is enough.
+   Output is a strict JSON schema; an unparseable reply or missing LLM falls back to the
+   deterministic rule: any candidate whose concept tokens match no existing section title becomes
+   a `new_section` titled from the deliverable phrase. Fail-open: review errors leave the template
+   unchanged (never block a run on this step).
+
+3. **Injection at skeleton bootstrap.** Approved `new_section` titles are appended to the outline
+   handed to `_build_template_skeleton` (the 2026-07-04 un-gated bootstrap site); `subsection`
+   decisions inject a `###` placeholder heading inside the parent section's skeleton body — they do
+   NOT create new section files (avoids assignment-row explosion; the parent's assigned worker owns
+   them). `active_outline.json` picks the new sections up through the normal split/union path — the
+   same-transaction property Workstream 9 requires.
+
+4. **Epoch-boundary re-review ("newly found requirements").** On each epoch start the planner
+   review re-runs with the CURRENT active outline (which may already have grown) plus any
+   deliverable-shaped weaknesses carried from the prior epoch (e.g. a compliance issue "diagram
+   requirement not satisfied"). Same decision schema; still additive-only. Mid-phase dynamic
+   injection is a NON-goal for v1 — sections change only at run/epoch boundaries where the planner
+   already runs.
+
+5. **Scoring stays frozen (the no-moving-target contract, verbatim from the unified scoring
+   workstream).** No change to `scoring_matrix` / `scoring_template` — injected sections earn
+   credit only under existing related categories (the 12-category matrix already carries "Code
+   quality / examples" and "Diagrams and tables"); ToC completeness is still scored against the
+   frozen `scoring_template`; the publish gate still checks `active_outline` so accepted dynamic
+   sections cannot silently disappear.
+
+6. **Guards.** Additive-only (template sections are never renamed/removed by this path); injected
+   top-level sections capped at 3 per run; candidates deduped against existing titles by the same
+   concept-token match `reconcile_outline` uses; every injection emits a gate/`_dbg` line naming
+   the deliverable and decision so runs are auditable.
+
+### Touch points
+
+- `studio/requirement_compliance.py` — public deliverable-extraction helper over the existing
+  branch parser.
+- `studio/planning.py` — `review_template_against_requirement(planner_client, outline, requirement,
+  weaknesses) -> decisions` + deterministic fallback + schema parsing.
+- `studio/runner.py` — skeleton-bootstrap site: extend `_tmpl_sections` with approved sections /
+  inject `###` placeholders before `_build_template_skeleton`; epoch-boundary re-review call.
+- Tests: extraction on the Pi/Craft requirement (must yield "example code" + "design
+  architecture"); planner-decision schema + fallback; injection produces skeleton sections AND
+  `active_outline.json` entries; `scoring_template`/`scoring_matrix` byte-identical before/after
+  injection (frozen-baseline regression test); reconcile no-dup when the planner maps a deliverable
+  to an existing section; cap + additive-only guards.
+
+### Non-goals (v1)
+
+- No scoring-weight changes of any kind (the moving-target prohibition is the contract).
+- No section renaming/removal/reordering by this path.
+- No mid-phase injection; boundaries only.
+- No new section FILES for sub-sections.
+
 ## Non-Goals
 
 - Do not replace Studio's runner with `03_code/research_report_agent.py`; that file is a mock demonstration, not production architecture.
