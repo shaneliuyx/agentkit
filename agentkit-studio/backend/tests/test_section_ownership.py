@@ -471,7 +471,13 @@ def test_synthesis_rejects_invented_headings():
         "## Bonus Section\nInvented structure.\n"
     )
     out, changed = _synthesize_analysis(src, _ScriptedText(invented), "t")
-    assert changed is False and out == src      # synthesis must never INVENT a heading
+    # Contract update (2026-07-05 echo-salvage): an invented heading must never
+    # ENTER the document. The rewrite's own section is salvaged (it is genuine
+    # analysis), the invented section is discarded — strictly better than the
+    # old wholesale reject, same invariant.
+    assert "Bonus Section" not in out
+    assert changed is True and out.startswith("## Key Findings")
+    assert "http://x.com" in out
 
 
 def test_synthesis_accepts_real_rewrite_on_citation_free_section():

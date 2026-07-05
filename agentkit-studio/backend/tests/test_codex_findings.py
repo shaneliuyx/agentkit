@@ -376,3 +376,31 @@ def test_llm_patch_with_one_junk_url_is_dropped():
         content=("Grounded claim (https://good.example). Unknown source "
                  "(https://never.fetched/x)."))
     assert len(_sanitize_llm_patches(art, [p2], req)) == 1
+
+
+def test_synthesis_whole_doc_echo_salvages_own_section():
+    """Live attempt 4: gemma answered EVERY per-section synthesis window with
+    the whole document → all rewrites rejected → depth pass no-op. The echo is
+    now sliced back to the window's own section and judged on its merits."""
+    from types import SimpleNamespace
+
+    from studio.artifact_text import _synthesize_block
+
+    src = ("## Key Findings\nThe loop calls tools repeatedly. "
+           "However, compared to a single prompt, this iterates until done. "
+           "See https://x.example/a for details.")
+    echo = (
+        "## Executive Summary\nIntro prose here.\n\n"
+        "## Key Findings\nThe loop calls tools repeatedly. However, compared "
+        "to a single prompt, this iterates until the goal is met — which "
+        "suggests a trade-off between cost and autonomy. In contrast to "
+        "manual prompting, the loop verifies its own work. "
+        "See https://x.example/a for details and more analysis of the loop.\n\n"
+        "## References\nhttps://x.example/a\n"
+    )
+    client = SimpleNamespace(chat=lambda messages, tools=None: SimpleNamespace(text=echo))
+    new, changed = _synthesize_block(src, client, "study the agent loop", context="")
+    assert changed is True
+    assert new.startswith("## Key Findings")
+    assert "Executive Summary" not in new
+    assert "https://x.example/a" in new

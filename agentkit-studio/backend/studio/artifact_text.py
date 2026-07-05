@@ -174,6 +174,31 @@ _DIRECTIVE_READABILITY = (
 )
 
 
+def _salvage_section_echo(src: str, out: str, tag: str) -> str:
+    """Slice OUR section back out of a whole-document echo.
+
+    Live attempt 4 (2026-07-05): gemma answered EVERY per-section window with
+    the whole document, so the invented-headings guard rejected all of them and
+    the depth pass no-op'd. When src is a single headed section and the reply
+    contains that same heading plus other document headings, the reply is an
+    echo — judge the matching slice instead of rejecting wholesale. A wrong
+    slice only ever faces the same guards; worst case is the old reject."""
+    src_head = (src.lstrip().splitlines() or [""])[0].strip()
+    if not src_head.startswith("#"):
+        return out
+    other_heads = [h for h in _re.findall(r"(?m)^#{1,3}\s.*$", out)
+                   if h.strip() != src_head]
+    if src_head not in {h.strip() for h in _re.findall(r"(?m)^#{1,3}\s.*$", out)} or not other_heads:
+        return out
+    parts = _re.split(r"(?m)^(#{1,3}\s.*)$", out)
+    for head, body in zip(parts[1::2], parts[2::2]):
+        if head.strip() == src_head:
+            _dbg(f"synth[{tag}]: whole-doc echo → salvaged own section "
+                 f"({len(body)} chars of {len(out)})")
+            return f"{head.strip()}\n{body}".strip()
+    return out
+
+
 def _norm_urls(text: str) -> set[str]:
     """URL set for the anti-regression compare, NORMALIZED. Probe 2026-07-05:
     unnormalized tokens made a markdown-link wrap or trailing punctuation look
@@ -220,6 +245,7 @@ def _synthesize_block(
     if not out:
         _dbg(f"synth[{_tag}]: REJECT empty-reply")
         return src, False
+    out = _salvage_section_echo(src, out, _tag)
     urls_after = _norm_urls(out)
     # Reject regressions: a dropped citation (always), or shrinking below ``min_ratio`` of the
     # block. Analysis ADDS (ratio 0.9); the readability/summarize pass CONDENSES repeated quotes
