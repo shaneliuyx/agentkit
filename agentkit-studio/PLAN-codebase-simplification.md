@@ -254,3 +254,269 @@ REQUIRED SUB-SECTIONS), else the best-matching section.
 
 Sequencing: L0 implements immediately after attempt 5 records (its diag shows which
 gate kills the routed retry, informing how much of the old path L0 replaces).
+
+## 9. REFERENCE-PROCESS GAP ANALYSIS — plan like a researcher, not a section-filler (2026-07-05)
+
+Method (user-directed): write down how a competent human researcher would execute the
+same task end-to-end, then diff that reference process against what the app actually
+does. Not limited to current frameworks. Trigger: run 1534 covered Pi only — the task
+says "study how to use Pi AND Craft" and all ~25 worker queries were Pi-only, zero
+Craft sources fetched, report silently one-sided.
+
+### 9.1 The reference process (how a human does it)
+
+0. **Disambiguate the subjects first.** "Pi" and "Craft" are ambiguous names. One
+   discovery search per subject to decide WHICH Pi / WHICH Craft is meant; if a
+   subject has no clear hit, that becomes a stated assumption in Scope — never a
+   silent drop. (The studio's failure was born here: no query ever probed Craft.)
+1. **Plan by research questions, not sections.** ~6 questions (what is Pi; what is
+   Craft; minimal agent in each; how do they COMBINE; what architecture; when to use
+   which). Sections are presentation containers; questions are the units of work.
+2. **ToC = imposed sections with committed content per section** (incl. comparison
+   table + combined-topology diagram in Evidence and Analysis).
+3. **Search/fetch/study with a coverage ledger.** Per-subject query fanout (never
+   joint-only), docs > repo > tutorials triage, ledger rows: every question and every
+   subject has fetched evidence OR an explicit "searched, not found" entry. Draft only
+   when the ledger is full; negative results go to Limitations.
+4. **Self-review against the task's own checklist** (both subjects? code? diagram?
+   sections?) before finalizing. [Studio now has this half: compliance + L0.]
+
+### 9.2 Gap table → ingestion workstreams P1–P4
+
+| Reference step | Studio today | Workstream |
+|---|---|---|
+| Coverage ledger per subject | Nothing tracks subject→queries→sources→citations; hill-climb carry-forward LOCKS IN a one-sided artifact (workers extend the existing doc, queries follow it) | **P1 subject ledger** |
+| Question-first planning | Section-first; spokes are goal-blind section fillers; no unit of work equals "understand Craft" | **P2 question-first hub planning** |
+| Disambiguation probe | None; researches whatever the first queries happen to return | **P3 subject disambiguation** |
+| Negative-result honesty | Silent omission (fabrication now blocked by guards, but silence remains) | **P4 explicit not-found contract** |
+
+**P1 — subject coverage ledger (highest leverage, cheapest; do first).**
+Deterministic dict keyed on extracted subjects (extraction item-5 rule supplies
+"covers <subject>" rows): {subject: queries_issued, sources_fetched, cited_in_artifact}.
+Populated from the existing web-tool call log + fetched-sources.json + citation set.
+Wire-ups: (a) subject with 0 sources → injected worker/reducer guidance naming the
+gap ("subject Craft has zero sources — issue direct searches"); (b) compliance row
+"covers X" NOT_SATISFIED feeds existing _structural_opps path (no new machinery);
+(c) verify stage records per-subject coverage into the run record for lineage.
+Breaks the carry-forward lock-in: v(n+1) sees the ledger, not just the one-sided text.
+
+**P2 — question-first planning (deep fix, prompt-level, medium risk).**
+Hub planning emits research questions + per-question search plans BEFORE section
+assignment; spokes own questions, reducer owns section placement. Sections stop being
+the unit of research.
+
+**P3 — subject disambiguation probe (small, rides on P1).**
+Per subject: one cheap discovery search + one LLM call "which interpretation of
+<subject> does this task mean? state it in one line" → recorded into Scope section +
+ledger. Kills the silent wrong-subject/no-subject failure mode.
+
+**P4 — explicit not-found contract (small, rides on P1).**
+Reducer/finalize contract: a subject whose ledger row is empty after the run gets an
+auto-placed Limitations entry ("No public sources found for <subject> under
+interpretation <I>; coverage is limited to <other subjects>"). Honest asymmetry beats
+silent asymmetry — and the LLM judge scores it as legitimate reflection, not a gap.
+
+### 9.3 Sequencing amendment (extends §7)
+
+P1 slots immediately after S2 (finalize pass-list), BEFORE L3 — coverage failure is
+user-visible, lineage immunity is internal. P3/P4 ride in the same slice as P1 (share
+the ledger). P2 is its own later slice (after L1 verify hardening, since question-first
+planning changes what verify must check). Extraction item 5 ("covers <subject>" rows)
+is the prerequisite for P1 and is already in flight in the current fix batch.
+
+## 10. UNIFIED PIPELINE + EDITORIAL GATE — publish-standard spec (2026-07-05, user-directed)
+
+§9 described the WRITER's reference process for one task. This section (a) generalizes
+it into the unified pipeline every research-report task should run, and (b) adds the
+missing second role: the REVIEWER/EDITOR responsible for publication, with a baseline
+checklist and a verdict router. The editor spec is the concrete implementation spec
+for L1 (verify hardening) — L1 should implement §10.2/§10.3, not invent its own.
+
+### 10.1 Unified writer pipeline (generalizes §9.1 to every research report)
+
+Five stages; each has an entry artifact and an exit criterion, recorded in workspace:
+
+1. **FRAME** — extract requirements (subjects, structural, sections; extraction rules
+   from the 2026-07-05 fix batch); disambiguate every named subject (P3); write
+   research questions. Exit: subject ledger initialized, questions listed.
+2. **RESEARCH** — per-subject and per-question query fanout (never joint-only);
+   triage docs > repo > tutorials; fetch + cache. Exit: ledger full — every subject
+   and question has sources OR an explicit not-found row (P1/P4).
+3. **DRAFT** — hub/spoke drafting into the section plan; structural content (code/
+   diagram/table) drafted where the requirement routes it, grounded in evidence.
+   Exit: all sections non-stub, all requirement rows addressed or declared.
+4. **EDIT** — the §10.2 editorial gate. Exit: verdict ∈ {PUBLISH, MINOR, MAJOR, REJECT}
+   with per-row evidence.
+5. **PUBLISH/REVISE** — MINOR → deterministic finalize passes (references rebuild, L0
+   structural producer, lint repair); MAJOR → rows become NEXT-version opportunities
+   with specific gap statements (hill-climb seeds); REJECT → writeback discarded
+   (guards). Verdict + row evidence recorded in the run record (feeds L3 lineage).
+
+### 10.2 Editor's baseline checklist (publish standard)
+
+Split by verification mode. DET rows are cheap and always run; LLM rows are bounded
+judge calls. Every row emits (pass/fail, evidence pointer) into the run record.
+
+| # | Row | Mode | Machinery |
+|---|-----|------|-----------|
+| E1 | Every promised section present, in order | DET | compliance (exists) |
+| E2 | No stub sections: every heading (incl. dynamic) has ≥ substantive-content floor beneath it (words excluding headings/links); run-1531's empty "Code Implementation Examples" fails here | DET | NEW — stub detector |
+| E3 | Subject coverage: every ledger subject cited in body OR declared in Limitations | DET | P1 ledger (planned) |
+| E4 | Citations resolve: every cited URL fetched-verified; no junk band (topical floor); quotes verify against cached pages | DET+LLM | grounding oracle + offtopic floor (exist) |
+| E5 | No orphan references: References list ⊇ body citations and ⊆ body citations (both directions) | DET | NEW — cheap set compare (rebuild_references partially covers) |
+| E6 | Structural requirements met: code fence present where required AND code-dense; mermaid present AND lints; tables well-formed | DET | compliance + L0 + lint (exist) |
+| E7 | Dynamic sections satisfy their SPAWNING requirement (see §10.3) | DET+LLM | NEW — requirement-conditioned section check |
+| E8 | Executive summary consistency: no claim in the summary that the body doesn't support | LLM | NEW — one judge call, summary vs body outline |
+| E9 | Internal consistency: entity names/numbers stable across sections | LLM | NEW — one judge call (cheap, over stripped text) |
+| E10 | Honest limitations: Limitations names the ACTUAL gaps (ledger not-found rows, thin-source subjects), not boilerplate | DET+LLM | P4 + judge |
+| E11 | Presentation: heading hierarchy sane, no lint errors, section lengths within band | DET | artifact_lint (exists) |
+
+### 10.3 Verifying dynamically generated sections
+
+A dynamic section (spawned by requirement routing, e.g. "Code Implementation
+Examples") must carry its birth certificate: the requirement branch that spawned it,
+persisted in the workspace section map (dyn_sections already stores the routing —
+extend it to store the branch text). Verification is then requirement-conditioned,
+not generic:
+
+1. **Shape check (DET)**: the section body contains the content TYPE its branch
+   demands — code branch → a real fence passing the code-density gate; architecture/
+   diagram branch → a mermaid block that lints, or (until produced) FAIL that routes
+   to L0. Generic non-empty prose under a code heading is a FAIL, not a pass —
+   exactly the run-1531 defect class.
+2. **Substance check (DET)**: E2 stub floor applies to the section body.
+3. **Satisfaction check (LLM)**: one compliance-judge call: "Does this section's
+   content satisfy this requirement branch?" — the same judge contract compliance
+   already uses for NOT_SATISFIED detection, scoped to the section body instead of
+   the whole artifact (tighter context = more reliable on weak models).
+4. **Grounding check (DET)**: any citation inside the dyn section obeys E4.
+
+Pass = all four. Fail routes by stage: missing shape → L0 producer (finalize);
+present-but-unsatisfying → MAJOR revision opportunity naming the branch.
+
+### 10.4 Verdict router (maps editorial outcome onto existing loop machinery)
+
+- **PUBLISH**: all E-rows pass → record, serve.
+- **MINOR** (only auto-fixable rows failed: E5, E6-shape, E11): run the deterministic
+  finalize fixers (L0, rebuild_references, lint repair), re-check the failed rows
+  once, then PUBLISH. No LLM re-drafting.
+- **MAJOR** (content rows failed: E2, E3, E7-satisfaction, E8, E10): the failed rows
+  — with their evidence strings — become the next version's seeded opportunities
+  (existing _structural_opps + weakness records). This replaces vague mined
+  weaknesses with editor-precise gap statements; hill-climb inherits a to-do list,
+  not a vibe.
+- **REJECT** (grounding rows failed: E4 fabrication/junk): writeback discarded by
+  existing guards; the rejection reason recorded for lineage.
+
+### 10.5 Fit into sequencing
+
+- E-rows that already exist (E1, E4, E6, E11) need only WIRING into a single
+  editorial pass with per-row evidence records — that IS L1, now spec'd.
+- E2 + E5 are small deterministic additions; land with L1.
+- E7 lands with the dyn-section birth-certificate extension (small; touches section
+  routing + one judge call).
+- E3/E10 depend on P1/P4 (§9.2) — the ledger slice.
+- E8/E9 are single bounded judge calls — land last in L1, cheapest to defer.
+- Verdict router (§10.4) replaces the current score-only postrun decision; MAJOR-row
+  seeding supersedes generic weakness mining for tasks with requirements (L4 synergy:
+  repeat-failing rows escalate).
+
+## 11. FIRST-PRINCIPLES REASONING TRACE — design-level defects (2026-07-05, user-directed)
+
+§9/§10 mapped the pipeline at STAGE level. This section traces the reasoning INSIDE
+each stage as a competent human actually performs it, then names the design-level
+gaps. Explicitly not limited by current code/design — several findings require
+architecture changes, not patches.
+
+### 11.1 The reasoning trace (what actually happens in my head, step by step)
+
+**Reading the task.** Parse: two tools, one purpose, deliverable + two hard artifacts.
+Immediately flag TWO uncertainties: (a) which "Pi"? which "Craft"? — confidence LOW;
+(b) how do Pi and Craft RELATE (harness + framework? alternatives? composable?) —
+the relationship is itself a research question. I now hold a belief state with
+per-item confidence, and my next action is chosen to reduce the LARGEST uncertainty
+first. I do not start writing anything.
+
+**Disambiguation searches.** One query per subject, separately. Key move: I read the
+result LIST itself as evidence about the world (which interpretation dominates, how
+mature the ecosystem is), not merely as fetch candidates. If "Craft agent framework"
+returns nothing relevant, I form explicit hypotheses — (a) niche/new tool, (b) name
+collision (Craft.do? CraftCMS?), (c) user means a similar-sounding tool — and each
+hypothesis gets its own reformulated query. 2–3 reformulations per hypothesis BEFORE
+concluding "not found". If still unresolved: ASK THE USER, or proceed under a
+recorded, visible assumption.
+
+**Study.** I read pages with questions in hand (extension model? state? minimal
+example?) — reading is extraction against a schema, not summarization. Notes are
+claims WITH provenance and confidence: claim → source → sure/unsure. Two sources
+disagreeing is flagged as a conflict to resolve, never silently averaged. I stop
+reading a thread when marginal information gain drops — budget follows expected
+value, not fixed caps.
+
+**Writing.** Strict dependency order: Evidence FIRST (facts down), then Key Findings
+(patterns ACROSS the evidence), then Implications (consequences of the findings),
+Executive Summary LAST (it can only summarize what now exists). The code example
+gets run — or at minimum type-checked against the documented API. The diagram is
+drawn only after I understand the architecture: a diagram is COMPRESSED
+UNDERSTANDING, and if I cannot draw it, that is a signal to go back and research
+more, not a missing artifact to bolt on.
+
+**Self-review.** Re-read as the REQUESTER with their original words in hand ("did I
+get what I asked for?"), then per-claim provenance spot-check, then explicit gap
+declaration. Only then submit.
+
+### 11.2 Design-level defects this exposes (ranked by depth)
+
+| # | Defect | Human behavior | App behavior (by design, not by bug) |
+|---|--------|----------------|--------------------------------------|
+| D-A | **No uncertainty representation** | Belief state + confidence drives next action | Text in, text out; acts confidently on unexamined assumptions — root ancestor of the wrong-subject, one-sided-coverage, and fabrication failures |
+| D-B | **No inner critic per step (verification is terminal, not fractal)** | Search contains diagnose→reformulate; reading contains conflict detection; writing contains does-this-follow | ONE verify at loop end; a bad search result is never diagnosed, it just yields bad fetches |
+| D-C | **No claims layer between sources and draft** | pages → claims-with-provenance → outline → text | evidence pages → section text directly; nothing to measure coverage/conflicts/summary-consistency AGAINST (findings.py is embryonically this, but used as patch material, not as the substrate the report compiles from) |
+| D-D | **No write-order DAG** | Evidence→Findings→Implications→Summary; summary written last from the final body | All sections drafted in parallel; exec summaries overclaim because they are written blind (E8 in §10 DETECTS this; write-order PREVENTS it) |
+| D-E | **No clarification/assumption channel** | Irreducible ambiguity → ask user, or record visible assumption | Fire-and-forget; ambiguity resolved silently by whatever the first search returns |
+| D-F | **Artifacts treated as slot-filling, not understanding-compression** | Can't draw the diagram → research more | Can't draw the diagram → L0 bolts one on (right pragmatic patch; wrong to stop there — the upstream signal "system never understood the architecture" is discarded) |
+| D-G | **Budget by fixed caps, not information gain** | Stop when marginal gain drops; reallocate to the weak subject | Fixed fetch caps, uniform effort per section regardless of where understanding is thin |
+
+### 11.3 Ingestion — new design workstreams D1–D5
+
+**D1 — claims-with-provenance knowledge layer** (fixes D-C, enables half of §10):
+elevate findings (claim, quote, URL, confidence, subject-tag) from transient patch
+material to the persistent substrate: workspace `claims.jsonl`, grow-only, deduped.
+Draft/synthesis prompts CITE claim IDs; coverage (E3), conflicts, exec-summary
+consistency (E8) become queries over the claims table instead of LLM whole-text
+judgments. Biggest single design change; most downstream payoff.
+
+**D2 — search-step critic with reformulation loop** (fixes D-B for the research
+stage, extends P1): after each search, one cheap judgment — "do these results
+answer the question? if not, why, and what query next?" — with 2–3 bounded
+reformulations. Failure diagnosis, not just failure detection. Rides on P1's ledger
+(the 0-source subject triggers it).
+
+**D3 — assumption/clarification channel** (fixes D-E, small): unresolvable
+disambiguation → recorded assumption, injected into Scope ("interpreting Craft as
+X"), surfaced in GUI/run record. Optional interactive mode: pause-and-ask when the
+user is present. Cheapest item here, disproportionate payoff.
+
+**D4 — write-order DAG** (fixes D-D, medium): Evidence-bearing sections draft first;
+Findings synthesize from claims (D1); Exec Summary generated LAST from the final
+body in the finalize phase (it is a deterministic-order pass, like L0). Kills the
+overclaiming-summary class by construction; E8 remains as the detector.
+
+**D5 — belief/uncertainty state** (fixes D-A/D-F/D-G, north star): per-subject and
+per-question confidence in the ledger; next-epoch budget allocated to lowest
+confidence; a failed structural producer RAISES a research question instead of only
+inserting content. Hardest; do last; D1–D4 are its prerequisites.
+
+### 11.4 Relation to §9/§10
+
+§10's editor is DETECTION; §11 is PREVENTION BY CONSTRUCTION. Pairings:
+E3 detects uncovered subjects / P1+D2 prevent them; E8 detects summary overclaim /
+D4 prevents it; E4 detects ungrounded text / D1 prevents it (text compiled from
+claims can cite only what exists); E7 detects empty dynamic sections / D5-F treats
+the emptiness as a research signal. Detection stays even after prevention lands —
+belt and suspenders — but prevention is what makes the loop converge instead of
+oscillating between defect and patch.
+
+Sequencing: D3 immediately (rides anywhere); D2 with the P1 slice; D1 as its own
+major slice after L1 (the editor needs to exist first to measure D1's payoff);
+D4 after D1 (findings must be claims-backed before ordering matters); D5 last.
