@@ -326,7 +326,7 @@ the ledger). P2 is its own later slice (after L1 verify hardening, since questio
 planning changes what verify must check). Extraction item 5 ("covers <subject>" rows)
 is the prerequisite for P1 and is already in flight in the current fix batch.
 
-## 10. UNIFIED PIPELINE + EDITORIAL GATE — publish-standard spec (2026-07-05, user-directed)
+## 10. UNIFIED PIPELINE + EDITORIAL GATE — publish-standard spec (2026-07-05, user-directed) — ◐ ~5/11 E-rows covered by existing+today's machinery (E1/E4/E6/E11 ✅, E3/E5 partial); unifying editorial pass = L1, §12 slice 6, not started
 
 §9 described the WRITER's reference process for one task. This section (a) generalizes
 it into the unified pipeline every research-report task should run, and (b) adds the
@@ -423,7 +423,7 @@ present-but-unsatisfying → MAJOR revision opportunity naming the branch.
   seeding supersedes generic weakness mining for tasks with requirements (L4 synergy:
   repeat-failing rows escalate).
 
-## 11. FIRST-PRINCIPLES REASONING TRACE — design-level defects (2026-07-05, user-directed)
+## 11. FIRST-PRINCIPLES REASONING TRACE — design-level defects (2026-07-05, user-directed) — ⬜ D1–D5 pending (§12 slices 5/10/11/14); D-B's fractal-critic principle already delivered at finalize level via S2 ledger + verdict/gate logging
 
 §9/§10 mapped the pipeline at STAGE level. This section traces the reasoning INSIDE
 each stage as a competent human actually performs it, then names the design-level
