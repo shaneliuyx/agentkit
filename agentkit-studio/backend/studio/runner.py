@@ -2020,6 +2020,14 @@ class Runner:
         self._checkpoints = []
         self._pending_tool_args = []
         self._last_publish_issues = ()
+        # RC3: the off-topic verdict cache is process-global (studio.findings) and
+        # keyed on (normalized URL, requirement hash) — a stale verdict from an
+        # earlier run of the SAME task must not survive into this run after a
+        # refetch changed the page (the source content could have changed even
+        # though the URL/requirement pair didn't). Safe to keep warm ACROSS the
+        # epochs of a single run() call (handled below); reset only per run().
+        from studio.findings import _OFFTOPIC_VERDICT_CACHE
+        _OFFTOPIC_VERDICT_CACHE.clear()
         try:
             cfg = self._resolve_hc_config(requirement)
             self._effective_hc = cfg
@@ -4160,6 +4168,51 @@ class Runner:
                         pass
             except Exception:  # noqa: BLE001
                 pass
+            # L0 (PLAN §8): deterministic structural producer. Every generation-time
+            # diagram/code path is prose-only by contract, so structural content only
+            # ever ships through post-hoc editor retries gated on score/weak-count
+            # movement the rubric barely rewards — the root cause of "almost never
+            # ships." Mirrors rebuild_references_section below: build -> validate ->
+            # insert -> fail-open, judged on structural validity ONLY. Runs on scored
+            # AND served text, same as every other finalize pass here.
+            if self._task_requirements and base_client is not None:
+                try:
+                    from studio.structural_producer import produce_missing_structures
+
+                    _evidence_dir = _effective_ws_root / session.session_id / "evidence"
+                    _sp_text, _sp_stats = produce_missing_structures(
+                        _scored_text,
+                        self._task_requirements,
+                        client=base_client,
+                        evidence_dir=_evidence_dir if _evidence_dir.is_dir() else None,
+                        dyn_sections=getattr(self, "_dyn_subsections", None),
+                    )
+                    _dbg(f"structural_producer: {_sp_stats}")
+                    if _sp_text != _scored_text:
+                        _scored_text = _sp_text
+                        result_output = _sp_text
+                        try:
+                            if _art_file.exists():
+                                _scored_text = _write_artifact_through_sections(
+                                    session, _effective_ws_root, _scored_text, _original_requirement
+                                )
+                                result_output = _scored_text
+                                _update_active_template_from_artifact(session, _scored_text)
+                                _verified_urls = _verified_urls_from_cache(_scored_text)
+                        except Exception:  # noqa: BLE001 — write-back is best-effort
+                            pass
+                        _sp_detail = "; ".join(
+                            f"inserted {'grounded code excerpt' if k == 'code' else 'mermaid diagram'}"
+                            for k in ("code", "diagram") if _sp_stats.get(k) == "inserted"
+                        )
+                        self._emit(GateEvent(
+                            name="structural-producer",
+                            outcome="pass",
+                            detail=_sp_detail or "structural content inserted",
+                            sandboxed=True,
+                        ))
+                except Exception as _spexc:  # noqa: BLE001 — L0 must never break recording
+                    _dbg(f"structural_producer: EXCEPTION {_spexc!r}")
             # P2-8: References is a deterministic bibliography of BODY-cited URLs
             # (post-neutralize, so only surviving citations earn an entry). Runs on
             # scored AND served text so junk References prose (off-topic findings,

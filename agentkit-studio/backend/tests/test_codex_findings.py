@@ -322,7 +322,7 @@ def test_offtopic_gray_zone_goes_to_llm_judge():
     LLM verdict decides; no judge or judge error keeps the URL (fail-open)."""
     from types import SimpleNamespace
 
-    from studio.findings import _drop_offtopic_findings
+    from studio.findings import _drop_offtopic_findings, _OFFTOPIC_VERDICT_CACHE
 
     class _Judge:
         def __init__(self, verdict): self.verdict = verdict
@@ -330,6 +330,7 @@ def test_offtopic_gray_zone_goes_to_llm_judge():
             return SimpleNamespace(text=f"reasoning...\n{self.verdict}")
 
     tools._fetch_cache.clear()
+    _OFFTOPIC_VERDICT_CACHE.clear()
     req = ("Research how to build a custom agent framework with the pi-ai "
            "package, covering the agent loop, tool calling, and example code")
     # 2 requirement-word hits in ~100 tokens → density ~0.02 (gray zone).
@@ -340,6 +341,7 @@ def test_offtopic_gray_zone_goes_to_llm_judge():
 
     kept, dropped = _drop_offtopic_findings([f], req, judge=_Judge("IRRELEVANT"))
     assert kept == [] and dropped == 1
+    _OFFTOPIC_VERDICT_CACHE.clear()  # Clear cache before testing different verdict.
     kept, dropped = _drop_offtopic_findings([f], req, judge=_Judge("RELEVANT"))
     assert kept == [f] and dropped == 0
     kept, dropped = _drop_offtopic_findings([f], req, judge=None)
@@ -404,3 +406,87 @@ def test_synthesis_whole_doc_echo_salvages_own_section():
     assert new.startswith("## Key Findings")
     assert "Executive Summary" not in new
     assert "https://x.example/a" in new
+
+
+def test_offtopic_verdict_cache_avoids_duplicate_judge_calls():
+    """Memoization of offtopic verdicts prevents repeated judge.chat() calls on
+    the same URL + requirement pair within a run. Same URL + requirement should
+    hit the cache on the second call; judge.chat() called exactly once total."""
+    from types import SimpleNamespace
+
+    from studio.findings import _drop_offtopic_findings, _OFFTOPIC_VERDICT_CACHE
+
+    class _CountingJudge:
+        def __init__(self):
+            self.call_count = 0
+
+        def chat(self, messages, tools=None):
+            self.call_count += 1
+            return SimpleNamespace(text="reasoning...\nIRRELEVANT")
+
+    # Clear the cache at test start to avoid cross-test pollution.
+    _OFFTOPIC_VERDICT_CACHE.clear()
+
+    tools._fetch_cache.clear()
+    req = ("Research how to build a custom agent framework with the pi-ai "
+           "package, covering the agent loop, tool calling, and example code")
+    # 2 requirement-word hits in ~100 tokens → density ~0.02 (gray zone).
+    gray_page = ("agent example " + "lorem ipsum dolor amet consectetur "
+                 "adipiscing elit sed eiusmod tempor incididunt " * 7)
+    tools._fetch_cache["https://gray.example|"] = (gray_page, 9)
+
+    judge = _CountingJudge()
+    f1 = SimpleNamespace(url="https://gray.example")
+    f2 = SimpleNamespace(url="https://gray.example")
+
+    # First call with same URL in first finding → judge.chat() called once.
+    kept, dropped = _drop_offtopic_findings([f1], req, judge=judge)
+    assert judge.call_count == 1
+    assert kept == [] and dropped == 1
+
+    # Second call with same URL in second finding → should hit cache, no new judge.chat().
+    kept, dropped = _drop_offtopic_findings([f2], req, judge=judge)
+    assert judge.call_count == 1  # Still 1 — cached hit, no new call.
+    assert kept == [] and dropped == 1
+
+    # Verify cache now holds the key.
+    assert len(_OFFTOPIC_VERDICT_CACHE) == 1
+
+
+def test_offtopic_judge_failure_is_not_cached_and_is_retried():
+    """A judge exception must NOT be memoized (fix: the cache previously stored
+    ``None`` for a failed call, which the lookup path returned as-is — inconsistent
+    with this same failure's own ``return False`` — and suppressed retrying a
+    transient error on a later call with the identical URL+requirement)."""
+    from types import SimpleNamespace
+
+    from studio.findings import _drop_offtopic_findings, _OFFTOPIC_VERDICT_CACHE
+
+    class _FlakyJudge:
+        def __init__(self):
+            self.call_count = 0
+
+        def chat(self, messages, tools=None):
+            self.call_count += 1
+            raise RuntimeError("transient judge outage")
+
+    _OFFTOPIC_VERDICT_CACHE.clear()
+    tools._fetch_cache.clear()
+    req = ("Research how to build a custom agent framework with the pi-ai "
+           "package, covering the agent loop, tool calling, and example code")
+    gray_page = ("agent example " + "lorem ipsum dolor amet consectetur "
+                 "adipiscing elit sed eiusmod tempor incididunt " * 7)
+    tools._fetch_cache["https://gray.example|"] = (gray_page, 9)
+    f = SimpleNamespace(url="https://gray.example")
+
+    judge = _FlakyJudge()
+    kept, dropped = _drop_offtopic_findings([f], req, judge=judge)
+    assert kept == [f] and dropped == 0  # fail-open: keep on judge error
+    assert judge.call_count == 1
+    assert len(_OFFTOPIC_VERDICT_CACHE) == 0  # the failure was NOT cached
+
+    # A second call with the identical URL+requirement retries the judge instead
+    # of replaying a stale cached failure.
+    kept, dropped = _drop_offtopic_findings([f], req, judge=judge)
+    assert judge.call_count == 2
+    assert kept == [f] and dropped == 0

@@ -10,11 +10,18 @@ patch-conversion, ranking, and reducer-closure logic is cohesive and stateless
 
 from __future__ import annotations
 
+import hashlib as _hashlib
 import json as _json
 import re as _re
 import time
 
 from studio.prompts import _today_note
+
+# ponytail: Module-level cache for offtopic verdicts. Gray-zone URLs that need
+# judge evaluation are expensive (full LLM round-trip per call). Pages and
+# requirement are fixed within a run, so verdicts are safely cacheable by
+# (normalized_url, sha256_hash_of_requirement). Cap at 512 entries; clear on overflow.
+_OFFTOPIC_VERDICT_CACHE: dict[tuple[str, str], bool] = {}
 
 
 def _weakness_score(
@@ -517,6 +524,18 @@ def _offtopic_url(url: str, req_words: set[str], requirement: str = "",
     if judge is None:
         _dbg(f"offtopic[{url[:60]}]: KEEP density={density:.4f} (gray, no judge)")
         return False
+
+    # Gray zone: check memoization cache before calling judge.
+    norm_url = url.strip().rstrip('/').lower()
+    req_hash = _hashlib.sha256(requirement.encode()).hexdigest()[:12]
+    cache_key = (norm_url, req_hash)
+
+    if cache_key in _OFFTOPIC_VERDICT_CACHE:
+        verdict = _OFFTOPIC_VERDICT_CACHE[cache_key]
+        _dbg(f"offtopic[{url[:60]}]: {'DROP' if verdict else 'KEEP'} "
+             f"density={density:.4f} (gray, judge=CACHED)")
+        return verdict
+
     try:
         reply = judge.chat([{"role": "user", "content": (
             "You judge whether a fetched SOURCE PAGE is about the SPECIFIC "
@@ -532,10 +551,21 @@ def _offtopic_url(url: str, req_words: set[str], requirement: str = "",
         )}])
         matches = _OFFTOPIC_VERDICT_RE.findall(getattr(reply, "text", "") or "")
         verdict = matches[-1].upper() == "IRRELEVANT" if matches else False
+
+        # Cache the verdict before returning.
+        if len(_OFFTOPIC_VERDICT_CACHE) >= 512:
+            _OFFTOPIC_VERDICT_CACHE.clear()
+        _OFFTOPIC_VERDICT_CACHE[cache_key] = verdict
+
         _dbg(f"offtopic[{url[:60]}]: {'DROP' if verdict else 'KEEP'} "
              f"density={density:.4f} (gray, judge={'IRRELEVANT' if verdict else 'RELEVANT/unparsed'})")
         return verdict
     except Exception as exc:  # noqa: BLE001 — relevance judging is best-effort; keep on failure
+        # Do NOT cache a failure: only a computed verdict may be memoized. A cached
+        # ``None`` was previously returned as-is by the lookup above (line ~534),
+        # inconsistent with this except's own ``return False`` for the SAME failure —
+        # a transient judge error on the first call could silently flip a later
+        # call's return type/value. A failed judge call should simply be retried.
         _dbg(f"offtopic[{url[:60]}]: KEEP density={density:.4f} (gray, judge error {type(exc).__name__})")
         return False
 
