@@ -1471,20 +1471,33 @@ def _run_editor_pass(
 
     feedback = ""  # set only when the PRIOR round reverted; ingested into this round's fix-turns
     last_weaknesses: list[str] = []  # always the FRESH list matching the current scored_text
-    # Only fires for the rare task with an outstanding OR-sibling opportunity — the
-    # gate keeps the recount calls off the normal path entirely.
-    _opp_active = bool(quality_opportunities) and opportunity_recount is not None
     # Structural opportunities (a diagram/table/code example — entry 172) are
     # routed to the bounded ``_editor_structural_retry`` below instead of the
     # normal single-shot opportunity turn; plain/decorative ones keep the
     # existing soft "only if cheap" turn via ``_editor_drive_round`` unchanged.
     # Classification is regex-fast-path + LLM-fallback (``_is_structural_opportunity``)
     # so it generalizes beyond any fixed keyword vocabulary — computed ONCE here,
-    # not per round, since ``quality_opportunities`` is a static list per epoch.
-    _structural_opps: list[str] = []
+    # not per round, since the lists are static per epoch.
+    #
+    # Structural HARD issues route to the retry too (run 1532): an OR group
+    # where NO branch was met produces a hard issue and EMPTY opportunities, so
+    # the only machinery able to PRODUCE the missing code/diagram never fired —
+    # the exact "routing accident of task phrasing" the retry exists to close
+    # (PLAN-generic-component-assignment §0). The marker is our own
+    # _hard_issue_str format, not task vocabulary. Non-structural hard issues
+    # stay solely in the normal weakness rounds — no double-handling.
+    _structural_opps: list[str] = [
+        _i for _i in (extra_issues or [])
+        if "compliance check: NOT_SATISFIED" in _i
+        and _is_structural_opportunity(base_client, _i)
+    ]
     _plain_opps: list[str] = []
+    _opp_active = (
+        bool(quality_opportunities or _structural_opps)
+        and opportunity_recount is not None
+    )
     if _opp_active:
-        for _o in quality_opportunities:
+        for _o in quality_opportunities or []:
             (_structural_opps if _is_structural_opportunity(base_client, _o) else _plain_opps).append(_o)
     for _round in range(1, max_rounds + 1):
         cur_score, cur_issues = _editor_scored_issues(
@@ -3916,10 +3929,14 @@ class Runner:
         def _recount(text: str) -> int | None:
             try:
                 from studio.requirement_compliance import requirement_compliance_issues
-                _, _, _opps = requirement_compliance_issues(
+                # Hard misses count too (run 1532): the structural retry's accept
+                # rule is "unmet requirement branches went DOWN" — a retry that
+                # fixes a fully-unmet OR group must register as progress even
+                # though no OPPORTUNITY existed (all branches were hard misses).
+                _, _hard, _opps = requirement_compliance_issues(
                     base_client, self._task_requirements or [], text or "", strict=True
                 )
-                return len(_opps)
+                return len(_hard) + len(_opps)
             except Exception:  # noqa: BLE001 — check unavailable → UNKNOWN, never a spurious 0
                 return None
         return _recount
@@ -4653,7 +4670,8 @@ class Runner:
                     quality_opportunities=self._epoch_quality_opportunities,
                     opportunity_recount=(
                         self._make_opportunity_recount(base_client)
-                        if self._epoch_quality_opportunities
+                        if (self._epoch_quality_opportunities
+                            or self._epoch_compliance_issues)
                         else None
                     ),
                     # A2 diagram grounding uses the pipeline's BGE-M3 embedder for the
