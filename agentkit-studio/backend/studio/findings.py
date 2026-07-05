@@ -536,6 +536,11 @@ def _parse_findings(text: str) -> list:
         if not url.lower().startswith('http'):
             continue  # not a sourced finding → not content
         quote = _f('QUOTE').strip().strip('"')
+        # Escape-flood guard (live: a QUOTE carrying hundreds of literal "\n"
+        # sequences was woven verbatim — ~4KB of backslash garbage in Evidence
+        # and Analysis). Models emit JSON-escaped newlines as literal text;
+        # collapse escape runs to a space, then collapse whitespace.
+        quote = " ".join(_re.sub(r"(?:\\+[ntr])+", " ", quote).split())
         quote_verified = bool(quote) and _quote_in_cache(quote)
         grounded = (not cache_active) or _url_in_cache(url) or quote_verified
         if cache_active and not grounded:

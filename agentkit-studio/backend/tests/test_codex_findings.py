@@ -298,3 +298,19 @@ def test_offtopic_llm_patch_dropped_by_source_page_vocabulary():
     assert kept == []
     kept = _sanitize_llm_patches(art, [_p("https://never.fetched/x")], req)
     assert len(kept) == 1
+
+
+def test_quote_escape_flood_normalized_at_parse():
+    """Live defect (s_5190ea1601a8): a QUOTE with hundreds of literal \\n escape
+    sequences was woven verbatim (~4KB of backslash garbage). Escape runs are
+    collapsed to whitespace at parse time."""
+    from studio.findings import _parse_findings
+
+    tools._fetch_cache.clear()  # empty cache → grounding fail-open, finding kept
+    flood = "send" + "\\n" * 300 + "end"
+    draft = (f"RESEARCH_FINDING:\nARTICLE_TITLE: T\nURL: https://x.example/a\n"
+             f"PATCH_TARGET: ## Evidence and Analysis\nQUOTE: {flood}\nWHY: w\n")
+    fs = _parse_findings(draft)
+    assert len(fs) == 1
+    assert "\\n" not in fs[0].quote
+    assert fs[0].quote == "send end"
