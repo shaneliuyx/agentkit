@@ -22,7 +22,7 @@ cold run records (refactoring during a measurement run muddies both).
 | 11 | Design workstreams D1–D5 | ⬜ — D-B's fractal-critic principle partially delivered via S2 ledger + gate logging |
 | 12 | Unified execution order | ACTIVE tracker — slices 1–4 committed; current work = §14 slate |
 | 13 | Execution log | living log — one row per committed fix with measured result |
-| 14 | Attempt-8 results + attempt-9 slate | item 1 instrumented (trace armed) · items 2–4 ✅ committed · items 5–8 queued · attempt 9 launching |
+| 14 | Attempt-8 results + attempt-9 slate | items 2–4 ✅ committed · attempt 9 IN FLIGHT: fence trace live (fences=2 at finalize entry), covers-Craft stable NOT_SATISFIED after gate+wobble, covers-gate proximity ceiling observed (title+scope mentions near a Pi URL pass the heuristic — P1 ledger is the honest fix) · items 5–8 queued |
 
 ## 0. Objective & success metric
 
