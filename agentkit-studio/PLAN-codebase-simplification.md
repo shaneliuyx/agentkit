@@ -637,5 +637,13 @@ lint NAMES when changed=False).
 8. AST swallowed-content lint via markdown-it-py (already a transitive dep) — catches
    the giant-fence-swallows-headings class generically.
 
-Lineage: 0.145 → 0.304 → 0.657 → 0.433 → 0.41 (decline driven by the erasure bug +
-uncovered subject; L3 gate keeps v5 seed-eligible — median floor not tripped).
+Lineage: 0.145 → 0.304 → 0.657 → 0.433 → 0.41 → **v6 0.4949 (attempt 9): FIRST
+DIAGRAM EVER RECORDED** (explanatory-prose fix cleared _accept; survived every
+downstream pass). Attempt-9 trace named BOTH erasers: synthesize_readability
+(fences 2→0 — accept guard checks URLs/overlap/ratio but not fences) and the L0
+section write-through on duplicate-section docs (4→2 — code block died there;
+revert guard committed). Residual lints finally named: five duplicate ## sections +
+content-after-References — ONE disease behind the swallowed docs, deleted
+subsections, and write-through erasure. A+B bundle (synth fence guard + duplicate
+birth-fix + merge repair) in build; attempt 10 = first run where structural content
+should survive end-to-end.
