@@ -127,7 +127,7 @@ def test_verification_flags_unsatisfied_mandatory_requirement() -> None:
     penalty, hard, opps = requirement_compliance_issues(
         client,
         ["include example code", "include a design architecture diagram"],
-        "Here is a report with a python code block but no diagram at all." * 5,
+        "Here is a report.\n```python\nprint('hi')\n```\nNo diagram at all.\n" * 5,
     )
     assert penalty == 0.5
     assert len(hard) == 1
@@ -151,7 +151,7 @@ def test_or_group_satisfied_by_one_branch_is_opportunity_not_penalty() -> None:
     penalty, hard, opps = requirement_compliance_issues(
         client,
         [["include example code", "include design architecture"]],
-        "A report with a real ```python``` code block and no architecture diagram." * 5,
+        "A report with real code.\n```python\nrun()\n```\nNo architecture diagram.\n" * 5,
     )
     assert penalty == 0.0
     assert hard == []
@@ -189,8 +189,8 @@ def test_diagram_shaped_or_branch_satisfied_without_mermaid_becomes_opportunity(
     penalty, hard, opps = requirement_compliance_issues(
         client,
         [["include example code", "include design architecture"]],
-        "Has a ```python``` code block and a Modular Architecture Overview "
-        "table with prose about the agentic loop. No diagram anywhere." * 3,
+        "Real code:\n```python\nloop()\n```\nand a Modular Architecture Overview "
+        "table with prose about the agentic loop. No diagram anywhere.\n" * 3,
     )
     assert penalty == 0.0  # OR still honestly satisfied by the code branch
     assert hard == []
@@ -207,7 +207,7 @@ def test_diagram_shaped_branch_satisfied_with_real_mermaid_is_not_downgraded() -
     penalty, hard, opps = requirement_compliance_issues(
         client,
         [["include example code", "include design architecture"]],
-        "Has code. ```mermaid\ngraph TD\nA-->B\n``` describes the architecture." * 3,
+        "Code:\n```python\nx()\n```\n```mermaid\ngraph TD\nA-->B\n```\narchitecture.\n" * 3,
     )
     assert penalty == 0.0
     assert hard == []
@@ -227,6 +227,49 @@ def test_mandatory_diagram_requirement_satisfied_without_mermaid_is_hard_issue()
     assert penalty == 1.0
     assert len(hard) == 1
     assert opps == []
+
+
+def test_mandatory_code_requirement_satisfied_without_fence_is_hard_issue() -> None:
+    """P2-8b (run 1531): 'include example code' scored SATISFIED on prose
+    DESCRIBING code with zero fenced blocks. A code-shaped SATISFIED verdict must
+    be deterministically downgraded when no real (non-mermaid) fence exists."""
+    client = _ScriptedVerifier("REQUIREMENT 1: SATISFIED")
+    penalty, hard, opps = requirement_compliance_issues(
+        client,
+        [["include example code"]],
+        "A minimal setup can be achieved using the pi-ai package to initialize "
+        "a model and perform completions, e.g. completeSimple." * 3,
+    )
+    assert penalty == 1.0
+    assert len(hard) == 1
+    assert "fenced" in hard[0]
+    assert opps == []
+
+
+def test_code_requirement_with_real_fence_is_not_downgraded() -> None:
+    """No over-triggering: a real fenced block (labeled or not) keeps SATISFIED."""
+    client = _ScriptedVerifier("REQUIREMENT 1: SATISFIED")
+    penalty, hard, opps = requirement_compliance_issues(
+        client,
+        [["include example code"]],
+        "Setup:\n```ts\nconst m = completeSimple('claude')\n```\ndone.\n" * 3,
+    )
+    assert penalty == 0.0
+    assert hard == []
+    assert opps == []
+
+
+def test_mermaid_only_artifact_does_not_count_as_code_fence() -> None:
+    """A mermaid diagram is not code: a code-shaped SATISFIED verdict on a
+    mermaid-only artifact is still downgraded."""
+    client = _ScriptedVerifier("REQUIREMENT 1: SATISFIED")
+    penalty, hard, opps = requirement_compliance_issues(
+        client,
+        [["include a code snippet"]],
+        "Only a diagram:\n```mermaid\ngraph TD\nA-->B\n```\nprose.\n" * 3,
+    )
+    assert penalty == 1.0
+    assert len(hard) == 1
 
 
 def test_non_diagram_shaped_requirement_is_never_downgraded() -> None:
@@ -336,7 +379,7 @@ def test_strict_mode_raises_on_partial_parse_of_or_branches() -> None:
     # One OR group, TWO branches — the verifier answers branch 1 only, DROPS branch 2.
     client = _ScriptedVerifier("REQUIREMENT 1: SATISFIED")
     reqs = [["include example code", "include a design architecture"]]
-    art = "A report with a real ```python``` code block." * 5
+    art = "A report with real code.\n```python\ngo()\n```\n" * 5
 
     # CONTROL (default strict=False): behavior is UNCHANGED — no raise. The dropped
     # branch is silently skipped per-group, the satisfied branch carries the OR

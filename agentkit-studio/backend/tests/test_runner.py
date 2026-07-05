@@ -825,7 +825,8 @@ def test_per_phase_clause_lists_only_still_outstanding() -> None:
     # Group 0 satisfied via branch 1 (branch 2 unmet → opportunity); group 1 satisfied.
     reply = ("REQUIREMENT 1: SATISFIED\nREQUIREMENT 2: NOT_SATISFIED\n"
              "REQUIREMENT 3: SATISFIED")
-    clause = _per_phase_compliance_repair_clause(_Verifier(reply), reqs, "some doc text")
+    clause = _per_phase_compliance_repair_clause(
+            _Verifier(reply), reqs, "doc with code:\n```python\nrun()\n```\n")
     assert "STATED REQUIREMENTS NOT YET ADDRESSED" in clause
     # Group 1 is satisfied → its requirement is NOT re-mentioned as a hard miss.
     assert "none of the stated alternatives" not in clause

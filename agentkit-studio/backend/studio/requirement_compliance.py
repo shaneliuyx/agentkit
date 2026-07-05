@@ -83,6 +83,35 @@ _DIAGRAM_SHAPED_RE = re.compile(
 )
 _MERMAID_BLOCK_RE = re.compile(r"```mermaid\b")
 
+#: Code-shaped requirement phrasing gets the same stricter bar (P2-8b): run 1531
+#: scored "include example code" SATISFIED on prose DESCRIBING code — zero fenced
+#: blocks in the artifact while evidence/ held actual ``.ts`` source. Same
+#: keyword-narrow philosophy as the diagram gate: only fires when the user
+#: literally asked for code.
+_CODE_SHAPED_RE = re.compile(
+    r"(?i)\b(?:(?:example|sample|source|implementation)\s+code"
+    r"|code\s+(?:example|sample|snippet|block|implementation)"
+    r"|snippets?)\b"
+)
+_CODE_REQUIRED_NOTE = (
+    " (real code — a fenced ``` code block — is required; prose describing the "
+    "code does not satisfy this)"
+)
+
+
+def _has_code_fence(text: str) -> bool:
+    """True when the artifact contains a fenced block that is NOT mermaid.
+
+    Fence lines alternate opener/closer; an opener whose info-string is not
+    ``mermaid`` counts, labeled or not — so an unlabeled real code block passes
+    and a mermaid diagram alone does not."""
+    fences = re.findall(r"(?m)^\s*```([^\n`]*)$", text or "")
+    return any(
+        not info.strip().lower().startswith("mermaid")
+        for i, info in enumerate(fences)
+        if i % 2 == 0
+    )
+
 
 class ComplianceCheckUnavailable(Exception):
     """Raised (only in ``strict=True``) when a compliance check could not actually
@@ -182,8 +211,7 @@ _DIAGRAM_REQUIRED_NOTE = (
 )
 
 
-def _hard_issue_str(branches: list[str], *, downgraded: bool = False) -> str:
-    note = _DIAGRAM_REQUIRED_NOTE if downgraded else ""
+def _hard_issue_str(branches: list[str], *, note: str = "") -> str:
     if len(branches) == 1:
         return (
             f"stated task requirement not satisfied: '{branches[0]}'{note} "
@@ -197,8 +225,7 @@ def _hard_issue_str(branches: list[str], *, downgraded: bool = False) -> str:
     )
 
 
-def _opportunity_str(branch: str, *, downgraded: bool = False) -> str:
-    note = _DIAGRAM_REQUIRED_NOTE if downgraded else ""
+def _opportunity_str(branch: str, *, note: str = "") -> str:
     return (
         f"Explicit alternative not included: {branch}{note} (an OR-requirement already "
         f"satisfied by another branch — optional polish, not a requirement miss)"
@@ -305,17 +332,25 @@ def requirement_compliance_issues(
     # overrides the boolean value of specific already-parsed verdicts before they
     # feed group aggregation, so a mandatory diagram-shaped requirement correctly
     # becomes a hard issue and an OR-sibling correctly becomes a quality opportunity.
-    diagram_downgraded: set[int] = set()
+    downgrade_note: dict[int, str] = {}
     if not _MERMAID_BLOCK_RE.search(artifact_text or ""):
         for fi, (_, branch) in enumerate(flat, 1):
             if verdicts.get(fi) and _DIAGRAM_SHAPED_RE.search(branch):
                 verdicts[fi] = False
-                diagram_downgraded.add(fi)
+                downgrade_note[fi] = _DIAGRAM_REQUIRED_NOTE
+    # Same deterministic gate for code-shaped branches (P2-8b): a SATISFIED verdict
+    # on "include example code" is only trusted if a real (non-mermaid) fenced
+    # block exists — prose about code inflated run 1531's compliance.
+    if not _has_code_fence(artifact_text or ""):
+        for fi, (_, branch) in enumerate(flat, 1):
+            if verdicts.get(fi) and _CODE_SHAPED_RE.search(branch):
+                verdicts[fi] = False
+                downgrade_note[fi] = _CODE_REQUIRED_NOTE
     # Aggregate branch verdicts back per group (only branches that got a verdict).
-    per_group: dict[int, list[tuple[str, bool, bool]]] = {}
+    per_group: dict[int, list[tuple[str, bool, str]]] = {}
     for fi, (gi, branch) in enumerate(flat, 1):
         if fi in verdicts:
-            per_group.setdefault(gi, []).append((branch, verdicts[fi], fi in diagram_downgraded))
+            per_group.setdefault(gi, []).append((branch, verdicts[fi], downgrade_note.get(fi, "")))
     hard_issues: list[str] = []
     quality_opportunities: list[str] = []
     counted = 0
@@ -330,12 +365,12 @@ def requirement_compliance_issues(
             # is an optional opportunity — NEVER a hard miss.
             if len(branches) > 1:
                 quality_opportunities.extend(
-                    _opportunity_str(branch, downgraded=downgraded)
-                    for branch, sat, downgraded in bv if not sat
+                    _opportunity_str(branch, note=note)
+                    for branch, sat, note in bv if not sat
                 )
         else:
             unsatisfied += 1
-            group_downgraded = any(downgraded for _, _, downgraded in bv)
-            hard_issues.append(_hard_issue_str(branches, downgraded=group_downgraded))
+            group_note = next((n for _, _, n in bv if n), "")
+            hard_issues.append(_hard_issue_str(branches, note=group_note))
     penalty = round(unsatisfied / counted, 4) if counted else 0.0
     return penalty, hard_issues, quality_opportunities
