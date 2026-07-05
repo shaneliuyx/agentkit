@@ -259,7 +259,10 @@ class TestSelfImprovingE2E:
     def _plan_to_runtime(tmp_path: Path):
         from agentkit.planner.core import plan, plan_to_graph_config
 
-        plan_obj = plan("fetch data and parse it")
+        # Clause-boundary form: d5f21c3 deliberately narrowed the decomposer to
+        # split only on ", and " / "; and " (bare " and " caused duplicate phases
+        # on the Pi/Craft runs), so the old bare-"and" fixture now yields 1 step.
+        plan_obj = plan("fetch the data from the source, and parse it into records")
         assert len(plan_obj.steps) >= 2, plan_obj.steps
         dag = plan_to_graph_config(plan_obj)
         assert "nodes" in dag and "edges" in dag, dag
