@@ -520,3 +520,40 @@ oscillating between defect and patch.
 Sequencing: D3 immediately (rides anywhere); D2 with the P1 slice; D1 as its own
 major slice after L1 (the editor needs to exist first to measure D1's payoff);
 D4 after D1 (findings must be claims-backed before ordering matters); D5 last.
+
+## 12. UNIFIED EXECUTION ORDER (2026-07-05 late — supersedes §7, §9.3, §10.5-seq, §11.4-seq)
+
+Reconciles the S (simplify), L (loop-health), P (coverage), E (editorial rows),
+D (design) series into ONE order. Two live-evidence adjustments folded in:
+
+- **L3 ELEVATED** (was after P1): manual lineage surgery has now been needed TWICE in
+  one day (run-1531 stub backup; crashed v4 with score 0.0 from the oMLX outage —
+  `latest_with_content` would have seeded v5 from a 4K crash stub). Recurring manual
+  surgery = the disease L3 cures; it is small (task_runs.py only) and blocks nothing.
+- **L1 gains an evidenced item**: a run that CRASHES must record status
+  "crashed/unscored", never a numeric score (the 0.0 both poisoned lineage seeding
+  and would poison any cross-run stats). This is the "verified bad ≠ could not
+  verify" rule applied to the run record itself.
+
+Order (each step: suite green → reviewer pass → commit; cold E2E where marked):
+
+| # | Slice | Contents | Status |
+|---|-------|----------|--------|
+| 1 | S1 | textutil consolidation | DONE (committed) |
+| 2 | EXTRACT | AND/OR + subject-coverage extraction fixes + L0 observability | DONE (committed); live verify in flight (attempt 7 retry) |
+| 3 | S2 (=L2) | finalize pass-list + dead-pass detector | IN FLIGHT (producer) → cold E2E compare vs diag19 |
+| 4 | L3 | lineage immune system: seed-eligibility gate (lint + ≥1 citation + score floor + NOT crashed) | next after S2 commits |
+| 5 | P1+P3+P4+D2+D3 | subject ledger slice: coverage ledger, disambiguation probe, not-found honesty, search-step critic, assumption channel | one slice — all ride the ledger |
+| 6 | L1 (=E-wiring) | editorial pass: wire existing E1/E4/E6/E11 + new E2/E5 + crashed-status rule + judge-model scorer | cold E2E after |
+| 7 | S3 | guard primitives module | |
+| 8 | E7 | dyn-section birth certificate + requirement-conditioned check | |
+| 9 | L4 | repeat-weakness escalation (uses S2 pass ledger + L1 row evidence) | |
+| 10 | D1 | claims-with-provenance layer | major slice |
+| 11 | D4 + E8/E9 | write-order DAG (summary-last) + consistency judges | D4 prevents, E8 detects |
+| 12 | P2 | question-first planning | after L1 changes what verify checks |
+| 13 | L5+S5 | economics: verdict memoization (done), rubric memo, cache index, per-run cost line | needs timing numbers |
+| 14 | D5 | belief/uncertainty state | north star, last |
+
+Standing rules unchanged: no hardcoding (test-enforced), no behavior change inside
+refactor slices, subagent build + separate reviewer, codex adversarial review before
+any push, kill/fix/retest on live defects.
