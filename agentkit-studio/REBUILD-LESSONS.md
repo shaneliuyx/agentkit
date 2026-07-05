@@ -86,3 +86,35 @@ none of them.
   12-branch compliance rounds in one editor phase.
 - oMLX: pre-warm the embedder before gemma runs or the memory enforcer evicts the
   chat model mid-request and the server aborts.
+
+## 7. Second sweep — older history (commits 61–194, pre-today eras)
+
+- **Depth relaxation was already tried and under-delivered ONCE**: f6f6c65 "relax
+  reducer depth caps to cure report shallowness" needed 9d30b13 "make reducer depth
+  relaxations actually deliver" and the ceiling still survived to today (ccabed3
+  names the three roots: findings.py 268/327/333). Task #38 MUST read those commits
+  first — a third blind relaxation is the exact repeat-mistake this doc exists to
+  prevent. research_first sidesteps it by not writing through findings patches at
+  all (sections synthesize from claims directly).
+- **Duplicate phases had TWO causes**: goal injection into planner input (1cb702f,
+  the real one — keep the Goal OUT of planner/decomposer input) and bare-"and"
+  splitting (d5f21c3). Fix both classes, not the first one found.
+- Episodic memory can poison prompts with past refusals (9a69327) — never feed
+  raw failure text back as context.
+- Completion caps truncated artifacts mid-report (710b1fb) — size output budgets
+  to the artifact, and reducers must preserve source URLs under pressure.
+- Spokes once PLANNED instead of EXECUTING (21d82d3) — worker prompts must demand
+  the artifact content itself, never a plan for it; cache-as-oracle for citations.
+- Strip assistant preamble at EVERY surface (artifact + displayed + stored:
+  75e2a2e, 684c040) — meta-prose leaks anywhere text is persisted.
+- Partial-write hazard: roll back the on-disk artifact when a mid-write sync fails
+  (8f919f4) — stage-boundary writes must be atomic-or-reverted.
+- Refactor scope-loss killed the editor pass silently for days (d5ebe76: an
+  extraction dropped judge_client from scope) — after ANY extraction refactor,
+  verify each formerly-inline variable is actually threaded (S2's ledger now
+  guards this class at runtime).
+- Diagram grounding: embedding-cosine guards were INERT (7a7f049 replaced with
+  literal-token grounding); reject edgeless diagrams (843f a44); few-shot
+  adjudicator is the settled technique for presentation detection (16dd8ac).
+- Cap structured LLM control outputs (ffbaafc) — unbounded JSON control replies
+  wedge parsing.
