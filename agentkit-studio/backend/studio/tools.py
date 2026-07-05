@@ -203,6 +203,20 @@ def _url_in_cache(url: str) -> bool:
     return False
 
 
+def _page_for_url(url: str) -> str:
+    """Cached page text for ``url`` ("" when never fetched). Same tolerant key
+    match as ``_url_in_cache``. Lets a caller judge a finding by its SOURCE —
+    the fetched page cannot self-rationalize the way finding prose can."""
+    u = (url or "").strip().rstrip("/").lower()
+    if not u:
+        return ""
+    for k, (content, _n) in _fetch_cache.items():
+        ck = k.split("|", 1)[0].strip().rstrip("/").lower()
+        if ck and (u == ck or u in ck or ck in u):
+            return str(content or "")
+    return ""
+
+
 def _fetch_page(url: str) -> tuple[str, tuple[str, int] | None]:
     """Pure fetch for one URL → ``(cache_key, page | None)``; NEVER touches ``_fetch_cache``.
 

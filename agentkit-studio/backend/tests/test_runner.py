@@ -2015,7 +2015,8 @@ def test_cold_final_step_gets_scoring_weaknesses_and_evidence_paths(tmp_path, mo
 
     monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path))
     _fetch_cache.clear()
-    _fetch_cache["https://example.com/a|"] = ("Cached page body only in source file", 36)
+    _fetch_cache["https://example.com/a|"] = (
+        "Cached page about research report quality evidence, body only in source file", 36)
 
     prompts: list[str] = []
 
@@ -2105,7 +2106,8 @@ def test_seeded_final_step_gets_scoring_weaknesses_and_evidence_paths(tmp_path, 
         result_text="# Seed Report\n\n## Executive Summary\nPrior sourced report.",
         config={"auto_improve": True, "max_epochs": 1},
     ))
-    _fetch_cache["https://example.com/a|"] = ("Cached page body only in source file", 36)
+    _fetch_cache["https://example.com/a|"] = (
+        "Cached page about research report quality evidence, body only in source file", 36)
 
     prompts: list[str] = []
 

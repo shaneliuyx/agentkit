@@ -224,3 +224,51 @@ def test_neutralize_fail_open_preserved_but_verified_set_still_strips():
     # A real verified set still strips an unlisted (fabricated) URL.
     out = neutralize_unverified_urls(text, ["http://other.example/"])
     assert "http://real.example" not in out
+
+
+# ---------------------------------------------------------------------------
+# Topical-relevance floor — grounding is not relevance (run 1531 π-Wikipedia)
+# ---------------------------------------------------------------------------
+
+def test_offtopic_finding_dropped_by_source_page_vocabulary():
+    """A genuinely-fetched but off-topic source (the π math page) is dropped:
+    its PAGE shares ~none of the requirement's content vocabulary. The finding's
+    own self-rationalizing prose cannot save it — the page is the judge."""
+    from types import SimpleNamespace
+
+    from studio.findings import _drop_offtopic_findings
+
+    tools._fetch_cache.clear()
+    req = ("Research how to build a custom agent framework with the pi-ai "
+           "package, covering the agent loop, tool calling, and example code")
+    tools._fetch_cache["http://good.example|"] = (
+        "Building a custom agent framework: the agent loop calls each tool, "
+        "the pi-ai package provides completions, example code included.", 9)
+    tools._fetch_cache["http://pi.wikipedia|"] = (
+        "The number pi is a mathematical constant, the ratio of a circle's "
+        "circumference to its diameter, used in geometry and trigonometry.", 9)
+    good = SimpleNamespace(url="http://good.example")
+    junk = SimpleNamespace(url="http://pi.wikipedia")
+    kept, dropped = _drop_offtopic_findings([good, junk], req)
+    assert kept == [good]
+    assert dropped == 1
+
+
+def test_offtopic_filter_fails_open_on_missing_signal():
+    """No cached page → keep (the grounding oracle owns fabrication). A
+    requirement too thin to carry vocabulary signal → no-op entirely."""
+    from types import SimpleNamespace
+
+    from studio.findings import _drop_offtopic_findings
+
+    tools._fetch_cache.clear()
+    f = SimpleNamespace(url="http://never.fetched")
+    req = ("Research how to build a custom agent framework with the pi-ai "
+           "package, covering the agent loop, tool calling, and example code")
+    kept, dropped = _drop_offtopic_findings([f], req)
+    assert kept == [f] and dropped == 0
+
+    tools._fetch_cache["http://pi.wikipedia|"] = ("circle ratio mathematics", 9)
+    j = SimpleNamespace(url="http://pi.wikipedia")
+    kept, dropped = _drop_offtopic_findings([j], "do it")
+    assert kept == [j] and dropped == 0

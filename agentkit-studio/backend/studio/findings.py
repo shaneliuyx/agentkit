@@ -212,6 +212,7 @@ def _make_section_reducer(
     evidence_fn=None,
     requirement_clause: str = "",
     timing_sink=None,
+    requirement: str = "",
 ):
     """Build the section-aware STAR reducer closure (DESIGN §4.5; Lever 3).
 
@@ -348,6 +349,10 @@ def _make_section_reducer(
         # F6: same-URL merge + scaffolding strip + per-section density cap. Thins the wall
         # at its source so _findings_to_patches emits ~1 woven sentence per real source.
         findings, _cstats = consolidate_findings(findings, norm_url=_normalize_url)
+        # Topical-relevance floor (run 1531): a genuinely-fetched, quote-verified
+        # π-Wikipedia note self-rationalized its way into the body — grounding is
+        # not relevance. Judged against the SOURCE PAGE, which cannot rationalize.
+        findings, n_offtopic = _drop_offtopic_findings(findings, requirement)
         floor_patches = _findings_to_patches(findings)
         patches = llm_patches + floor_patches
         if not patches:
@@ -372,6 +377,7 @@ def _make_section_reducer(
         merged = _apply_ranking(rr.text, findings)
         _dbg(f"reduce drafts={len(drafts)} raw_findings={raw_findings} "
              f"llm={len(llm_patches)} floor={len(floor_patches)} dedup={n_dedup} "
+             f"offtopic={n_offtopic} "
              f"doc_capped={n_doc_capped} url_merged={_cstats['url_merged']} capped={_cstats['capped']} "
              f"applied_delta={len(rr.text) - len(art_block)} conflicts={len(rr.conflicts)} "
              f"ranked_delta={len(merged) - len(rr.text)}")
@@ -431,6 +437,42 @@ def _sanitize_llm_patches(artifact_text: str, patches: list) -> list:
         out.append(p)
         seen_by_anchor[anchor].update(urls)
     return out
+
+
+#: Minimum fraction of the requirement's content vocabulary a finding's SOURCE
+#: PAGE must share to be woven into the report. Calibration anchor (run 1531):
+#: the Pi-Wikipedia math page shares ~0 of an agent-framework requirement's
+#: words; a genuine framework article shares well over a third. Wide margin on
+#: both sides; fail-open when the page was never cached or the requirement is
+#: too thin to carry signal.
+_OFFTOPIC_MIN_OVERLAP = 0.15
+_OFFTOPIC_MIN_REQ_WORDS = 8
+
+
+def _drop_offtopic_findings(findings: list, requirement: str) -> tuple[list, int]:
+    """Drop findings whose cached source page shares almost none of the
+    requirement's content vocabulary (grounding is not relevance — run 1531's
+    π-Wikipedia note was genuinely fetched AND quote-verified, and its finding
+    prose self-rationalized the topic link; the source page cannot do that).
+    Structural, no phrase lists. Fail-open on any missing signal."""
+    from studio.tools import _page_for_url
+
+    req_words = {w for w in _re.findall(r"[a-z]{4,}", (requirement or "").lower())}
+    if len(req_words) < _OFFTOPIC_MIN_REQ_WORDS:
+        return findings, 0
+    kept: list = []
+    dropped = 0
+    for f in findings:
+        page = _page_for_url(getattr(f, "url", "") or "")
+        if not page:
+            kept.append(f)  # never cached → cannot judge → keep (grounding oracle owns fabrication)
+            continue
+        page_words = set(_re.findall(r"[a-z]{4,}", page.lower()))
+        if len(req_words & page_words) / len(req_words) >= _OFFTOPIC_MIN_OVERLAP:
+            kept.append(f)
+        else:
+            dropped += 1
+    return kept, dropped
 
 
 def _parse_findings(text: str) -> list:

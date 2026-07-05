@@ -2511,6 +2511,7 @@ class Runner:
             outputs=outputs,
             gate_events=gate_events,
             _reducer_gaps=_reducer_gaps,
+            base_requirement=_base_requirement,
         )
 
         # budget gauge
@@ -2979,6 +2980,7 @@ class Runner:
         _reducer_gaps: list[str],
         _seed_cross_task: bool = False,
         _seed_topic: str = "",
+        base_requirement: str = "",
     ) -> tuple[bool, str, str]:
         """Per-phase execution loop + the post-loop atomic patch-apply
         (DESIGN §3 / §5 / §11). Drives each phase through ``run_plan`` on a single-step
@@ -3442,6 +3444,10 @@ class Runner:
                     ),
                     requirement_clause=_requirement_clause,
                     timing_sink=self._phase_time_add,  # T1: reducer + prefetch timing
+                    # Topical floor for findings: the CLEAN task text, not the
+                    # iteration-prefixed `requirement` — the prefix boilerplate
+                    # dilutes the vocabulary overlap ~10x and false-drops sources.
+                    requirement=base_requirement,
                 )
 
             try:
