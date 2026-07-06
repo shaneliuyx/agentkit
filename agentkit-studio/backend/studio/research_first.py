@@ -100,15 +100,26 @@ def _is_markup_dense_quote(quote: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _extract_subjects(groups: list[list[str]]) -> list[str]:
+_SUBJECT_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _norm_subject_text(text: str) -> str:
+    return _SUBJECT_NORMALIZE_RE.sub(" ", text.lower()).strip()
+
+
+def _extract_subjects(groups: list[list[str]], *, requirement: str = "") -> list[str]:
     """Named subjects from "covers <subject>" branches (extraction item 5),
     order-preserving, deduped. Empty when the task names no specific subject."""
     subjects: list[str] = []
+    whole_task = _norm_subject_text(_base_task_text(requirement)) if requirement else ""
     for group in groups:
         for branch in group:
             if not _COVERS_SHAPED_RE.search(branch):
                 continue
             subject = _COVERS_SHAPED_RE.sub("", branch, count=1).strip(" :.-")
+            if whole_task and _norm_subject_text(subject) == whole_task:
+                dbg(f"research_first FRAME: dropped whole-task subject branch={branch!r}")
+                continue
             if subject and subject.lower() not in (s.lower() for s in subjects):
                 subjects.append(subject)
     return subjects
@@ -1509,7 +1520,7 @@ def generate_research_first(
     # 1. FRAME
     groups = extract_requirements(client, requirement)
     title = _derive_title_from_requirement(requirement)
-    subjects = _extract_subjects(groups) or [title]
+    subjects = _extract_subjects(groups, requirement=requirement) or [title]
     code_needed = any(_CODE_SHAPED_RE.search(b) for g in groups for b in g)
     diagram_needed = any(_DIAGRAM_SHAPED_RE.search(b) for g in groups for b in g)
     sections = _build_sections(groups)

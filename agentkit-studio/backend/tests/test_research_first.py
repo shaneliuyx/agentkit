@@ -66,6 +66,16 @@ def test_frame_subjects_empty_when_no_subject_named() -> None:
     assert rf._extract_subjects([["include a diagram"]]) == []
 
 
+def test_frame_drops_whole_task_subject_coverage_branch() -> None:
+    requirement = "Study how to use Pi and Craft to develop agents and create a research report."
+    groups = [
+        ["covers Study how to use Pi and Craft to develop agents and create a research report"],
+        ["covers Pi"],
+        ["covers Craft"],
+    ]
+    assert rf._extract_subjects(groups, requirement=requirement) == ["Pi", "Craft"]
+
+
 def test_base_task_text_strips_template_and_scoring_suffixes() -> None:
     # REBUILD-LESSONS §2: template/scoring boilerplate dilutes domain-word density.
     requirement = (
