@@ -264,9 +264,8 @@ def _disambiguate_subject(
 ) -> tuple[str, list[str]]:
     """Resolve WHICH real-world thing <subject> means before researching it
     (REBUILD-LESSONS §9 step 0 / P3). A bare subject-name query samples whatever
-    interpretation dominates the web (the mathematical constant "pi", the
-    dictionary word "craft"), not the one THIS task means — the requirement's
-    own domain words shape the discovery query instead. Returns
+    interpretation dominates the web, not the one THIS task means — the
+    requirement's own domain words shape the discovery query instead. Returns
     ``(descriptor, anchor_terms)``; fails open to ``(subject, [subject])`` on any
     error or empty result so a disambiguation miss never stalls research (the
     offtopic floor is still the backstop, not the only defense)."""
@@ -343,9 +342,9 @@ def _anchor_hits(content: str, anchors: list[str], exclude: frozenset[str] = fro
     the signal the generic topical floor can't give: a page can be dense in
     domain vocabulary yet share none of the specific anchors a disambiguation
     judge resolved for THIS subject. TOKEN-level, not exact-phrase: a judge
-    invents a descriptive phrase ("API/MCP server connections") that a real
-    README paraphrases rather than repeats verbatim — live failure: exact-phrase
-    matching dropped the actual target repo (craft-agents-oss) over this.
+    can invent a descriptive phrase that a real source paraphrases rather than
+    repeats verbatim — live failure: exact-phrase matching dropped a real target
+    repository over this.
     ``exclude`` drops tokens that would trivially match (e.g. bare subject
     names when *content* is guaranteed to name every subject already) — a
     corroboration check gated on those would rubber-stamp anything."""
@@ -437,10 +436,9 @@ def _research(
                 if _is_offtopic(url, domain_words, requirement, judge_client):
                     _discard_evidence_file(evidence_dir, idx)
                     continue
-                # The topical floor passes anything domain-adjacent (real failure:
-                # craft.do's marketing copy is dense in "craft"/"agents" but names
-                # none of the judge's resolved anchors) — a page matching ZERO
-                # anchors is dropped even though it cleared the floor.
+                # The topical floor passes anything domain-adjacent, but a
+                # page matching ZERO resolved anchors is dropped even though it
+                # cleared the floor.
                 if disambiguated and _anchor_hits(content, anchors) == 0:
                     dbg(f"research_first RESEARCH: anchor-mismatch drop url={url!r} subject={subject!r}")
                     _discard_evidence_file(evidence_dir, idx)

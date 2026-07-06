@@ -130,14 +130,14 @@ def _covers_subject_tokens(branch: str) -> set[str]:
     minimum-count floor) rather than ``textutil.content_word_stems`` — that one
     requires >=8 distinct stems before returning anything (it judges whether a
     prose SECTION is substantial, entry for ``findings._req_content_words``), so
-    on a 2-4 word subject phrase like "covers Pi" it always returns empty and the
+    on a 2-4 word subject phrase like "covers X" it always returns empty and the
     gate could never fire. ``_content_tokens`` is the primitive already used for
     exactly this short-phrase-token job (task_runs.refute_false_weaknesses,
     rubric.sections_present) — same cross-module import convention (local import,
     matching task_runs.py's existing usage).
 
     ponytail: ``_content_tokens`` requires len>2, so a 1-2 char subject name (e.g.
-    "covers Pi", "covers Go") tokenizes to empty and the gate fails open on it (see
+    "covers X", "covers AB") tokenizes to empty and the gate fails open on it (see
     ``_covers_subject_has_cited_substance``) — no false downgrade, but also no real
     gating for those. Upgrade path if that shows up in calibration: a case-
     preserving word split with no length floor, scoped to just this gate.
@@ -216,7 +216,9 @@ def _extract_prompt(task: str) -> str:
         "another (the same 'must cover both X and Y' pattern from the examples "
         "above, applied to the task's own named subjects). Do NOT turn generic "
         "role words ('agents', 'a research report', 'the system', 'the topic') "
-        "into subjects — only the specific named things count.\n\n"
+        "into subjects, and NEVER output a 'covers ...' line for the whole task "
+        "sentence — only the specific named things count. If no specific named "
+        "thing is identifiable, emit no subject-coverage lines.\n\n"
         f"TASK:\n{task}\n\n"
         "List each explicit checkable requirement on its own line (using ' || ' "
         "between the options when the requirement is a choice), worded as a short "
@@ -438,8 +440,7 @@ def requirement_compliance_issues(
                 verdicts[fi] = False
                 downgrade_note[fi] = _COVERS_REQUIRED_NOTE
     # Observability (RC2): per-branch verdicts, post-downgrade — without this line
-    # "check never ran" and "judge wrongly said SATISFIED" are indistinguishable in
-    # the diag log (run 1537: the covers-Craft outcome was unknowable).
+    # "check never ran" and "judge wrongly said SATISFIED" are indistinguishable.
     for fi, (_, _branch) in enumerate(flat, 1):
         if fi in verdicts:
             _dbg(

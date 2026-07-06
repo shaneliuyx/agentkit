@@ -129,6 +129,7 @@ def test_extract_prompt_contains_subject_coverage_rule() -> None:
     prompt = _extract_prompt("some task")
     assert "SUBJECT COVERAGE" in prompt
     assert "covers <subject>" in prompt
+    assert "NEVER output a 'covers ...' line for the whole task" in prompt
     assert "Pi" not in prompt and "Craft" not in prompt  # no task-specific hardcoding
 
 
