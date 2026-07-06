@@ -5,6 +5,7 @@ wrapper's own contract: fail-open-and-continue, and the L2 inert-pass ledger.
 """
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -133,3 +134,149 @@ def test_score_failure_gates_the_record_pass_via_mined_flag(monkeypatch):
     assert out is state
     assert recorded == []  # PINNED: store.record_versioned must not have been called
     assert events == []  # PINNED: no HillClimbEvent emitted
+
+
+def test_rebuild_generated_skips_content_mutating_passes_only(monkeypatch):
+    """PLAN §16: research_first's ASSEMBLE stage already owns dedupe/references/
+    repairs, so re-running the old content-mutating passes on its output is the
+    double-processing disease one stage later. The mode marker must skip ONLY the
+    passes named in _CONTENT_MUTATING_PASSES — everything else (the recording/
+    scoring tail) still runs."""
+    calls: list[str] = []
+
+    def _record(name):
+        def _fn(state):
+            calls.append(name)
+            return state
+        return _fn
+
+    monkeypatch.setattr(finalize, "PASSES", [
+        ("editor", _record("editor")),  # content-mutating — must be skipped
+        ("normalize_dedupe", _record("normalize_dedupe")),  # content-mutating — skipped
+        ("score_and_mine_weaknesses", _record("score_and_mine_weaknesses")),  # tail — must run
+    ])
+
+    runner = SimpleNamespace()
+    state = dataclasses.replace(_state(runner), rebuild_generated=True)
+    finalize.run_passes(state)
+
+    assert calls == ["score_and_mine_weaknesses"]
+
+
+def test_rebuild_generated_false_runs_every_pass_unchanged(monkeypatch):
+    calls: list[str] = []
+
+    def _record(name):
+        def _fn(state):
+            calls.append(name)
+            return state
+        return _fn
+
+    monkeypatch.setattr(finalize, "PASSES", [
+        ("editor", _record("editor")),
+        ("score_and_mine_weaknesses", _record("score_and_mine_weaknesses")),
+    ])
+
+    runner = SimpleNamespace()
+    finalize.run_passes(_state(runner))  # rebuild_generated defaults to False
+
+    assert calls == ["editor", "score_and_mine_weaknesses"]
+
+
+def test_materialize_artifact_overwrites_stale_file_when_rebuild_generated(tmp_path):
+    """HIGH follow-up (team-lead, seed-chain): if research_first's own
+    write-after-return (runner.py) fails, an auto-improve seed-carry-forward's
+    stale artifact.md is left on disk with the original ``not exists()`` guard
+    never correcting it. On a rebuild_generated run, this pass must overwrite a
+    stale file directly with scored_text — never through
+    _write_artifact_through_sections, which mutates a finished document (see
+    docstring)."""
+    art_file = tmp_path / "artifact.md"
+    art_file.write_text("# Stale Title\n\nOld seeded content.\n", encoding="utf-8")
+
+    runner = SimpleNamespace()
+    state = dataclasses.replace(
+        _state(runner),
+        rebuild_generated=True,
+        art_file=art_file,
+        scored_text="# Fresh Title\n\nFresh research_first content.\n",
+    )
+
+    finalize._pass_materialize_artifact(state)
+
+    assert art_file.read_text(encoding="utf-8") == "# Fresh Title\n\nFresh research_first content.\n"
+
+
+def test_materialize_artifact_is_a_noop_when_file_already_matches(tmp_path, monkeypatch):
+    """The common case (write-after-return succeeded): no redundant write."""
+    from pathlib import Path
+
+    art_file = tmp_path / "artifact.md"
+    art_file.write_text("# Fresh Title\n\nFresh research_first content.\n", encoding="utf-8")
+
+    write_calls: list[str] = []
+    real_write_text = Path.write_text
+
+    def _spy_write_text(self, *a, **k):
+        write_calls.append(str(self))
+        return real_write_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", _spy_write_text)
+
+    runner = SimpleNamespace()
+    state = dataclasses.replace(
+        _state(runner),
+        rebuild_generated=True,
+        art_file=art_file,
+        scored_text="# Fresh Title\n\nFresh research_first content.\n",
+    )
+
+    finalize._pass_materialize_artifact(state)
+
+    assert write_calls == []  # already matches — no rewrite attempted
+
+
+def test_artifact_structure_rejects_detached_fence_language_and_heading_inside_fence():
+    broken = """# Report
+
+```typescript
+console.log("ok")
+```
+python
+def __init__(self):
+    pass
+## References
+```
+"""
+
+    assert not finalize._artifact_structure_ok(broken)
+
+
+def test_artifact_structure_allows_plain_untagged_fence():
+    text = """# Report
+
+Flow sketch:
+
+```
+discover -> plan -> execute -> verify
+```
+
+## References
+"""
+
+    assert finalize._artifact_structure_ok(text)
+
+
+def test_post_gate_finalize_rejects_structurally_invalid_rewrite(monkeypatch):
+    original = "# Report\n\n```python\nprint('ok')\n```\n"
+    broken = "# Report\n\n```python\nprint('ok')\n```\npython\n## References\n```\n"
+
+    monkeypatch.setattr(finalize, "normalize_artifact", lambda _text: broken)
+    monkeypatch.setattr(finalize, "_repair_lints", lambda text, *_args: (text, []))
+
+    runner = SimpleNamespace()
+    state = dataclasses.replace(_state(runner), scored_text=original, result_output=original)
+    out = finalize._pass_post_gate_finalize(state)
+
+    assert out.scored_text == original
+    assert out.result_output == original

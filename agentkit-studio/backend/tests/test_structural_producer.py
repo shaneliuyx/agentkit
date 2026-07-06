@@ -206,3 +206,18 @@ def test_fail_open_with_no_evidence_and_no_client_is_a_noop():
     )
     assert out == text
     assert stats["code"] == "skipped"
+
+
+def test_is_code_dense_rejects_scraped_markdown_math_dump():
+    # Live failure: a Wikipedia LaTeX block is thick with "{}=()" from
+    # "\displaystyle{...}" — dense enough to pass the punctuation heuristic —
+    # but it's a scraped page's markdown image links, not source code.
+    excerpt = "\n".join(
+        f"z=r(cos{{i}})={{{i}}};![{{eq{i}}}](https://wikimedia.org/render/{i}.svg)"
+        for i in range(12)
+    )
+    assert sp._is_code_dense(excerpt) is False
+
+
+def test_is_code_dense_still_accepts_real_code():
+    assert sp._is_code_dense(_TS_SNIPPET) is True

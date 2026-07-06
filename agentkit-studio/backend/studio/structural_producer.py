@@ -127,12 +127,19 @@ def _looks_like_continuation(line: str) -> bool:
 _HARD_CODE_CHAR_RE = re.compile(r"[{}=();]")
 _MIN_DENSITY = 0.6
 _MIN_HARD_LINES = 3
+#: Real source code never contains markdown link/image syntax — a scraped page's
+#: prose+math dump does (live failure: a Wikipedia LaTeX block, thick with
+#: "{}=()" from "\displaystyle{...}", satisfied the density heuristic above and
+#: got spliced into the artifact as a fake ```text code example).
+_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(https?://")
 
 
 def _is_code_dense(excerpt: str) -> bool:
     """Reject a candidate slice that is prose loosely matching the anchor/continuation
     heuristic (indentation + incidental keywords) rather than actual code: require most
     non-blank lines to carry a code token AND enough lines with real code punctuation."""
+    if _MARKDOWN_LINK_RE.search(excerpt):
+        return False
     lines = [ln for ln in excerpt.splitlines() if ln.strip()]
     if not lines:
         return False

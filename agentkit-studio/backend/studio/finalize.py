@@ -43,6 +43,7 @@ residual divergence is accepted and covered by the L2 pass ledger's visibility.
 from __future__ import annotations
 
 import time
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -117,6 +118,63 @@ class FinalizeState:
     #: try so no row/event was ever produced — this flag preserves that contract
     #: under the per-pass fail-open wrapper (see FAULT-PROPAGATION NOTE).
     mined: bool = False
+    #: Set by the runner when THIS epoch's text came from research_first's
+    #: ASSEMBLE stage (PLAN §16) rather than the seed-and-patch phase loop. A mode
+    #: marker, not a task-specific check — ASSEMBLE already owns dedupe/references/
+    #: repairs/structural production, so re-running the old content-mutating passes
+    #: against its output would be the "three copies of the truth" disease
+    #: (REBUILD-LESSONS §3) one stage later. The recording/scoring tail is
+    #: unaffected: it is not in ``_CONTENT_MUTATING_PASSES`` below.
+    rebuild_generated: bool = False
+
+
+_BARE_FENCE_LANGS = {
+    "bash",
+    "javascript",
+    "js",
+    "json",
+    "mermaid",
+    "python",
+    "py",
+    "sh",
+    "shell",
+    "ts",
+    "typescript",
+}
+_PLACEHOLDER_MARKERS = (
+    "_(pending - needs sourced content)_",
+    "_(to be completed)_",
+)
+_FENCE_LANG_RE = re.compile(r"^[A-Za-z0-9_+.-]+$")
+
+
+def _artifact_structure_ok(text: str) -> bool:
+    """Reject rewrite outputs that break markdown fence structure.
+
+    Count-balanced fences are not enough: the live failure had the same number
+    of ``` markers but detached ``python``/``typescript`` tag lines, flipping
+    parity for every later heading. This is an accept gate, not a repair pass.
+    """
+    in_fence = False
+    for raw in (text or "").splitlines():
+        stripped = raw.strip()
+        if not in_fence and stripped.lower() in _BARE_FENCE_LANGS:
+            return False
+        if any(marker in stripped for marker in _PLACEHOLDER_MARKERS):
+            return False
+        if in_fence and stripped.startswith("## "):
+            return False
+        if stripped.startswith("```"):
+            rest = stripped[3:].strip()
+            if in_fence:
+                if rest:
+                    return False
+                in_fence = False
+            else:
+                if rest and not _FENCE_LANG_RE.fullmatch(rest):
+                    return False
+                in_fence = True
+    return not in_fence
 
 
 PassFn = Callable[[FinalizeState], FinalizeState]
@@ -156,7 +214,31 @@ def _pass_materialize_artifact(state: FinalizeState) -> FinalizeState:
     art_file.exists() — the editor/presentation passes (diagrams/tables/lists), the
     mermaid-repair write-back, and the next run's seed carry-forward — was silently
     dead for exactly those runs. Materialize the finalized text under the canonical
-    name (sections + assembled artifact.md) before those gates evaluate."""
+    name (sections + assembled artifact.md) before those gates evaluate.
+
+    On a ``rebuild_generated`` run (research_first), OVERWRITE when the on-disk
+    file doesn't already hold ``scored_text``: research_first's own
+    write-after-return (runner.py) can fail (a swallowed OSError) leaving an
+    auto-improve seed-carry-forward's STALE copy on disk with nothing left to
+    correct it before the next continuation seeds from it. This writes the
+    file DIRECTLY — never through ``_write_artifact_through_sections`` — that
+    helper's title/section-split machinery is built for the old hub/spoke
+    pipeline's incremental skeleton and mutates a finished document (verified:
+    it rewrites a generic-looking H1 via ``resolve_report_title`` even when
+    the text is already complete). research_first's ASSEMBLE stage already
+    owns its own title and structure; the file must match it byte-for-byte."""
+    if state.rebuild_generated:
+        try:
+            current = state.art_file.read_text(encoding="utf-8") if state.art_file.exists() else None
+        except OSError:
+            current = None
+        if current != state.scored_text and (state.scored_text or "").strip():
+            try:
+                state.art_file.write_text(state.scored_text, encoding="utf-8")
+                _dbg(f"materialized artifact.md ({len(state.scored_text)} chars) — rebuild_generated overwrite (stale/missing file)")
+            except OSError as exc:
+                _dbg(f"materialize_artifact: rebuild_generated overwrite failed {exc!r}")
+        return state
     if not state.art_file.exists() and (state.scored_text or "").strip():
         try:
             state.scored_text = _write_artifact_through_sections(
@@ -553,6 +635,7 @@ def _pass_post_gate_finalize(state: FinalizeState) -> FinalizeState:
     normalize/repair are idempotent; readability is bounded by its URL + min_ratio
     guards (never drops a citation)."""
     try:
+        original = state.scored_text or ""
         fin = normalize_artifact(state.scored_text or "")
         fin, _ = _repair_lints(fin, state.base_client, state.original_requirement)
         # §5.4b: the GROUNDED FULL (normalized + repaired, pre-readability) is the
@@ -570,6 +653,11 @@ def _pass_post_gate_finalize(state: FinalizeState) -> FinalizeState:
             rr, rc = _refine_readability(fin, state.base_client, state.original_requirement)
             if rc:
                 fin = strip_satisfied_placeholders(normalize_artifact(rr))
+        if not _artifact_structure_ok(fin):
+            _dbg("post-gate finalize: rejected structurally invalid rewrite")
+            return state
+        if original and not _artifact_structure_ok(original):
+            _dbg("post-gate finalize: original artifact is structurally invalid")
         if state.art_file.exists() and grounded_full and grounded_full != fin:
             (state.art_file.parent / "result.md").write_text(grounded_full)
             _dbg(f"archived grounded-full → result.md ({len(grounded_full)} chars)")
@@ -1179,6 +1267,27 @@ PASSES: list[tuple[str, PassFn]] = [
 ]
 
 
+#: Passes that MUTATE the document text via the seed-and-patch machinery —
+#: skipped when ``state.rebuild_generated`` (PLAN §16): research_first's
+#: ASSEMBLE stage already owns dedupe, references, fence/citation repair, and
+#: structural (code/diagram) production, and its `editor`/`expand`/`publish_gate`
+#: equivalents don't apply to a document that was never seeded. The recording/
+#: scoring tail (materialize_artifact, score_and_mine_weaknesses, epoch_gate,
+#: post_gate_finalize, prune_resolved_weaknesses, requirement_compliance,
+#: evidence_export, score_scorecard_and_record) is deliberately NOT here.
+_CONTENT_MUTATING_PASSES = frozenset({
+    "normalize_dedupe",
+    "synthesize_readability",
+    "repair_lints",
+    "neutralize_urls",
+    "structural_producer_l0",
+    "rebuild_references",
+    "expand_underdeveloped",
+    "publish_gate",
+    "editor",
+})
+
+
 def run_passes(state: FinalizeState) -> FinalizeState:
     """Run every pass in :data:`PASSES` in order. Fail-open per pass: an exception is
     caught, logged via ``_dbg``, and execution continues to the next pass (never
@@ -1191,11 +1300,14 @@ def run_passes(state: FinalizeState) -> FinalizeState:
     epochs in THIS run is flagged via ``_dbg`` so an inert pass is visible instead of
     indistinguishable from "nothing to do here" health."""
     runner = state.runner
-    streaks: dict[str, int] = getattr(runner, "_finalize_noop_streak", None)
+    streaks: dict[str, int] | None = getattr(runner, "_finalize_noop_streak", None)
     if streaks is None:
         streaks = {}
         runner._finalize_noop_streak = streaks
     for name, fn in PASSES:
+        if state.rebuild_generated and name in _CONTENT_MUTATING_PASSES:
+            _dbg(f"finalize[{name}]: SKIP (rebuild_generated)")
+            continue
         before_scored, before_output = state.scored_text, state.result_output
         try:
             state = fn(state)
