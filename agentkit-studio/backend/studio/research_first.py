@@ -677,6 +677,23 @@ def _neutralize_embedded_quotes(text: str, claims: list[dict[str, Any]]) -> str:
 
 
 _INLINE_URL_RE = re.compile(r"https?://\S+")
+_PATCH_METADATA_LINE_RE = re.compile(
+    r"(?m)^[ \t]*(?:(?:[-*+>]|\d+[.)])\s*)?"
+    r"(?:ARTICLE_TITLE|URL|POPULARITY|PUBLICATION|KEY_INSIGHT|PATCH_TARGET|SEARCH):.*$"
+)
+
+
+def _drop_generated_fenced_blocks(text: str) -> str:
+    """WRITE sections ask for prose only; generated code/diagram fences are
+    inserted by dedicated, gated splice functions later. Drop any spontaneous
+    fenced block from the section writer so weak-model examples cannot corrupt
+    section prose or satisfy the code/diagram contract through an ungated path."""
+    return re.sub(r"```.*?```", "", text or "", flags=re.DOTALL).strip()
+
+
+def _strip_patch_metadata_lines(text: str) -> str:
+    """Remove raw search/patch ledger lines if a model echoes tool material."""
+    return _PATCH_METADATA_LINE_RE.sub("", text or "").strip()
 
 
 def _write_section(name: str, requirement: str, claims: list[dict[str, Any]], client: Any) -> str:
@@ -707,6 +724,7 @@ def _write_section(name: str, requirement: str, claims: list[dict[str, Any]], cl
     # section check only sees that section's own round-robin claims slice,
     # which wrongly rejected a real citation to a claim ANOTHER section's
     # slice happened to hold (live: cratered 5 of 6 sections to empty).
+    text = _strip_patch_metadata_lines(_drop_generated_fenced_blocks(text))
     text = _neutralize_embedded_quotes(text, claims)
     return text or "_(no content — evidence gathering failed for this section)_"
 
@@ -999,10 +1017,11 @@ def _parse_cluster_diagram(
     raw: str, subjects: list[str]
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:
     """``(components, edges)`` — components is ``[(name, subject)]``, order-
-    preserving, deduped by lowercase name; a component whose subject doesn't
-    match one of *subjects* (loosely, case/substring-insensitive) is dropped."""
+    preserving, deduped by subject+lowercase name; a component whose subject
+    doesn't match one of *subjects* (loosely, case/substring-insensitive) is
+    dropped."""
     components: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     edges: list[tuple[str, str, str]] = []
     for ln in raw.splitlines():
         ln = ln.strip()
@@ -1012,8 +1031,11 @@ def _parse_cluster_diagram(
             matched = next((s for s in subjects if s.lower() == subj_raw), None) or next(
                 (s for s in subjects if s.lower() in subj_raw or subj_raw in s.lower()), None
             )
-            if name and matched and name.lower() not in seen:
-                seen.add(name.lower())
+            if not (name and matched):
+                continue
+            key = (matched.lower(), name.lower())
+            if key not in seen:
+                seen.add(key)
                 components.append((name, matched))
             continue
         m = _DIA_EDGE_RE.match(ln)
@@ -1041,11 +1063,16 @@ def _cross_cluster_edges(
     components: list[tuple[str, str]], edges: list[tuple[str, str, str]]
 ) -> list[tuple[str, str, str]]:
     """Edges whose two endpoints belong to DIFFERENT subject clusters."""
-    subject_of = {name.lower(): subject for name, subject in components}
+    subjects_of: dict[str, list[str]] = {}
+    for name, subject in components:
+        subjects_of.setdefault(name.lower(), [])
+        if subject not in subjects_of[name.lower()]:
+            subjects_of[name.lower()].append(subject)
     out = []
     for a, b, label in edges:
-        sa, sb = subject_of.get(a.lower()), subject_of.get(b.lower())
-        if sa and sb and sa != sb:
+        a_subjects, b_subjects = subjects_of.get(a.lower(), []), subjects_of.get(b.lower(), [])
+        pairs = [(sa, sb) for sa in a_subjects for sb in b_subjects if sa != sb]
+        if len(pairs) == 1:
             out.append((a, b, label))
     return out
 
@@ -1113,7 +1140,8 @@ def _render_cluster_diagram(
     ``subgraph`` per subject cluster. Valid by construction: synthetic ``Nx``
     ids (never the raw label), every label quoted, edges only between rendered
     nodes — same pattern as ``diagram_render._render``, extended with clusters."""
-    ids: dict[str, str] = {}
+    ids: dict[tuple[str, str], str] = {}
+    ids_by_name: dict[str, list[tuple[str, str]]] = {}
     lines = ["flowchart TD"]
     i = 0
     for subject in subjects:
@@ -1124,11 +1152,21 @@ def _render_cluster_diagram(
         for name in names:
             nid = f"N{i}"
             i += 1
-            ids[name.lower()] = nid
+            key = (subject.lower(), name.lower())
+            ids[key] = nid
+            ids_by_name.setdefault(name.lower(), []).append(key)
             lines.append(f'        {nid}["{name.replace(chr(34), chr(39))}"]')
         lines.append("    end")
     for a, b, label in edges:
-        ida, idb = ids.get(a.lower()), ids.get(b.lower())
+        a_keys = ids_by_name.get(a.lower(), [])
+        b_keys = ids_by_name.get(b.lower(), [])
+        pairs = [(ak, bk) for ak in a_keys for bk in b_keys if ak[0] != bk[0]]
+        if not pairs:
+            pairs = [(ak, bk) for ak in a_keys for bk in b_keys]
+        if not pairs:
+            continue
+        ak, bk = pairs[0]
+        ida, idb = ids.get(ak), ids.get(bk)
         if not ida or not idb or ida == idb:
             continue
         if label:
@@ -1138,19 +1176,99 @@ def _render_cluster_diagram(
     return "\n".join(lines)
 
 
-def _fallback_cluster_diagram(subjects: list[str], claims: list[dict[str, Any]]) -> str | None:
-    """Deterministic one-node-per-subject cluster diagram — guaranteed valid,
-    guaranteed grounded (the nodes ARE the subjects). Used when the LLM-driven
-    diagram fails to ground. Returns ``None`` (never fabricates a cross-edge)
-    when no integration grounding exists at all — a research-stage gap, not
-    something the diagram builder should paper over."""
+_FEATURE_STOPWORDS = {
+    "about", "agent", "agents", "allow", "allows", "also", "and", "based",
+    "because", "being", "both", "built", "called", "calls", "can", "connect",
+    "connects", "could", "data", "design", "develop", "development", "docs",
+    "documentation", "from", "has", "have", "include", "includes", "into",
+    "like", "local", "main", "minimal", "named", "platform", "provides",
+    "report", "research", "source", "sources", "subject", "support",
+    "supports", "task", "tasks", "that", "their", "through", "used", "uses",
+    "using", "with", "workflow", "workflows",
+}
+
+
+def _subject_feature_labels(
+    subject: str,
+    claims: list[dict[str, Any]],
+    *,
+    limit: int = 4,
+    all_subjects: list[str] | None = None,
+) -> list[str]:
+    """Grounded fallback diagram nodes extracted from the subject's own claims."""
+    known_subjects = all_subjects or [subject]
+    subject_names = {s.lower() for s in known_subjects}
+    subject_tokens = {
+        token for name in known_subjects for token in _ANCHOR_TOKEN_RE.findall(name.lower())
+    }
+    labels: list[str] = []
+
+    def add(label: str) -> None:
+        label = re.sub(r"\s+", " ", label.strip("`'\" .,;:()[]{}"))
+        if not (3 <= len(label) <= 48):
+            return
+        low = label.lower()
+        if low in subject_names or any(name in low for name in subject_names) or low in labels:
+            return
+        if low not in [x.lower() for x in labels]:
+            labels.append(label)
+
+    for c in claims:
+        claim_subjects = c.get("subjects") or []
+        if claim_subjects != [subject]:
+            continue
+        claim = re.sub(r"https?://\S+", "", str(c.get("claim") or ""))
+        for token in re.findall(r"`([^`]{3,48})`", claim):
+            add(token)
+        for phrase in re.findall(r"\b[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*){0,3}\b", claim):
+            add(phrase)
+        for word in _ANCHOR_TOKEN_RE.findall(claim.lower()):
+            if word in subject_tokens or word in _FEATURE_STOPWORDS or len(word) < 4:
+                continue
+            add(word.replace("-", " ").title())
+        if len(labels) >= limit:
+            break
+    return labels[:limit]
+
+
+def _fallback_subject_diagram(subject: str, claims: list[dict[str, Any]]) -> str | None:
+    labels = _subject_feature_labels(subject, claims, all_subjects=[subject])
+    if len(labels) < 2:
+        return None
+    sid = _mermaid_safe_id(subject)
+    lines = ["flowchart TD", f'    {sid}["{subject}"]']
+    for i, label in enumerate(labels):
+        nid = f"{sid}_N{i}"
+        lines.append(f'    {sid} --> {nid}["{label.replace(chr(34), chr(39))}"]')
+    return "\n".join(lines)
+
+
+def _fallback_cluster_diagram(
+    subjects: list[str],
+    claims: list[dict[str, Any]],
+    mechanism: str = "",
+    verify_terms: list[str] | None = None,
+) -> str | None:
+    """Deterministic clustered integration diagram from grounded subject features."""
     if len(subjects) < 2:
         return None
-    label = _integration_label(subjects, claims)
+    label = _integration_label(subjects, claims, mechanism, verify_terms)
     if not label:
         return None
-    components = [(s, s) for s in subjects[:6]]
-    edges = [(subjects[0], subjects[1], label)]
+    components: list[tuple[str, str]] = []
+    by_subject: dict[str, list[str]] = {}
+    for subject in subjects[:6]:
+        labels = _subject_feature_labels(subject, claims, limit=3, all_subjects=subjects[:6])
+        if not labels:
+            labels = [subject]
+        by_subject[subject] = labels
+        components.extend((name, subject) for name in labels)
+    first_subjects = [s for s in subjects[:6] if by_subject.get(s)]
+    if len(first_subjects) < 2:
+        return None
+    edges: list[tuple[str, str, str]] = [
+        (by_subject[first_subjects[0]][0], by_subject[first_subjects[1]][0], label)
+    ]
     return _render_cluster_diagram(components, edges, subjects)
 
 
@@ -1181,13 +1299,9 @@ def _splice_diagram(
             # or two disconnected islands both fail here — no grounded cross-edge
             # means no diagram, not a fabricated one.
             if len(components) >= 2 and cross and _integration_label(subjects, claims, mechanism, verify_terms):
-                body = _render_cluster_diagram(components, edges, subjects)
-    # No fallback to the bare-subject-name 2-node diagram here (rule 3, user
-    # review): "Subject A -->|integrates with| Subject B" with no real components is
-    # deemed too trivial to ship — no integration diagram beats a trivial
-    # one, same principle already governing the grounding check above.
-    # ``_fallback_cluster_diagram`` remains a real, tested building block —
-    # just not wired into this splice path anymore.
+                body = _render_cluster_diagram(components, cross, subjects)
+    if not body:
+        body = _fallback_cluster_diagram(subjects, claims, mechanism, verify_terms)
     if not body:
         return section_text
     from studio.structural_producer import _diagram_explanation_sentence
@@ -1284,7 +1398,7 @@ def _splice_subject_diagram(
     except Exception as exc:  # noqa: BLE001 — a bad diagram call must never break the run
         dbg(f"research_first _splice_subject_diagram: call failed subject={subject!r} exc={exc!r}")
         return text
-    body = render_grounded_diagram(raw, grounding_text)
+    body = render_grounded_diagram(raw, grounding_text) or _fallback_subject_diagram(subject, subj_claims)
     if not body:
         return text
     from studio.structural_producer import _diagram_explanation_sentence

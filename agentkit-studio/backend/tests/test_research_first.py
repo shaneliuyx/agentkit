@@ -80,6 +80,32 @@ def test_base_task_text_strips_template_and_scoring_suffixes() -> None:
     assert "scoring requirements" not in base
 
 
+def test_write_section_drops_unprompted_fences_and_patch_metadata() -> None:
+    client = _client(
+        "Useful prose with a citation (https://example.com/source).\n\n"
+        "```python\nprint('ungated example')\n```\n\n"
+        "ARTICLE_TITLE: leaked search record\n"
+        "- PATCH_TARGET: Key Findings\n"
+        "  * SEARCH: ok\n"
+        "1. ARTICLE_TITLE: numbered leak\n"
+        "+ PATCH_TARGET: plus leak\n"
+        "> SEARCH: quoted leak"
+    )
+    text = rf._write_section(
+        "Scope",
+        "study subject",
+        [{"claim": "Useful prose exists.", "quote": "Useful prose", "url": "https://example.com/source"}],
+        client,
+    )
+    assert "```" not in text
+    assert "ARTICLE_TITLE" not in text
+    assert "PATCH_TARGET" not in text
+    assert "SEARCH:" not in text
+    assert "numbered leak" not in text
+    assert "plus leak" not in text
+    assert "quoted leak" not in text
+
+
 def test_disambiguate_subject_fails_open_without_judge() -> None:
     descriptor, anchors = rf._disambiguate_subject("Craft", {"agents"}, "study Craft", None)
     assert (descriptor, anchors) == ("Craft", ["Craft"])
@@ -738,28 +764,106 @@ def test_fallback_cluster_diagram_none_without_grounding() -> None:
 
 
 def test_fallback_cluster_diagram_has_subgraphs_and_cross_edge() -> None:
-    claims = [{"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u"}]
+    claims = [
+        {"claim": "Pi exposes an Agent Loop and a CLI.", "subjects": ["Pi"], "url": "u1"},
+        {"claim": "Craft supports MCP servers and browser automation.", "subjects": ["Craft"], "url": "u2"},
+        {"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u3"},
+    ]
     body = rf._fallback_cluster_diagram(["Pi", "Craft"], claims)
     assert body is not None
     assert 'subgraph' in body and '["Pi"]' in body and '["Craft"]' in body
     assert "mcp" in body.lower()
 
 
-def test_splice_diagram_rejects_pi_only_architecture() -> None:
+def test_fallback_cluster_diagram_preserves_cross_edge_when_feature_labels_collide() -> None:
+    claims = [
+        {"claim": "Alpha Product exposes an API and task runner.", "subjects": ["Alpha Product"], "url": "u1"},
+        {"claim": "Beta Product exposes an API and browser automation.", "subjects": ["Beta Product"], "url": "u2"},
+        {
+            "claim": "Alpha Product and Beta Product integrate through an API bridge.",
+            "subjects": ["Alpha Product", "Beta Product"],
+            "url": "u3",
+        },
+    ]
+    body = rf._fallback_cluster_diagram(["Alpha Product", "Beta Product"], claims)
+    assert body is not None
+    assert body.count('["API"]') == 2
+    cross_lines = [line for line in body.splitlines() if "-->|" in line]
+    assert cross_lines
+    assert len(cross_lines) == 1
+    assert cross_lines[0].split()[0] != cross_lines[0].split()[-1]
+
+
+def test_subject_feature_labels_ignore_joint_only_other_subject_names() -> None:
+    claims = [
+        {
+            "claim": "Alpha Product and Beta Product integrate through an API bridge.",
+            "subjects": ["Alpha Product", "Beta Product"],
+            "url": "u1",
+        }
+    ]
+    labels = rf._subject_feature_labels(
+        "Alpha Product",
+        claims,
+        all_subjects=["Alpha Product", "Beta Product"],
+    )
+    assert labels == []
+
+
+def test_fallback_cluster_diagram_does_not_put_other_subject_in_feature_node() -> None:
+    claims = [
+        {
+            "claim": "Alpha Product and Beta Product integrate through an API bridge.",
+            "subjects": ["Alpha Product", "Beta Product"],
+            "url": "u1",
+        }
+    ]
+    body = rf._fallback_cluster_diagram(["Alpha Product", "Beta Product"], claims)
+    assert body is not None
+    alpha_cluster = body.split('subgraph Alpha_Product["Alpha Product"]', 1)[1].split("    end", 1)[0]
+    assert '["Beta Product"]' not in alpha_cluster
+
+
+def test_cross_cluster_edges_rejects_ambiguous_duplicate_labels() -> None:
+    components = [("API", "Alpha Product"), ("API", "Beta Product")]
+    edges = [("API", "API", "API bridge")]
+    assert rf._cross_cluster_edges(components, edges) == []
+
+
+def test_splice_diagram_falls_back_when_model_returns_single_subject_architecture() -> None:
     # v7 failure mode: the model names components for only ONE subject.
     reply = (
         "COMPONENT: Planner | Pi | plans steps\n"
         "COMPONENT: Executor | Pi | runs tools\n"
         "EDGE: Planner -> Executor\n"
     )
-    claims = [{"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u"}]
+    claims = [
+        {"claim": "Pi exposes an Agent Loop and a CLI.", "subjects": ["Pi"], "url": "u1"},
+        {"claim": "Craft supports MCP servers and browser automation.", "subjects": ["Craft"], "url": "u2"},
+        {"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u3"},
+    ]
     section_text = "Pi ships a Planner and an Executor. Craft is an agent tool."
     out = rf._splice_diagram(section_text, ["Pi", "Craft"], claims, _client(reply))
-    # No grounded LLM cluster diagram (Craft-side has zero components), and no
-    # fallback to the bare-subject-name 2-node diagram either (user review:
-    # a trivial "Pi -->|integrates with| Craft" diagram fails acceptance) —
-    # no diagram beats a trivial one, section text ships unchanged.
-    assert out == section_text
+    assert "```mermaid" in out
+    assert out.count("subgraph") == 2
+    assert "mcp" in out.lower()
+
+
+def test_splice_diagram_falls_back_when_model_uses_unknown_subject() -> None:
+    reply = (
+        "COMPONENT: Foreign Planner | Other System | plans steps\n"
+        "COMPONENT: Foreign Executor | Other System | runs tools\n"
+        "EDGE: Foreign Planner -> Foreign Executor\n"
+    )
+    claims = [
+        {"claim": "Pi exposes an Agent Loop and a CLI.", "subjects": ["Pi"], "url": "u1"},
+        {"claim": "Craft supports MCP servers and browser automation.", "subjects": ["Craft"], "url": "u2"},
+        {"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u3"},
+    ]
+    out = rf._splice_diagram("Pi and Craft integration overview.", ["Pi", "Craft"], claims, _client(reply))
+    assert "```mermaid" in out
+    assert "Other System" not in out
+    assert "mcp" in out.lower()
 
 
 def test_splice_diagram_accepts_grounded_two_cluster_diagram() -> None:
@@ -788,6 +892,25 @@ def test_pick_subject_home_picks_section_mentioning_subject_most() -> None:
 def test_pick_subject_home_respects_exclude() -> None:
     written = {"Key Findings": "Pi Pi Pi", "Background": "Pi"}
     assert rf._pick_subject_home(written, "Pi", exclude={"Key Findings"}) == "Background"
+
+
+def test_subject_diagram_falls_back_to_grounded_features() -> None:
+    claims = [
+        {
+            "claim": "Alpha Product exposes an API, task runner, and plugin system.",
+            "subjects": ["Alpha Product"],
+            "url": "u1",
+        }
+    ]
+    out = rf._splice_subject_diagram(
+        "Alpha Product overview.",
+        "Alpha Product",
+        claims,
+        _client("not parseable as components"),
+    )
+    assert "```mermaid" in out
+    assert "Alpha Product" in out
+    assert "API" in out or "Runner" in out or "Plugin" in out
 
 
 def test_splice_subject_diagram_adds_captioned_grounded_diagram() -> None:
