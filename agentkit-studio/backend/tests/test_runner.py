@@ -332,6 +332,27 @@ def test_pick_scored_source_never_prefers_shorter_file(tmp_path) -> None:
     assert _pick_scored_source(tmp_path / "s_none" / "artifact.md", long_return) == long_return
 
 
+def test_pick_scored_source_rebuild_ignores_stale_longer_file(tmp_path) -> None:
+    """research_first rebuild run: the in-memory return is the deliverable the
+    assembler just produced; artifact.md is materialized AFTER this call. In the
+    write-early OSError edge a longer CLEAN stale file (a prior epoch's) is on
+    disk and would win the length comparison in auto-mode — poisoning scored_text
+    before the shipped insurance guards run. rebuild_generated=True must bypass
+    disk and take the fresh return regardless of the stale file's size."""
+    from studio.runner import _pick_scored_source
+
+    ws = tmp_path / "s_x"
+    ws.mkdir()
+    stale = "# Prior epoch report\n\n## Findings\n" + "old finding. " * 500
+    (ws / "artifact.md").write_text(stale)  # longer + heading-structured stale file
+    fresh = "# Fresh rebuild report\n\n## Findings\n" + "new finding. " * 10
+    assert len(fresh) < len(stale)  # auto-mode would pick the stale file here
+    # auto-mode (default): longer on-disk file wins — the pre-fix behaviour
+    assert _pick_scored_source(ws / "artifact.md", fresh) == stale
+    # rebuild-aware: fresh return wins despite the shorter length
+    assert _pick_scored_source(ws / "artifact.md", fresh, rebuild_generated=True) == fresh
+
+
 def test_section_writeback_prefers_active_report_title(tmp_path) -> None:
     from studio.runner import _write_artifact_through_sections
 

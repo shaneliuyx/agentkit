@@ -134,6 +134,11 @@ def post_session(body: dict[str, Any]) -> dict[str, str]:
         loop_config=loop_config,
         judge_spec=judge_spec,
     )
+    # PLAN §16: research_first is the generation core for real sessions created
+    # through this endpoint. Off by default on the dataclass itself so every
+    # test that builds a Session directly via SessionRegistry.create (bypassing
+    # this endpoint) is unaffected.
+    session.use_research_first = True
     from studio.rubric import DEFAULT_TEMPLATE, DEFAULT_WEIGHTS, default_scoring_matrix
 
     session.rubric_config = {

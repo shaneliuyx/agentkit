@@ -105,6 +105,12 @@ class Session:
     rubric_config: dict | None = None
     #: Loop Config panel settings — deliverable path, auto-improve, sizing sliders.
     loop_config: LoopConfig | None = None
+    #: PLAN §16: generate via studio.research_first instead of the seed-and-patch
+    #: phase loop. Defaults False (every session built directly via
+    #: SessionRegistry.create — every existing test's construction path — keeps
+    #: today's behavior unchanged); the real ``POST /session`` endpoint turns it
+    #: on for actual runs. A mode marker, not a task-specific check.
+    use_research_first: bool = False
 
     def seed(self, loop_id: str, steps: list[dict[str, Any]]) -> None:
         """Pre-seed this session from a chosen loop-library loop."""

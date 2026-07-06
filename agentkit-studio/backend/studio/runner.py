@@ -21,6 +21,7 @@ asyncio bridge). Here the runner just calls an injected ``emit(event)`` sink.
 from __future__ import annotations
 
 import json as _json
+import os
 import re as _re
 import time
 from dataclasses import dataclass, replace
@@ -703,13 +704,25 @@ def _write_artifact_through_sections(
     return (root / "artifact.md").read_text(encoding="utf-8")
 
 
-def _pick_scored_source(art_file: Path, result_output: str) -> str:
+def _pick_scored_source(
+    art_file: Path, result_output: str, *, rebuild_generated: bool = False
+) -> str:
     """Return the text to finalize/score: the canonical ``artifact.md`` when present,
     else the most substantial workspace ``.md`` — in default "auto" mode nothing
     bootstraps the canonical file and the agent writes the report under a filename
     IT chose, so keying on ``artifact.md`` alone scored a phase's short status
     string instead of the real report on disk. Never prefers a shorter file over
-    a longer in-memory return."""
+    a longer in-memory return.
+
+    On a ``rebuild_generated`` run (research_first) the trust model inverts: the
+    in-memory return IS the deliverable the assembler just produced, and
+    ``artifact.md`` is materialized AFTER this call, so any file on disk here is
+    stale (a prior epoch's, or a truncated write). Consulting disk is then a
+    hazard — in the write-early OSError edge a longer clean stale file would win
+    the length comparison and poison scored_text before the shipped insurance
+    guards run. Bypass disk entirely and take the fresh return."""
+    if rebuild_generated and (result_output or "").strip():
+        return result_output
     try:
         if art_file.exists():
             file_text = art_file.read_text()
@@ -1797,6 +1810,18 @@ _MIN_PARTIAL_CONTENT_WORDS = 20
 #: evidence so it has something to grow from, instead of the current run's empty dict.
 _RESUME_OUTPUT_FLOOR = 2
 
+#: Generation-core routing switch (PLAN-codebase-simplification.md §16): research_first
+#: replaces the seed-and-patch phase loop as the default generator for sessions the
+#: real ``POST /session`` endpoint creates (``session.use_research_first``, off by
+#: default on the Session dataclass — see studio/session.py). An additional env-based
+#: kill switch (not a task-specific check) gives an instant rollback with no code
+#: change if the rebuild needs to be pulled, mirroring every other operational toggle
+#: in this app (STUDIO_WORKSPACE_ROOT, STUDIO_LLM_RETRIES, ...).
+def _use_research_first(session) -> bool:
+    if not getattr(session, "use_research_first", False):
+        return False
+    return os.getenv("STUDIO_DISABLE_RESEARCH_FIRST", "").strip().lower() not in ("1", "true", "yes")
+
 
 def _artifact_has_real_content(text: str) -> bool:
     """True when ``text`` has section-body content that is real, not just a skeleton.
@@ -2121,8 +2146,8 @@ class Runner:
         # Inject goal end_state and constraints into requirement so the agent sees them
         # (worker goal + post-phase verification). NOT into the PLANNER input: when the
         # goal overlaps the task, prepending it doubled the text and the planner split the
-        # repeat into DUPLICATE phases (the Pi/Craft run — a goal == the requirement made
-        # "Craft…" / "create a report" appear twice). So the goal lives only in
+        # repeat into DUPLICATE phases (a multi-subject run where the goal matched the
+        # requirement made a subject name / "create a report" appear twice). So the goal lives only in
         # `requirement`/`_original_requirement`; the planner reads `_plan_requirement`,
         # which starts from the clean base.
         _goal = getattr(session, "goal", None)
@@ -2279,8 +2304,8 @@ class Runner:
         # Plan from the BASE requirement, NOT the goal/template-injected `requirement`.
         # The goal end_state is prepended to `requirement` for steering, but when it
         # OVERLAPS the task the planner split the DOUBLED text into duplicate phases — a
-        # goal == the requirement produced "Craft…" / "create a report" twice (the Pi/Craft
-        # run). The goal still steers via the keep/discard gate + verification; it must not
+        # goal == the requirement produced a subject name / "create a report" twice.
+        # The goal still steers via the keep/discard gate + verification; it must not
         # become phase-splitting text. _base_requirement is also free of the
         # weakness/template bloat the epic planner already wanted to avoid.
         _t_plan = time.monotonic()  # T1: plan-construction stage timer
@@ -2297,7 +2322,7 @@ class Runner:
         self._stage_add("plan", _t_plan)
         # Collapse duplicate phases regardless of which planner produced them (seeded,
         # epic-LLM, or deterministic): a goal listing several sub-tasks otherwise yields
-        # the same phase twice in the DAG (the Pi/Craft run), doubling agents + tokens.
+        # the same phase twice in the DAG, doubling agents + tokens.
         plan_obj = _dedupe_plan_steps(plan_obj)
         # §14.4 re-entrancy: when the epoch loop replays _run_inner in-process, prefix
         # every step id (and its depends_on edges) with the epoch index so each pass is
@@ -2501,31 +2526,43 @@ class Runner:
             except Exception:  # noqa: BLE001 — extraction failure must never strand a run
                 pass
 
-        cancelled, final_output, _seed_text = self._run_phase_loop(
-            session=session,
-            plan_obj=plan_obj,
-            client=client,
-            base_client=base_client,
-            budget=budget,
-            _ledger=_ledger,
-            _sizing_cfg=_sizing_cfg,
-            _lc=_lc,
-            _eff_ws2=_eff_ws2,
-            _artifact_copied=_artifact_copied,
-            _seed_len=_seed_len,
-            _seed_text=_seed_text,
-            _seed_cross_task=_seed_cross_task,
-            _seed_topic=_seed_topic,
-            use_llm=use_llm,
-            requirement=requirement,
-            mem=mem,
-            dag=dag,
-            selfimp=selfimp,
-            outputs=outputs,
-            gate_events=gate_events,
-            _reducer_gaps=_reducer_gaps,
-            base_requirement=_base_requirement,
-        )
+        self._used_research_first = False
+        if _use_research_first(session):
+            cancelled, final_output, _seed_text = self._run_research_first_generation(
+                session=session,
+                client=client,
+                base_client=base_client,
+                requirement=requirement,
+                base_requirement=_base_requirement,
+            )
+        else:
+            cancelled = None
+        if cancelled is None:
+            cancelled, final_output, _seed_text = self._run_phase_loop(
+                session=session,
+                plan_obj=plan_obj,
+                client=client,
+                base_client=base_client,
+                budget=budget,
+                _ledger=_ledger,
+                _sizing_cfg=_sizing_cfg,
+                _lc=_lc,
+                _eff_ws2=_eff_ws2,
+                _artifact_copied=_artifact_copied,
+                _seed_len=_seed_len,
+                _seed_text=_seed_text,
+                _seed_cross_task=_seed_cross_task,
+                _seed_topic=_seed_topic,
+                use_llm=use_llm,
+                requirement=requirement,
+                mem=mem,
+                dag=dag,
+                selfimp=selfimp,
+                outputs=outputs,
+                gate_events=gate_events,
+                _reducer_gaps=_reducer_gaps,
+                base_requirement=_base_requirement,
+            )
 
         # budget gauge
         if budget is not None:
@@ -2561,8 +2598,20 @@ class Runner:
         # iteration re-scored the same truncated text and the score could never climb
         # past the "not truncated" criterion. Fix: only prefer the file when it is longer
         # AND ends cleanly; a truncated file loses to the agent's actual final output.
+        # research_first already writes its own fresh output to artifact.md
+        # (write-after-return, see _run_research_first_generation) — this
+        # length/lint race exists to pick between an agent's LLM-return text
+        # and a file a DIFFERENT step wrote. For research_first, the file IS
+        # the return text; letting a leftover auto-improve seed win here (if
+        # the write-after-return itself failed) is a stale-seed regression,
+        # not a legitimate "prefer the file" case. Bypass it entirely.
         ws_artifact = self._read_workspace_artifact()
-        if ws_artifact and len(ws_artifact) > len(result_output) and _ends_cleanly(ws_artifact):
+        if (
+            ws_artifact
+            and not self._used_research_first
+            and len(ws_artifact) > len(result_output)
+            and _ends_cleanly(ws_artifact)
+        ):
             try:
                 from studio.artifact_lint import lint_artifact
 
@@ -3934,6 +3983,64 @@ class Runner:
                     _reducer_gaps.extend(f"[{_sec}] {_m}" for _sec, _m in _gaps)
         return cancelled, final_output, _seed_text
 
+    def _run_research_first_generation(
+        self, *, session, client, base_client, requirement: str, base_requirement: str
+    ) -> tuple[bool, str, str]:
+        """Generate via ``studio.research_first`` instead of the phase loop (PLAN §16
+        — the rebuild replaces hub/spoke as the generation core). Same
+        ``(cancelled, final_output, seed_text)`` contract as ``_run_phase_loop`` so
+        the caller doesn't need to know which one ran. Cold-start by design (D4):
+        ignores any prior-artifact content — the hill-climb recording tail below
+        this call still records into the SAME lineage (task_hash is computed from
+        ``base_requirement`` unchanged by this method).
+
+        Emits ``PhaseStartEvent`` for each of FRAME/RESEARCH/CLAIMS/WRITE/ASSEMBLE
+        so the GUI stream isn't dead during generation (SPEC §4's per-phase slot);
+        token accounting flows through the existing ``client``/``base_client``
+        (no separate accounting path). Exceptions are fail-visible for opted-in
+        research_first sessions; operators can choose the legacy phase loop before
+        the run starts with ``STUDIO_DISABLE_RESEARCH_FIRST``.
+        """
+        from studio.research_first import generate_research_first
+        from studio.workspace import Workspace
+        from studio.workspace import workspace_root as _ws_root_fn
+
+        def _emit_phase(stage: str, _data: dict) -> None:
+            if stage in ("frame", "research", "claims", "write", "assemble"):
+                self._emit(PhaseStartEvent(step_id=f"research_first_{stage}", n_agents=None))
+
+        try:
+            judge_client = self._build_judge_client(base_client)
+            ws_root = self._workspace_root or _ws_root_fn()
+            text = generate_research_first(
+                requirement,
+                client=client,
+                judge_client=judge_client,
+                workspace_root=ws_root,
+                session_id=session.session_id,
+                emit=_emit_phase,
+            )
+            self._used_research_first = True
+            # HIGH (rf-reviewer): this call never wrote artifact.md itself, so on
+            # an auto-improve continuation the seed carry-forward's stale file
+            # was the ONLY thing on disk — the runner.py:2593 "prefer the file"
+            # check then re-recorded pre-rebuild bloat over this fresh text.
+            # Writing it now makes that check compare fresh-against-fresh (a
+            # no-op) AND leaves a correct file for the NEXT continuation's own
+            # seed. _pass_materialize_artifact's `not exists()` guard then
+            # correctly skips — no double section-sync on this same text.
+            try:
+                Workspace(session.session_id, root=ws_root).root.joinpath(
+                    "artifact.md"
+                ).write_text(text, encoding="utf-8")
+            except OSError as exc:
+                _dbg(f"research_first: artifact.md write failed {exc!r} — continuing with in-memory text")
+            return False, text, ""
+        except Exception as exc:  # noqa: BLE001 — surface through Runner.run's error path
+            _dbg(f"research_first: EXCEPTION {exc!r} — surfacing failure")
+            self._used_research_first = False
+            raise
+
     def _make_opportunity_recount(self, base_client: Any) -> Callable[[str], int | None]:
         """Return ``text -> #unsatisfied OR-sibling opportunity branches`` for the
         editor's soft-accept tie-breaker. Re-verifies the SAME cached task
@@ -4019,7 +4126,11 @@ class Runner:
             # scoring one text and carrying forward another — the cause of phantom scores
             # (e.g. a recorded 0.50 on a report that re-scores 0.80). Prefer the file when
             # it is at least as substantial as the return; fall back to result_output.
-            _scored_text = _pick_scored_source(_art_file, result_output)
+            _scored_text = _pick_scored_source(
+                _art_file,
+                result_output,
+                rebuild_generated=getattr(self, "_used_research_first", False),
+            )
             # Scoring and weakness mining must use the RAW client (base_client), not the
             # ToolAugmentedClient. When the scorer has web_search available, it calls it
             # to verify citations — fabricated or paywalled articles score 0.0 even when
@@ -4057,6 +4168,7 @@ class Runner:
                 verified_urls=_verified_urls,
                 seed_text=_seed_text,
                 outcome=_outcome,
+                rebuild_generated=getattr(self, "_used_research_first", False),
             )
             _state = finalize.run_passes(_state)
             _outcome = _state.outcome
