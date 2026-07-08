@@ -215,6 +215,72 @@ def test_resolve_relationship_parses_mechanism_and_verify_terms() -> None:
     assert verify_terms == ["MCP", "plugin", "extension"]
 
 
+def test_classify_relationship_cooperates() -> None:
+    judge = _client(
+        "KIND: cooperates\nDESCRIPTOR: Integration\n"
+        "MECHANISM: Pi calls Craft via an MCP server\nTERMS: MCP, plugin"
+    )
+    rel = rf._classify_relationship(
+        ["Pi", "Craft"], {"Pi": "Pi Agent Framework", "Craft": "Craft Agents"},
+        "study Pi and Craft", judge,
+    )
+    assert rel.kind == "cooperates"
+    assert rel.descriptor == "Integration"
+    assert rel.mechanism == "Pi calls Craft via an MCP server"
+    assert rel.mechanism_terms == ["MCP", "plugin"]
+
+
+def test_classify_relationship_competes_has_no_integration_mechanism() -> None:
+    judge = _client(
+        "KIND: competes\nDESCRIPTOR: Comparison\n"
+        "MECHANISM: they target the same problem with different trade-offs\n"
+        "TERMS: latency, cost"
+    )
+    rel = rf._classify_relationship(
+        ["Redis", "Memcached"], {"Redis": "Redis", "Memcached": "Memcached"},
+        "compare Redis and Memcached", judge,
+    )
+    assert rel.kind == "competes"
+    assert rel.descriptor == "Comparison"
+    assert rel.mechanism_terms == ["latency", "cost"]
+
+
+def test_classify_relationship_unknown_kind_falls_back_to_unknown() -> None:
+    # A KIND the model invents outside the allowed set is not trusted.
+    judge = _client("KIND: entangled\nDESCRIPTOR: Whatever\nMECHANISM: m\nTERMS: t")
+    rel = rf._classify_relationship(
+        ["A", "B"], {"A": "A", "B": "B"}, "study A and B", judge
+    )
+    assert rel.kind == "unknown"
+
+
+def test_classify_relationship_fails_open_without_judge() -> None:
+    rel = rf._classify_relationship(
+        ["Pi", "Craft"], {"Pi": "Pi", "Craft": "Craft"}, "study Pi and Craft", None
+    )
+    assert rel.kind == "unknown"
+    assert rel.mechanism == ""
+    assert rel.mechanism_terms == []
+    assert rel.descriptor  # non-empty neutral descriptor for section naming
+
+
+def test_classify_relationship_skipped_for_single_subject() -> None:
+    rel = rf._classify_relationship(
+        ["Pi"], {"Pi": "Pi"}, "study Pi", _client("KIND: cooperates\nDESCRIPTOR: X")
+    )
+    assert rel.kind == "unknown"
+
+
+def test_classify_relationship_fails_open_on_exception() -> None:
+    def _boom(messages, tools=None):  # noqa: ANN001, ANN202
+        raise RuntimeError("judge down")
+
+    rel = rf._classify_relationship(
+        ["A", "B"], {"A": "A", "B": "B"}, "study A and B", SimpleNamespace(chat=_boom)
+    )
+    assert rel.kind == "unknown"
+
+
 def test_research_joint_queries_and_assumptions_derive_from_relationship(monkeypatch, tmp_path) -> None:
     # Team-lead rule: joint queries come FROM the relationship hypothesis
     # (mechanism + verify terms), not generic subject-A+subject-B

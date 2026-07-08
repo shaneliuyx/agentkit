@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -357,6 +358,82 @@ def _disambiguate_subject(
     descriptor = dm.group(1).strip() if dm else subject
     anchors = [a.strip() for a in (am.group(1).split(",") if am else []) if a.strip()]
     return descriptor, (anchors or [subject])
+
+
+#: The relationship kinds the classifier may return. A model answer outside this
+#: set is not trusted → "unknown". No kind presumes a SOFTWARE relationship;
+#: "cooperates"/"extends" warrant an integration story, "competes"/"alternative"
+#: a comparison, "independent" no relationship artifact at all.
+_RELATIONSHIP_KINDS = frozenset(
+    {"cooperates", "competes", "extends", "alternative", "independent", "unknown"}
+)
+#: Neutral descriptor when the relationship is unknown — a section can still be
+#: named without asserting a kind. Generic, not a domain term.
+_NEUTRAL_RELATIONSHIP_DESCRIPTOR = "Relationship"
+
+
+@dataclass(frozen=True)
+class Relationship:
+    """How this task's subjects relate — determined per-task by an LLM, never
+    presumed. ``kind`` drives the downstream flow (integration vs comparison vs
+    none); ``descriptor`` names the relationship section without a hardcoded
+    word; ``mechanism`` is the short hypothesis/framing sentence (search
+    directive only, never content by itself); ``mechanism_terms`` are the
+    per-task terms grounding replaces the old fixed interface enum with."""
+
+    kind: str
+    descriptor: str
+    mechanism: str
+    mechanism_terms: list[str]
+
+
+def _classify_relationship(
+    subjects: list[str], resolved: dict[str, str], requirement: str, judge_client: Any
+) -> Relationship:
+    """Classify how the subjects relate for THIS task (R3). Same architecture as
+    disambiguation, one step later — identity can't be assumed, and neither can
+    the relationship KIND (presuming "integration" was a domain assumption: not
+    every pair integrates; some compete, some are independent). One LLM call
+    over the resolved descriptors classifies the kind, then gives a descriptor,
+    a mechanism/framing hypothesis, and per-task terms to corroborate — NO
+    interface vocabulary in the prompt. The hypothesis DIRECTS search and edge
+    candidates; grounding rules elsewhere decide what ships. Fails open to
+    ``kind='unknown'`` (neutral) on no judge, <2 subjects, parse miss, or any
+    error — never stalls research."""
+    neutral = Relationship("unknown", _NEUTRAL_RELATIONSHIP_DESCRIPTOR, "", [])
+    if judge_client is None or len(subjects) < 2:
+        return neutral
+    d0, d1 = resolved[subjects[0]], resolved[subjects[1]]
+    prompt = (
+        f"TASK: {requirement[:400]}\n\n"
+        f"Subject A: {subjects[0]} — {d0}\nSubject B: {subjects[1]} — {d1}\n\n"
+        "Classify how A and B relate for THIS task. Do NOT assume they combine — "
+        "they might cooperate, one might extend the other, they might compete or "
+        "be alternatives, or they might be independent. Answer in exactly this "
+        "format:\n"
+        "KIND: <one of: cooperates, competes, extends, alternative, independent>\n"
+        "DESCRIPTOR: <short noun phrase to title a section about this relationship, "
+        "e.g. Integration, Extension, Comparison, Alternatives>\n"
+        "MECHANISM: <one short sentence: how they connect if cooperating/extending, "
+        "or the axis they differ on if competing; empty if independent>\n"
+        "TERMS: <comma-separated concrete terms to search for to confirm this>"
+    )
+    try:
+        reply = judge_client.chat([{"role": "user", "content": prompt}])
+        text = str(getattr(reply, "text", "") or "")
+    except Exception:  # noqa: BLE001 — a bad relationship call must never stall research
+        return neutral
+    km = re.search(r"KIND:\s*(.+)", text)
+    dm = re.search(r"DESCRIPTOR:\s*(.+)", text)
+    mm = re.search(r"MECHANISM:\s*(.+)", text)
+    tm = re.search(r"TERMS:\s*(.+)", text)
+    kind = (km.group(1).strip().lower() if km else "unknown")
+    if kind not in _RELATIONSHIP_KINDS:
+        kind = "unknown"
+    descriptor = (dm.group(1).strip() if dm else "") or _NEUTRAL_RELATIONSHIP_DESCRIPTOR
+    mechanism = mm.group(1).strip() if mm else ""
+    terms = [t.strip() for t in (tm.group(1).split(",") if tm else []) if t.strip()]
+    return Relationship(kind, descriptor, mechanism, terms)
 
 
 def _resolve_relationship(
