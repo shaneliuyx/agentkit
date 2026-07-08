@@ -191,27 +191,41 @@ def _build_sections(groups: list[list[str]]) -> list[str]:
     return sections
 
 
-_INTEGRATION_SECTION_RE = re.compile(r"(?i)integrat")
+def _relationship_section_title(subjects: list[str], relationship: "Relationship") -> str:
+    """``"{A} and {B}: {descriptor}"`` — the descriptor is LLM-derived per task
+    (R3), never the hardcoded word "Integration"."""
+    return f"{' and '.join(subjects)}: {relationship.descriptor}"
 
 
-def _ensure_integration_section(sections: list[str], subjects: list[str]) -> list[str]:
-    """N>=2 subjects → the skeleton MUST include an integration/relationship
-    section BY CONSTRUCTION (user: "all the flow needs to consider their
-    relationships" — never emergent, same principle as disambiguation and the
-    relationship-hypothesis step). No-op for <2 subjects or an already-present
-    integration-shaped section (an explicit "include an X Integration section"
-    branch from _build_sections)."""
-    if len(subjects) < 2 or any(_INTEGRATION_SECTION_RE.search(s) for s in sections):
+def _is_relationship_section(name: str, relationship: "Relationship") -> bool:
+    """A section is relationship-shaped if its title carries the per-task
+    descriptor — tracked STRUCTURALLY by the descriptor, not the literal word
+    "integrat" (R3: not every pair integrates)."""
+    desc = relationship.descriptor.strip().lower()
+    return bool(desc) and desc in name.lower()
+
+
+def _ensure_relationship_section(
+    sections: list[str], subjects: list[str], relationship: "Relationship"
+) -> list[str]:
+    """N>=2 subjects that actually relate → the skeleton MUST include a
+    relationship section BY CONSTRUCTION (user: "all the flow needs to consider
+    their relationships" — never emergent). Named from the per-task descriptor.
+    No-op for <2 subjects, ``kind == 'independent'`` (no relationship to report),
+    or an already-present relationship-shaped section."""
+    if len(subjects) < 2 or relationship.kind == "independent":
+        return sections
+    if any(_is_relationship_section(s, relationship) for s in sections):
         return sections
     out = list(sections)
-    out.insert(-1, f"{' and '.join(subjects)} Integration")
+    out.insert(-1, _relationship_section_title(subjects, relationship))
     return out
 
 
-def _pick_integration_home(sections: list[str]) -> str | None:
-    """The dedicated integration section if one exists (always true for N>=2
-    subjects post ``_ensure_integration_section``)."""
-    return next((s for s in sections if _INTEGRATION_SECTION_RE.search(s)), None)
+def _pick_relationship_home(sections: list[str], relationship: "Relationship") -> str | None:
+    """The dedicated relationship section if one exists (present for N>=2
+    subjects that relate, post ``_ensure_relationship_section``)."""
+    return next((s for s in sections if _is_relationship_section(s, relationship)), None)
 
 
 #: Literal markers the runner appends when generation-time template/scoring
@@ -436,42 +450,6 @@ def _classify_relationship(
     return Relationship(kind, descriptor, mechanism, terms)
 
 
-def _resolve_relationship(
-    subjects: list[str], resolved: dict[str, str], requirement: str, judge_client: Any
-) -> tuple[str, list[str]]:
-    """Same architecture as disambiguation, one step later: subject IDENTITY
-    can't be assumed (why we disambiguate first), and subject RELATIONSHIP
-    can't be emergent either (a single-subject diagram in a multi-subject report
-    was the proof of that). One
-    call, given the resolved descriptors, hypothesizes the integration
-    mechanism + what to verify — it DIRECTS research and the diagram's edge
-    candidates; it never becomes content by itself (grounding rules elsewhere
-    are unchanged). Pairwise only; fails open to a neutral sentinel."""
-    if judge_client is None or len(subjects) < 2:
-        return "composed side-by-side, mechanism unknown", []
-    d0, d1 = resolved[subjects[0]], resolved[subjects[1]]
-    prompt = (
-        f"TASK: {requirement[:400]}\n\n"
-        f"Subject A: {subjects[0]} — {d0}\nSubject B: {subjects[1]} — {d1}\n\n"
-        "Hypothesize how A and B relate for THIS task — which documented "
-        "surface of one (an API, CLI, MCP, SDK, or extension point) could "
-        "drive, host, or call the other, and the likely direction of "
-        "composition. Answer in exactly this format:\n"
-        "MECHANISM: <short hypothesis, e.g. 'A calls B via an MCP server'>\n"
-        "VERIFY: <comma-separated terms to search for to confirm this>"
-    )
-    try:
-        reply = judge_client.chat([{"role": "user", "content": prompt}])
-        text = str(getattr(reply, "text", "") or "")
-    except Exception:  # noqa: BLE001 — a bad relationship call must never stall research
-        return "composed side-by-side, mechanism unknown", []
-    m = re.search(r"MECHANISM:\s*(.+)", text)
-    v = re.search(r"VERIFY:\s*(.+)", text)
-    mechanism = m.group(1).strip() if m else "composed side-by-side, mechanism unknown"
-    verify_terms = [t.strip() for t in (v.group(1).split(",") if v else []) if t.strip()]
-    return mechanism, verify_terms
-
-
 _ANCHOR_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
 
 
@@ -518,18 +496,19 @@ def _research(
     judge_client: Any,
     *,
     emit: EmitFn,
-) -> tuple[dict[str, list[dict[str, str]]], list[str], str, list[str]]:
+) -> tuple[dict[str, list[dict[str, str]]], list[str], "Relationship"]:
     """Per subject: disambiguate FIRST (never search the bare subject name
     alone), then fetch up to ``_MAX_SOURCES_PER_SUBJECT`` distinct-domain,
     on-topic pages using the resolved descriptor+anchors. Once all subjects are
-    resolved, hypothesize their RELATIONSHIP (mechanism + verify terms) and
-    derive the joint queries FROM it, under the ``"__joint__"`` ledger key.
-    Returns ``(ledger, assumptions, mechanism, verify_terms)`` — the resolved
-    interpretation of each subject and the relationship hypothesis, for an
+    resolved, CLASSIFY their RELATIONSHIP (kind + descriptor + mechanism + terms,
+    R3) and derive the joint queries FROM it, under the ``"__joint__"`` ledger
+    key. Returns ``(ledger, assumptions, relationship)`` — the resolved
+    interpretation of each subject and the classified relationship, for an
     honest Scope-section disclosure (P4/D3) and the diagram's edge candidates.
-    ``verify_terms`` lets a downstream consumer corroborate the hypothesis
-    against real evidence before ever printing it as content (team-lead: a
-    hypothesis directs search/prompts but never becomes content by itself)."""
+    ``relationship.mechanism_terms`` let a downstream consumer corroborate the
+    hypothesis against real evidence before ever printing it as content
+    (team-lead: a hypothesis directs search/prompts but never becomes content
+    by itself)."""
     from studio.textutil import content_word_stems
 
     emit = emit or (lambda *_a: None)
@@ -590,20 +569,31 @@ def _research(
         ledger[subject] = sources
         dbg(f"research_first RESEARCH: subject={subject!r} queries={len(queries[:_MAX_QUERIES_PER_SUBJECT])} fetched={len(sources)}")
 
-    mechanism = "composed side-by-side, mechanism unknown"
-    verify_terms: list[str] = []
+    relationship = Relationship("unknown", _NEUTRAL_RELATIONSHIP_DESCRIPTOR, "", [])
     if len(subjects) >= 2:
-        mechanism, verify_terms = _resolve_relationship(subjects, resolved, requirement, judge_client)
-        assumptions.append(f"Hypothesized relationship: {mechanism}.")
-        dbg(f"research_first RESEARCH: relationship subjects={subjects} mechanism={mechanism!r}")
+        relationship = _classify_relationship(subjects, resolved, requirement, judge_client)
+        mechanism = relationship.mechanism
+        terms = relationship.mechanism_terms
+        if mechanism:
+            assumptions.append(f"Hypothesized relationship: {mechanism}.")
+        elif relationship.kind == "independent":
+            assumptions.append(
+                f"{subjects[0]} and {subjects[1]} appear independent — no relationship assumed."
+            )
+        else:
+            assumptions.append(f"Relationship kind: {relationship.kind}.")
+        dbg(
+            f"research_first RESEARCH: relationship subjects={subjects} "
+            f"kind={relationship.kind!r} mechanism={mechanism!r}"
+        )
 
         d0, d1 = resolved[subjects[0]], resolved[subjects[1]]
         joint: list[dict[str, str]] = []
-        # Joint queries are derived from the RELATIONSHIP HYPOTHESIS (mechanism
-        # + verify terms), not generic subject-A+subject-B concatenation —
+        # Joint queries are derived from the classified RELATIONSHIP (mechanism
+        # + per-task terms), not generic subject-A+subject-B concatenation —
         # replacing the anchor-derived version, which still left joint fetches
         # thin (team-lead: "that's why joint fetches have been thin").
-        verify_words = " ".join(verify_terms[:4]) or mechanism
+        verify_words = " ".join(terms[:4]) or mechanism
         joint_queries = [f"{d0} {d1} {mechanism}".strip(), f"{d0} {d1} {verify_words}".strip()]
         # The joint loop had no anchor gate at all before this — only the
         # generic offtopic floor. A page can be broadly on-topic yet name
@@ -632,7 +622,7 @@ def _research(
                 joint.append({"url": url, "content": content})
         ledger["__joint__"] = joint
         dbg(f"research_first RESEARCH: joint queries={len(joint_queries[:_MAX_JOINT_QUERIES])} fetched={len(joint)}")
-    return ledger, assumptions, mechanism, verify_terms
+    return ledger, assumptions, relationship
 
 
 # ---------------------------------------------------------------------------
@@ -1067,74 +1057,80 @@ def _splice_subject_code(text: str, subject: str, claims: list[dict[str, Any]], 
     return candidate
 
 
-def _integration_interfaces_grounded(block: str, claims: list[dict[str, Any]]) -> bool:
-    """Rule (b): an interface word (api/cli/mcp/...) appearing in the generated
-    code must also appear somewhere in the claims — never an invented surface
-    absent from evidence. Tokenizes on non-letter runs (NOT ``_INTERFACE_WORD_RE``
-    directly): ``\\b`` treats "_" as a word char, so it would never isolate "mcp"
-    inside the realistic snake_case identifier "call_mcp_server" — the exact
-    shape generated Python code uses. Falls open when the code names no
-    interface word at all — nothing to check."""
-    tokens = set(re.findall(r"[a-zA-Z]+", block.lower()))
-    code_interface_words = {t for t in tokens if _INTERFACE_WORD_RE.fullmatch(t)}
-    if not code_interface_words:
-        return True
-    claim_text = " ".join(c["claim"] for c in claims).lower()
-    return any(w in claim_text for w in code_interface_words)
+def _grounded_mechanism_terms(claims: list[dict[str, Any]], terms: list[str]) -> list[str]:
+    """The subset of the per-task ``mechanism_terms`` that literally appear in
+    the claims (R3 — replaces the fixed interface enum with per-task LLM terms).
+    Case-insensitive, plural-tolerant, order-preserving, deduped, lowercase.
 
-
-def _grounded_interface_words(claims: list[dict[str, Any]]) -> list[str]:
-    """Interface words (api/cli/mcp/...) that literally appear in the claims —
-    the ONLY interfaces a synthesized integration example may name. Order-
-    preserving over ``_INTERFACE_WORD_RE``'s alternation, deduped, lowercase.
-
-    The FRAME relationship hypothesis ("...via an SDK...") is a SEARCH directive,
-    never code content (team-lead: hypothesis directs search, never becomes
-    content). Seeding the code prompt with the raw hypothesis mechanism made the
-    model write `import pi_sdk` around an SDK no claim documents, and the
-    grounding gate then correctly rejected every sample (v43 live: 0/4). Steering
-    the prompt to the claim-grounded interfaces instead removes the contradiction
-    at the source."""
+    The FRAME relationship hypothesis is a SEARCH directive, never content by
+    itself (team-lead: hypothesis directs search, never becomes content) — a
+    term ships only once corroborated in the claims."""
     claim_text = " ".join(c.get("claim", "") for c in claims).lower()
     seen: list[str] = []
-    # Same alternation as _INTERFACE_WORD_RE but with an optional plural — a
-    # claim that says "REST APIs" / "MCP servers" documents the api/mcp
-    # interface just as much as the singular form (the shared regex's trailing
-    # \b can't span the plural "s"; the code-side gate keeps the strict form).
-    for m in _INTERFACE_WORD_PLURAL_RE.finditer(claim_text):
-        w = m.group(1).lower()
-        if w not in seen:
-            seen.append(w)
+    for term in terms:
+        t = term.strip().lower()
+        if not t or t in seen:
+            continue
+        # Plural-tolerant: a claim saying "REST APIs" / "MCP servers" grounds the
+        # singular term just as much (the trailing ``s?`` spans the plural).
+        if re.search(r"\b" + re.escape(t) + r"s?\b", claim_text):
+            seen.append(t)
     return seen
 
 
+def _mechanism_terms_grounded(block: str, claims: list[dict[str, Any]], terms: list[str]) -> bool:
+    """Rule (b), regrounded on per-task terms: any ``mechanism_term`` NAMED in
+    the generated code must also appear in the claims — never a surface absent
+    from evidence. The code side tokenizes on non-letter runs (``[a-zA-Z]+``),
+    NOT ``\\b``: ``_`` is a regex word char, so a boundary regex would never
+    isolate "mcp"/"webhook" inside the realistic snake_case identifiers
+    ("call_mcp_server", "register_webhook_url") generated code uses. Falls open
+    when the code names no term at all (nothing to check)."""
+    block_tokens = set(re.findall(r"[a-zA-Z]+", block.lower()))
+    claim_text = " ".join(c["claim"] for c in claims).lower()
+    for term in terms:
+        t = term.strip().lower()
+        if not t:
+            continue
+        term_tokens = re.findall(r"[a-zA-Z]+", t)
+        if term_tokens and all(tok in block_tokens for tok in term_tokens) and not re.search(
+            r"\b" + re.escape(t) + r"s?\b", claim_text
+        ):
+            return False
+    return True
+
+
 def _splice_integration_code(
-    text: str, subjects: list[str], claims: list[dict[str, Any]], mechanism: str, client: Any
+    text: str,
+    subjects: list[str],
+    claims: list[dict[str, Any]],
+    relationship: "Relationship",
+    client: Any,
 ) -> str:
     """One PROPOSED integration example — synthesized (a real combined example
-    may not exist in sources), gated on: (a) compile(), (b) only interfaces
+    may not exist in sources), gated on: (a) compile(), (b) only mechanism terms
     named in claims, (c) captioned as proposed usage, never as quoted source.
 
-    The prompt is steered to the CLAIM-GROUNDED interfaces, not the raw FRAME
-    hypothesis — the hypothesis's interface (e.g. "SDK") is often absent from
-    every claim, and code built around it fails the grounding gate every time
-    (v43 live: 0/4). When no interface is documented at all, no groundable
-    example can exist → skip rather than fabricate."""
+    The prompt is steered to the CLAIM-GROUNDED per-task terms, not the raw FRAME
+    hypothesis — the hypothesis's term is often absent from every claim, and code
+    built around it fails the grounding gate every time (v43 live: 0/4). When no
+    mechanism term is documented at all, no groundable example can exist → skip
+    rather than fabricate."""
     if client is None or len(subjects) < 2:
         return text
-    grounded_ifaces = _grounded_interface_words(claims)
-    if not grounded_ifaces:
-        dbg("research_first _splice_integration_code: skipped — no claim-documented interface")
+    grounded_terms = _grounded_mechanism_terms(claims, relationship.mechanism_terms)
+    if not grounded_terms:
+        dbg("research_first _splice_integration_code: skipped — no claim-documented mechanism term")
         return text
     joint = [c for c in claims if len(c.get("subjects") or []) >= 2] or claims
     ev_lines = "\n".join(f"- {c['claim']} (URL: {c['url']})" for c in joint[:10])
-    iface_phrase = ", ".join(grounded_ifaces)
+    iface_phrase = ", ".join(grounded_terms)
     prompt = (
         f"Write a short, minimal PROPOSED usage example showing how "
         f"{' and '.join(subjects)} could be composed. Build it around one of "
-        f"these interfaces, which ARE documented in the claims: {iface_phrase}. "
-        "Use ONLY interfaces named in the claims below — never invent one absent "
-        "from them (in particular, do NOT use an interface just because it is "
+        f"these mechanisms, which ARE documented in the claims: {iface_phrase}. "
+        "Use ONLY mechanisms named in the claims below — never invent one absent "
+        "from them (in particular, do NOT use one just because it is "
         "mentioned in a hypothesis). Output ONLY a single fenced code block, "
         "nothing else.\n\n"
         f"CLAIMS:\n{ev_lines}"
@@ -1147,12 +1143,13 @@ def _splice_integration_code(
         return text
     if "```" not in block or block.count("```") % 2 != 0 or not _fenced_code_compiles(block):
         return text
-    if not _integration_interfaces_grounded(block, claims):
-        dbg("research_first _splice_integration_code: rejected — interface not named in claims")
+    if not _mechanism_terms_grounded(block, claims, relationship.mechanism_terms):
+        dbg("research_first _splice_integration_code: rejected — mechanism term not named in claims")
         return text
+    via = relationship.mechanism or relationship.descriptor
     caption = (
-        f"Proposed usage — {' + '.join(subjects)} composed via {mechanism}. "
-        "Illustrative only, synthesized from documented interfaces above; not quoted source code."
+        f"Proposed usage — {' + '.join(subjects)} composed via {via}. "
+        "Illustrative only, synthesized from documented mechanisms above; not quoted source code."
     )
     candidate = f"{text}\n\n{caption}\n\n{block}"
     if len(lint_artifact(candidate)) > len(lint_artifact(text)):
@@ -1164,18 +1161,10 @@ def _splice_integration_code(
 _DIA_COMPONENT_RE = re.compile(r"COMPONENT:\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|.*$")
 _DIA_EDGE_RE = re.compile(r"EDGE:\s*(.+?)\s*->\s*([^|]+?)\s*(?:\|\s*(.*))?$")
 _MAX_DIA_NODES = 15
-#: A cross-subject edge is grounded only if the evidence NAMES an integration
-#: mechanism — never invented from neither a joint claim nor a documented
-#: interface on each side (team-lead rule 2).
-#: The one place the integration-mechanism vocabulary is spelled out — generic
-#: interface terms (never task/subject names). Both the strict edge-grounding
-#: regex and the plural-tolerant claim-scan regex are built from this single
-#: alternation so the vocabulary is defined exactly once.
-_INTERFACE_WORD_ALT = r"api|cli|mcp|sdk|extension|plugin|webhook|connector|integrat\w*|interface"
-_INTERFACE_WORD_RE = re.compile(rf"(?i)\b({_INTERFACE_WORD_ALT})\b")
-#: Plural-tolerant form for scanning documented interfaces in claim prose (see
-#: _grounded_interface_words); group(1) is the singular base.
-_INTERFACE_WORD_PLURAL_RE = re.compile(rf"(?i)\b({_INTERFACE_WORD_ALT})s?\b")
+#: A cross-subject edge is grounded only if the evidence NAMES the relationship's
+#: mechanism — never invented from neither a joint claim nor a per-task mechanism
+#: term corroborated on each side (team-lead rule 2). The vocabulary is per-task
+#: (``relationship.mechanism_terms``, R3), no longer a fixed enum.
 
 
 #: Generic component-naming guidance shared by every diagram prompt. Names the
@@ -1285,65 +1274,31 @@ def _cross_cluster_edges(
 def _integration_label(
     subjects: list[str],
     claims: list[dict[str, Any]],
-    mechanism: str = "",
-    verify_terms: list[str] | None = None,
+    relationship: "Relationship",
 ) -> str | None:
     """A grounded label for a cross-subject edge, or ``None`` if ungrounded.
-    (a) a joint-tagged claim naming an integration mechanism (top priority,
-    unchanged); (b) the relationship HYPOTHESIS may upgrade a generic
-    "integration" label, but ONLY when independently corroborated — its own
-    words (or the verify terms it proposed checking for) actually appear in
-    the joint claims' text, not just asserted. A hypothesis directs search/
-    prompts but never becomes content by itself (team-lead) — printing an
-    uncorroborated mechanism string as the edge label would violate that;
-    (c) any joint claim at all, uncorroborated (generic label); (d) EACH
-    subject has its own claim naming a documented interface (API/CLI/MCP/...)
-    — never invented from neither (team-lead rule 2)."""
+    Regrounded on the per-task ``mechanism_terms`` (R3), never a fixed interface
+    enum: (a) a per-task mechanism term corroborated in a joint claim (top
+    priority); (b) any joint claim at all → a generic label from the per-task
+    descriptor (never the raw hypothesis sentence — a hypothesis directs search
+    but never becomes content by itself); (c) EACH subject has a claim
+    corroborating a per-task mechanism term — never invented from neither
+    (team-lead rule 2). The ≤6-word cap keeps a label a name, not a sentence."""
     joint = [c for c in claims if len(c.get("subjects") or []) >= 2]
-    for c in joint:
-        m = _INTERFACE_WORD_RE.search(c["claim"])
-        if m:
-            return m.group(1).lower()
+    grounded_joint = _grounded_mechanism_terms(joint, relationship.mechanism_terms)
+    if grounded_joint:
+        return grounded_joint[0]
     if joint:
-        if mechanism:
-            # Exclude bare subject-name tokens — a mechanism sentence always
-            # names both subjects ("Subject A calls Subject B via...") and so does every
-            # joint claim, so that overlap alone would corroborate ANY
-            # mechanism string, rubber-stamping the hypothesis instead of
-            # checking it.
-            subject_tokens = frozenset(
-                token
-                for subject in subjects
-                for token in _ANCHOR_TOKEN_RE.findall(subject.lower())
-            )
-            joint_text = " ".join(c["claim"] for c in joint)
-            candidates = [mechanism, *(verify_terms or [])]
-            if _anchor_hits(joint_text, candidates, exclude=subject_tokens) > 0:
-                # Corroboration decides WHETHER to upgrade; it never licenses
-                # printing the hypothesis sentence verbatim (v40 live defect:
-                # a 9-word hypothesis rendered as the cross-edge label). A
-                # label is a mechanism name — long mechanisms reduce to their
-                # interface word, then a corroborated verify term, else stay
-                # generic.
-                if len(mechanism.split()) <= 6:
-                    return mechanism
-                im = _INTERFACE_WORD_RE.search(mechanism)
-                if im:
-                    return im.group(1).lower()
-                for term in verify_terms or []:
-                    if _anchor_hits(joint_text, [term], exclude=subject_tokens) > 0:
-                        return term
-        return "integration"
-    per_subject: dict[str, str] = {}
+        label = relationship.descriptor.strip().lower()
+        return label if label and len(label.split()) <= 6 else None
+    per_subject: list[str] = []
     for subject in subjects:
-        for c in claims:
-            if subject in (c.get("subjects") or []):
-                m = _INTERFACE_WORD_RE.search(c["claim"])
-                if m:
-                    per_subject[subject] = m.group(1).lower()
-                    break
+        subj_claims = [c for c in claims if subject in (c.get("subjects") or [])]
+        terms = _grounded_mechanism_terms(subj_claims, relationship.mechanism_terms)
+        if terms:
+            per_subject.append(terms[0])
     if len(per_subject) >= len(subjects) >= 2:
-        return " / ".join(dict.fromkeys(per_subject.values()))
+        return " / ".join(dict.fromkeys(per_subject))
     return None
 
 
@@ -1484,13 +1439,12 @@ def _fallback_subject_diagram(subject: str, claims: list[dict[str, Any]]) -> str
 def _fallback_cluster_diagram(
     subjects: list[str],
     claims: list[dict[str, Any]],
-    mechanism: str = "",
-    verify_terms: list[str] | None = None,
+    relationship: "Relationship",
 ) -> str | None:
     """Deterministic clustered integration diagram from grounded subject features."""
     if len(subjects) < 2:
         return None
-    label = _integration_label(subjects, claims, mechanism, verify_terms)
+    label = _integration_label(subjects, claims, relationship)
     if not label:
         return None
     components: list[tuple[str, str]] = []
@@ -1515,15 +1469,16 @@ def _splice_diagram(
     subjects: list[str],
     claims: list[dict[str, Any]],
     client: Any,
-    mechanism: str = "",
-    verify_terms: list[str] | None = None,
+    relationship: "Relationship",
 ) -> str:
     from studio.diagram_render import build_diagram_block
 
     body: str | None = None
     if client is not None and claims and len(subjects) >= 2:
         try:
-            reply = client.chat([{"role": "user", "content": _diagram_prompt(subjects, claims, mechanism)}])
+            reply = client.chat(
+                [{"role": "user", "content": _diagram_prompt(subjects, claims, relationship.mechanism)}]
+            )
             raw = str(getattr(reply, "text", "") or "")
         except Exception as exc:  # noqa: BLE001 — a bad diagram call must never break the run
             dbg(f"research_first _splice_diagram: call failed exc={exc!r}")
@@ -1536,10 +1491,10 @@ def _splice_diagram(
             # Structure (rule 1) AND grounding (rule 2): a single-subject diagram
             # or two disconnected islands both fail here — no grounded cross-edge
             # means no diagram, not a fabricated one.
-            if len(components) >= 2 and cross and _integration_label(subjects, claims, mechanism, verify_terms):
+            if len(components) >= 2 and cross and _integration_label(subjects, claims, relationship):
                 body = _render_cluster_diagram(components, cross, subjects)
     if not body:
-        body = _fallback_cluster_diagram(subjects, claims, mechanism, verify_terms)
+        body = _fallback_cluster_diagram(subjects, claims, relationship)
     if not body:
         return section_text
     from studio.structural_producer import _diagram_explanation_sentence
@@ -1551,6 +1506,48 @@ def _splice_diagram(
     candidate = f"{section_text}\n\n{caption}\n\n{build_diagram_block(body)}"
     if any("mermaid" in w.lower() for w in lint_artifact(candidate)):
         return section_text  # never ship a diagram that fails lint
+    return candidate
+
+
+#: Cap on comparison rows per subject — a table, not a claim dump.
+_MAX_COMPARISON_ROWS = 4
+
+
+def _table_cell(text: str) -> str:
+    """Make a claim safe inside a markdown table cell — escape pipes, flatten
+    newlines."""
+    return text.replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _splice_comparison_table(
+    text: str, subjects: list[str], claims: list[dict[str, Any]]
+) -> str:
+    """A deterministic comparison table for competing/alternative subjects (R3):
+    one column per subject, cells drawn ONLY from that subject's own claims —
+    grounded, never synthesized. Replaces the integration diagram/code for the
+    competes/alternative branch. Fail-open to unchanged text for <2 subjects or
+    thin claims (any subject with no grounded claim to compare)."""
+    subs = subjects[:2]
+    if len(subs) < 2:
+        return text
+    per_subject: dict[str, list[str]] = {}
+    for s in subs:
+        rows = [c["claim"] for c in claims if s in (c.get("subjects") or [])]
+        if not rows:
+            return text  # thin — nothing grounded to compare on this side
+        per_subject[s] = rows[:_MAX_COMPARISON_ROWS]
+    n = max(len(v) for v in per_subject.values())
+    lines = [
+        "| " + " | ".join(subs) + " |",
+        "| " + " | ".join("---" for _ in subs) + " |",
+    ]
+    for i in range(n):
+        cells = [per_subject[s][i] if i < len(per_subject[s]) else "" for s in subs]
+        lines.append("| " + " | ".join(_table_cell(c) for c in cells) + " |")
+    caption = f"Comparison: {' vs '.join(subs)} (from documented claims)."
+    candidate = f"{text}\n\n{caption}\n\n" + "\n".join(lines)
+    if len(lint_artifact(candidate)) > len(lint_artifact(text)):
+        return text  # never ship a splice that introduces a NEW lint issue
     return candidate
 
 
@@ -1649,19 +1646,47 @@ def _splice_subject_diagram(
     return candidate
 
 
-def _write_summary(requirement: str, written: dict[str, str], client: Any, mechanism: str = "") -> str:
+def _summary_relationship_instruction(relationship: "Relationship | None") -> str:
+    """The conclusion the summary must state, appropriate to the relationship
+    KIND (R3): a cooperation mechanism, a comparison trade-off, independence, or
+    (unknown) nothing extra. Always grounded in what the sections already say —
+    the "never introduce" rule still applies."""
+    if relationship is None:
+        return ""
+    kind = relationship.kind
+    if kind in ("cooperates", "extends") and relationship.mechanism:
+        return (
+            " State your conclusion on how the subjects relate, drawing on what the "
+            f"sections say about this hypothesis: {relationship.mechanism}."
+        )
+    if kind in ("competes", "alternative"):
+        return (
+            " State your conclusion on the key trade-offs between the subjects, "
+            "drawing only on the comparison the sections already make."
+        )
+    if kind == "independent":
+        return (
+            " Note that the subjects address independent concerns; do not assert a "
+            "relationship the sections do not support."
+        )
+    return ""
+
+
+def _write_summary(
+    requirement: str,
+    written: dict[str, str],
+    client: Any,
+    relationship: "Relationship | None" = None,
+) -> str:
     """Written LAST from the already-drafted body (D4) — it can only summarize
     what exists, killing the overclaiming-summary failure by construction."""
     if client is None:
         return "_(summary unavailable)_"
     body = "\n\n".join(f"### {name}\n{text[:1200]}" for name, text in written.items())
-    # N>=2 subjects: the summary must state the relationship conclusion, not
-    # just recap each subject in isolation — grounded in what the sections
-    # already say (the "never introduce" rule above still applies).
-    relationship_instruction = (
-        f" State your conclusion on how the subjects relate, drawing on what the "
-        f"sections say about this hypothesis: {mechanism}." if mechanism else ""
-    )
+    # N>=2 subjects: the summary must state the relationship conclusion
+    # appropriate to the classified kind, not just recap each subject in
+    # isolation — grounded in what the sections already say.
+    relationship_instruction = _summary_relationship_instruction(relationship)
     prompt = (
         "Write a 2-3 paragraph Executive Summary for the research report below. "
         "Summarize ONLY what the sections below actually say — never introduce a "
@@ -1691,6 +1716,34 @@ def _assemble(title: str, summary: str, sections: list[str], written: dict[str, 
         body = written.get(name, "_(to be completed)_").strip() or "_(to be completed)_"
         parts.append(f"## {name}\n\n{body}")
     return "\n\n".join(parts).rstrip() + "\n"
+
+
+def _enforce_references_last(text: str) -> str:
+    """v44 ordering fix: any ``## ``-level section that lands AFTER
+    ``## References`` is moved to before it, preserving the moved sections'
+    relative order. A spliced/relationship section (or a stray model heading)
+    must never trail References. Fence-aware (a ``## `` inside a code fence is
+    not a heading); fail-open (no References heading, or already last) →
+    unchanged."""
+    lines = text.split("\n")
+    in_fence = False
+    heads: list[int] = []
+    ref_pos: int | None = None
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and re.match(r"(?i)^##\s+\S", ln):
+            if re.match(r"(?i)^##\s+references\s*$", ln):
+                ref_pos = len(heads)
+            heads.append(i)
+    if ref_pos is None or ref_pos == len(heads) - 1:
+        return text
+    bounds = heads + [len(lines)]
+    blocks = [lines[bounds[k] : bounds[k + 1]] for k in range(len(heads))]
+    ref_block = blocks.pop(ref_pos)
+    blocks.append(ref_block)
+    out = lines[: heads[0]] + [ln for block in blocks for ln in block]
+    return "\n".join(out)
 
 
 def _find_duplicate_headings(text: str) -> list[str]:
@@ -1758,11 +1811,6 @@ def generate_research_first(
     code_needed = any(_CODE_SHAPED_RE.search(b) for g in groups for b in g)
     diagram_needed = any(_DIAGRAM_SHAPED_RE.search(b) for g in groups for b in g)
     sections = _build_sections(groups)
-    # GENERIC RULE (user): subjects[] and the FRAME relationship are outputs
-    # every downstream producer consumes — for N>=2 subjects the skeleton
-    # includes an integration/relationship section BY CONSTRUCTION, never
-    # emergent (same principle as disambiguation and the relationship step).
-    sections = _ensure_integration_section(sections, subjects)
     dbg(
         f"research_first FRAME: subjects={subjects} sections={sections} "
         f"code_needed={code_needed} diagram_needed={diagram_needed}"
@@ -1771,9 +1819,14 @@ def generate_research_first(
 
     # 2. RESEARCH
     emit("research", {"subjects": subjects})
-    ledger, assumptions, mechanism, verify_terms = _research(
+    ledger, assumptions, relationship = _research(
         subjects, evidence_dir, requirement, judge_client, emit=emit
     )
+    # GENERIC RULE (user): subjects[] and the classified relationship are outputs
+    # every downstream producer consumes — for N>=2 subjects that actually relate
+    # (kind != independent) the skeleton includes a relationship section BY
+    # CONSTRUCTION, named from the per-task descriptor (R3), never emergent.
+    sections = _ensure_relationship_section(sections, subjects, relationship)
 
     # 3. CLAIMS
     claims = _build_claims(ledger, subjects, client, ws_dir)
@@ -1781,14 +1834,17 @@ def generate_research_first(
 
     # 4. WRITE
     emit("write", {"sections": [s for s in sections if s.lower() not in _SKIP_WRITE]})
-    integration_home = _pick_integration_home(sections)
-    # N>=2 subjects: the integration diagram lands in the dedicated integration
-    # section (this round supersedes the earlier "design-architecture section"
-    # placement); N=1 keeps the old design/architecture-section pick.
+    relationship_home = _pick_relationship_home(sections, relationship)
+    # R3 branch on the classified KIND: cooperates/extends/unknown warrant an
+    # integration story (diagram + code); competes/alternative a comparison
+    # table (no integration artifact); independent no cross-subject artifact at
+    # all. Per-subject diagrams ship for every kind.
     multi = len(subjects) >= 2
-    diagram_home = (integration_home if diagram_needed and multi else None) or (
-        _pick_home(sections, _DIAGRAM_HOME_RE) if diagram_needed else None
-    )
+    wants_integration = multi and relationship.kind in ("cooperates", "extends", "unknown")
+    wants_comparison = multi and relationship.kind in ("competes", "alternative")
+    # The integration diagram lands in the dedicated relationship section; N=1
+    # (and non-integration kinds) get per-subject diagrams only, placed below.
+    diagram_home = relationship_home if (diagram_needed and wants_integration) else None
     code_home = _pick_home(sections, _CODE_HOME_RE) if code_needed and not multi else None
     scope_home = _pick_home(sections, _SCOPE_HOME_RE)
     written: dict[str, str] = {}
@@ -1807,8 +1863,12 @@ def generate_research_first(
             # N=1 only (see `multi` gate above) — the single-evidence-file path,
             # unchanged from before this round.
             text = _splice_code(text, evidence_dir, client)
-        if name == diagram_home:
-            text = _splice_diagram(text, subjects, claims, client, mechanism, verify_terms)
+        if name == diagram_home and wants_integration:
+            text = _splice_diagram(text, subjects, claims, client, relationship)
+        if name == relationship_home and wants_comparison:
+            # competes/alternative: a grounded comparison table replaces the
+            # integration diagram/code entirely (R3).
+            text = _splice_comparison_table(text, subjects, claims)
         if name == scope_home and assumptions:
             # P4/D3 honesty: the resolved subject interpretation is a stated
             # assumption, not a silent guess — surfaced where a reader looks
@@ -1840,31 +1900,38 @@ def generate_research_first(
     # for N>=2 only.
     code_subject_homes: dict[str, str] = {}
     if code_needed and multi:
-        exclude = {integration_home} if integration_home else set()
+        exclude = {relationship_home} if relationship_home else set()
         for subject in subjects:
             home = _pick_subject_home(written, subject, exclude)
             if home:
                 code_subject_homes[subject] = home
                 written[home] = _splice_subject_code(written[home], subject, claims, client)
-        if integration_home:
-            written[integration_home] = _splice_integration_code(
-                written[integration_home], subjects, claims, mechanism, client
+        # The ONE integration example ships only for the integration kinds — a
+        # competes/alternative report gets the comparison table instead.
+        if wants_integration and relationship_home:
+            written[relationship_home] = _splice_integration_code(
+                written[relationship_home], subjects, claims, relationship, client
             )
     dbg(
         f"research_first WRITE: sections={len(written)} code_home={code_home!r} "
         f"diagram_home={diagram_home!r} subject_homes={subject_homes!r} "
-        f"code_subject_homes={code_subject_homes!r} integration_home={integration_home!r}"
+        f"code_subject_homes={code_subject_homes!r} relationship_home={relationship_home!r} "
+        f"kind={relationship.kind!r}"
     )
 
     summary = _drop_ungrounded_sentences(
         _sanitize_section_headings(
-            _write_summary(requirement, written, client, mechanism), sections
+            _write_summary(requirement, written, client, relationship), sections
         ),
         claims,
     )
 
     # 5. ASSEMBLE
     text = _assemble(title, summary, sections, written)
+    # v44 ordering fix: enforce References-last BEFORE rebuilding it — a spliced
+    # or model-emitted section must never trail References (rebuild-from-claims
+    # then finds it correctly at the tail).
+    text = _enforce_references_last(text)
     # dedupe_sections (old hub/spoke pipeline) is deliberately NOT run here
     # (team-lead ruling): this linear pipeline writes each section exactly
     # once from ``sections``, so duplicate ## headings are impossible BY
