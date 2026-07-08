@@ -476,7 +476,35 @@ def normalize_artifact(text: str) -> str:
     un-glue mid-line headings, THEN collapse duplicate sections to one (richest body).
     Order matters — un-gluing first lets dedupe see the real, separated headings. Idempotent
     and a no-op on an already-clean document, so it is safe to run after every phase."""
-    return _dedup_long_sentences(dedupe_sections(_split_glued_headings(text)))
+    return references_last(_dedup_long_sentences(dedupe_sections(_split_glued_headings(text))))
+
+
+def references_last(text: str) -> str:
+    """Guarantee ``## References`` is the last top-level section — any ``## ``
+    section that lands after it (a model-emitted stray heading, or a
+    relationship/comparison section a reducer reordered past it) is moved to
+    before References, preserving the moved sections' relative order. Fence-aware
+    (a ``## `` inside a code fence is not a heading); fail-open (no References
+    heading, or already last) → unchanged. Lives here so every ``normalize_artifact``
+    caller inherits the invariant (the reorder that breaks it is ``dedupe_sections``)."""
+    lines = text.split("\n")
+    in_fence = False
+    heads: list[int] = []
+    ref_pos: int | None = None
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and _re.match(r"(?i)^##\s+\S", ln):
+            if _re.match(r"(?i)^##\s+references\s*$", ln):
+                ref_pos = len(heads)
+            heads.append(i)
+    if ref_pos is None or ref_pos == len(heads) - 1:
+        return text
+    bounds = heads + [len(lines)]
+    blocks = [lines[bounds[k] : bounds[k + 1]] for k in range(len(heads))]
+    ref_block = blocks.pop(ref_pos)
+    blocks.append(ref_block)
+    return "\n".join(lines[: heads[0]] + [ln for block in blocks for ln in block])
 
 
 _PENDING_PLACEHOLDER_RE = _re.compile(

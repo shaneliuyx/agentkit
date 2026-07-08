@@ -10,8 +10,37 @@ from studio.artifact_text import (
     _repair_doubled_citations,
     _repair_fence_contamination,
     merge_duplicate_sections,
+    normalize_artifact,
+    references_last,
 )
 from studio.textutil import norm_urls
+
+
+def test_references_last_moves_trailing_sections_before_references() -> None:
+    # v44/v45 ordering defect: a reducer left sections after References.
+    text = (
+        "## Intro\nbody\n\n## References\n- https://x/\n\n"
+        "## Stray Section\ntail\n\n## Relationship: Comparison\nmore\n"
+    )
+    out = references_last(text)
+    import re as _re
+
+    heads = _re.findall(r"(?m)^## (.+)$", out)
+    assert heads[-1] == "References"
+    assert heads == ["Intro", "Stray Section", "Relationship: Comparison", "References"]
+
+
+def test_references_last_fence_aware_and_noop_when_last() -> None:
+    fenced = "## A\n```\n## not a heading\n```\n\n## References\n- u\n"
+    assert references_last(fenced) == fenced  # already last; fence line ignored
+
+
+def test_normalize_artifact_guarantees_references_last() -> None:
+    text = "## A\nx\n\n## References\n- https://u/\n\n## B\ny\n"
+    out = normalize_artifact(text)
+    import re as _re
+
+    assert _re.findall(r"(?m)^## (.+)$", out)[-1] == "References"
 
 
 def test_repairs_closing_fence_with_glued_citation() -> None:

@@ -37,6 +37,7 @@ from studio.artifact_text import (
     _REFERENCES_HEADING_RE,
     _repair_doubled_citations,
     _repair_fence_contamination,
+    references_last,
 )
 from studio.report_profiles import GENERIC_RESEARCH_PROFILE
 from studio.requirement_compliance import (
@@ -1717,32 +1718,11 @@ def _assemble(title: str, summary: str, sections: list[str], written: dict[str, 
     return "\n\n".join(parts).rstrip() + "\n"
 
 
-def _enforce_references_last(text: str) -> str:
-    """v44 ordering fix: any ``## ``-level section that lands AFTER
-    ``## References`` is moved to before it, preserving the moved sections'
-    relative order. A spliced/relationship section (or a stray model heading)
-    must never trail References. Fence-aware (a ``## `` inside a code fence is
-    not a heading); fail-open (no References heading, or already last) →
-    unchanged."""
-    lines = text.split("\n")
-    in_fence = False
-    heads: list[int] = []
-    ref_pos: int | None = None
-    for i, ln in enumerate(lines):
-        if ln.lstrip().startswith("```"):
-            in_fence = not in_fence
-        elif not in_fence and re.match(r"(?i)^##\s+\S", ln):
-            if re.match(r"(?i)^##\s+references\s*$", ln):
-                ref_pos = len(heads)
-            heads.append(i)
-    if ref_pos is None or ref_pos == len(heads) - 1:
-        return text
-    bounds = heads + [len(lines)]
-    blocks = [lines[bounds[k] : bounds[k + 1]] for k in range(len(heads))]
-    ref_block = blocks.pop(ref_pos)
-    blocks.append(ref_block)
-    out = lines[: heads[0]] + [ln for block in blocks for ln in block]
-    return "\n".join(out)
+# References-last enforcement is single-sourced in artifact_text (it is also
+# baked into normalize_artifact so every finalize path inherits it — the reorder
+# that breaks the invariant, dedupe_sections, lives there too). Kept as a
+# module-level alias so the ASSEMBLE call site and its tests stay put.
+_enforce_references_last = references_last
 
 
 def _find_duplicate_headings(text: str) -> list[str]:
