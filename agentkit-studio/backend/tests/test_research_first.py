@@ -775,8 +775,23 @@ def test_integration_label_upgrades_to_mechanism_when_corroborated() -> None:
     # words show up in the joint claims' text, not just asserted.
     claims = [{"claim": "Pi and Craft are both used to build agents via a delegation pattern.",
                "subjects": ["Pi", "Craft"], "url": "u"}]
-    label = rf._integration_label(["Pi", "Craft"], claims, "Pi calls Craft via a delegation pattern")
-    assert label == "Pi calls Craft via a delegation pattern"
+    label = rf._integration_label(["Pi", "Craft"], claims, "calls via a delegation pattern")
+    assert label == "calls via a delegation pattern"
+
+
+def test_integration_label_never_ships_sentence_as_label() -> None:
+    # v40 live regression (s_798eeda98bd1): the corroborated hypothesis
+    # SENTENCE rendered verbatim as the cross-edge label. A label is a
+    # mechanism name, not a sentence — long mechanisms reduce to their
+    # interface word (or corroborated verify term), never print whole.
+    claims = [{"claim": "Craft handles task delegation work initiated from Pi agents.",
+               "subjects": ["Pi", "Craft"], "url": "u"}]
+    label = rf._integration_label(
+        ["Pi", "Craft"],
+        claims,
+        "Pi calls Craft via an SDK-based task delegation pattern",
+    )
+    assert label == "sdk"
 
 
 def test_integration_label_stays_generic_when_mechanism_uncorroborated() -> None:

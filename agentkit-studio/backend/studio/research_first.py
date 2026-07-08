@@ -1177,7 +1177,20 @@ def _integration_label(
             joint_text = " ".join(c["claim"] for c in joint)
             candidates = [mechanism, *(verify_terms or [])]
             if _anchor_hits(joint_text, candidates, exclude=subject_tokens) > 0:
-                return mechanism
+                # Corroboration decides WHETHER to upgrade; it never licenses
+                # printing the hypothesis sentence verbatim (v40 live defect:
+                # a 9-word hypothesis rendered as the cross-edge label). A
+                # label is a mechanism name — long mechanisms reduce to their
+                # interface word, then a corroborated verify term, else stay
+                # generic.
+                if len(mechanism.split()) <= 6:
+                    return mechanism
+                im = _INTERFACE_WORD_RE.search(mechanism)
+                if im:
+                    return im.group(1).lower()
+                for term in verify_terms or []:
+                    if _anchor_hits(joint_text, [term], exclude=subject_tokens) > 0:
+                        return term
         return "integration"
     per_subject: dict[str, str] = {}
     for subject in subjects:
