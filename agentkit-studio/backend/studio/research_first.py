@@ -1054,6 +1054,23 @@ _MAX_DIA_NODES = 15
 _INTERFACE_WORD_RE = re.compile(r"(?i)\b(api|cli|mcp|sdk|extension|plugin|webhook|connector|integrat\w*|interface)\b")
 
 
+#: Generic component-naming guidance shared by every diagram prompt. Names the
+#: MORPHOLOGY of a real architectural component (proper module/class/package/
+#: service names) versus sentence glue — categorically, never by listing the
+#: task's actual weak words (that would game a specific failing case rather than
+#: fix the class). Root cause it addresses: with rich claims naming real
+#: components (e.g. an "AgentContext" class, a hyphenated core package), a weak
+#: model still emitted bare prose words ("Designed", "Commits") lifted from a
+#: claim sentence, and literal-token grounding could not tell them apart because
+#: both appear in the prose.
+_COMPONENT_NAMING_RULE = (
+    "Each <name> must be a PROPER named component — a module, class, package, "
+    "service, or interface as named in the evidence (multi-word names, CamelCase "
+    "identifiers, and hyphenated/dotted package names are all good). Never use a "
+    "bare verb, adjective, participle, or generic sentence word as a name."
+)
+
+
 def _diagram_prompt(subjects: list[str], claims: list[dict[str, Any]], mechanism: str = "") -> str:
     subj_list = ", ".join(subjects)
     ev_lines = "\n".join(
@@ -1073,7 +1090,8 @@ def _diagram_prompt(subjects: list[str], claims: list[dict[str, Any]], mechanism
         "least one EDGE connecting a component from one subject to a component "
         "from the OTHER subject, labeled with the actual integration mechanism "
         "(e.g. an API, CLI, MCP, or extension-point interface) NAMED in the "
-        f"evidence below — never invent a mechanism the evidence doesn't name.\n\n{hint}"
+        f"evidence below — never invent a mechanism the evidence doesn't name.\n\n"
+        f"{_COMPONENT_NAMING_RULE}\n\n{hint}"
         f"EVIDENCE:\n{ev_lines}"
     )
 
@@ -1450,6 +1468,7 @@ def _subject_components_prompt(subject: str, claims_text: str) -> str:
         "EDGE: <name A> -> <name B> | <optional label>\n\n"
         f"Only include components that belong to {subject} — never a component "
         "belonging to another subject.\n\n"
+        f"{_COMPONENT_NAMING_RULE}\n\n"
         f"=== CLAIMS ===\n{claims_text}\n=== END CLAIMS ==="
     )
 
