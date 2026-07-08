@@ -95,11 +95,12 @@ def test_write_section_drops_unprompted_fences_and_patch_metadata() -> None:
         "Useful prose with a citation (https://example.com/source).\n\n"
         "```python\nprint('ungated example')\n```\n\n"
         "ARTICLE_TITLE: leaked search record\n"
+        "### RESEARCH_FINDING\n"
         "- PATCH_TARGET: Key Findings\n"
         "  * SEARCH: ok\n"
         "1. ARTICLE_TITLE: numbered leak\n"
         "+ PATCH_TARGET: plus leak\n"
-        "> SEARCH: quoted leak"
+        "> SEARCH: error quoted leak"
     )
     text = rf._write_section(
         "Scope",
@@ -109,11 +110,30 @@ def test_write_section_drops_unprompted_fences_and_patch_metadata() -> None:
     )
     assert "```" not in text
     assert "ARTICLE_TITLE" not in text
+    assert "RESEARCH_FINDING" not in text
     assert "PATCH_TARGET" not in text
     assert "SEARCH:" not in text
     assert "numbered leak" not in text
     assert "plus leak" not in text
     assert "quoted leak" not in text
+
+
+def test_write_section_preserves_reader_facing_url_and_search_headings() -> None:
+    body = (
+        "## URL: Evidence Index\n\n"
+        "This section explains URL governance.\n\n"
+        "## Search: Method\n\n"
+        "This section explains search method design.\n\n"
+        "URL: Evidence Index\n"
+        "SEARCH: Method"
+    )
+
+    out = rf._strip_patch_metadata_lines(body)
+
+    assert "## URL: Evidence Index" in out
+    assert "## Search: Method" in out
+    assert "URL: Evidence Index" in out
+    assert "SEARCH: Method" in out
 
 
 def test_disambiguate_subject_fails_open_without_judge() -> None:
@@ -923,6 +943,38 @@ def test_subject_diagram_falls_back_to_grounded_features() -> None:
     assert "API" in out or "Runner" in out or "Plugin" in out
 
 
+def test_subject_feature_labels_reject_sentence_start_filler_words() -> None:
+    claims = [
+        {
+            "claim": "The repository contains over 100 files and various examples.",
+            "subjects": ["Alpha Product"],
+            "url": "u1",
+        }
+    ]
+
+    assert rf._subject_feature_labels("Alpha Product", claims) == []
+
+
+def test_splice_subject_diagram_rejects_filler_model_labels() -> None:
+    text = "Alpha Product has a documented architecture."
+    claims = [
+        {
+            "claim": "The repository contains over 100 files and various examples.",
+            "subjects": ["Alpha Product"],
+            "url": "u1",
+        }
+    ]
+    reply = (
+        "COMPONENT: The | article word\n"
+        "COMPONENT: Repository | article word\n"
+        "COMPONENT: Contains | article word\n"
+        "COMPONENT: Over | article word\n"
+        "EDGE: The -> Repository\nEDGE: Repository -> Contains\nEDGE: Contains -> Over\n"
+    )
+
+    assert rf._splice_subject_diagram(text, "Alpha Product", claims, _client(reply)) == text
+
+
 def test_splice_subject_diagram_adds_captioned_grounded_diagram() -> None:
     # Team-lead ruling (option b): grounded against the subject's OWN claims,
     # not the home section's rendered prose — this text deliberately does NOT
@@ -1128,6 +1180,13 @@ def test_sanitize_section_headings_strips_leading_self_heading() -> None:
     out = rf._sanitize_section_headings(text, ["What is Pi", "References"])
     assert not out.lstrip().startswith("#")
     assert "Pi is an agent runtime" in out
+
+
+def test_sanitize_section_headings_drops_inline_sibling_heading_echo() -> None:
+    text = "Summary prose ends here.## Scope and Research Questions\n\nDuplicated scope body."
+    out = rf._sanitize_section_headings(text, ["Executive Summary", "Scope and Research Questions"])
+    assert "## Scope and Research Questions" not in out
+    assert "Summary prose ends here." in out
 
 
 def test_sanitize_section_headings_drops_sibling_echo_and_demotes_unknown() -> None:

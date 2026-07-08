@@ -688,7 +688,13 @@ def _neutralize_embedded_quotes(text: str, claims: list[dict[str, Any]]) -> str:
 _INLINE_URL_RE = re.compile(r"https?://\S+")
 _PATCH_METADATA_LINE_RE = re.compile(
     r"(?m)^[ \t]*(?:(?:[-*+>]|\d+[.)])\s*)?"
-    r"(?:ARTICLE_TITLE|URL|POPULARITY|PUBLICATION|KEY_INSIGHT|PATCH_TARGET|SEARCH):.*$"
+    r"(?:"
+    r"(?:ARTICLE_TITLE|POPULARITY|PUBLICATION|KEY_INSIGHT|PATCH_TARGET)\s*:.*"
+    r"|URL\s*:\s*(?:https?://\S+|\(?none\)?)"
+    r"|SEARCH\s*:\s*(?:ok|error)\b.*"
+    r"|#{1,6}\s*RESEARCH_FINDING\b.*"
+    r"|RESEARCH_FINDING(?:\s*:.*)?"
+    r")$"
 )
 
 
@@ -843,6 +849,7 @@ def _sanitize_section_headings(text: str, section_names: list[str]) -> str:
             out_parts.append(part)
             seen_content = True
             continue
+        part = re.sub(r"(?<=[.!?])\s*(#{1,6}\s+)", r"\n\1", part)
         lines: list[str] = []
         for ln in part.split("\n"):
             m = _HEADING_LINE_RE.match(ln)
@@ -1057,13 +1064,11 @@ def _ground_components(components: list[tuple[str, str]], grounding_text: str) -
     """Keep a component iff >=1 significant (>=4 char) token of its name is
     literally present in *grounding_text* — same literal-token principle as
     ``diagram_render._ground`` (reused directly, not re-derived)."""
-    from studio.diagram_render import _significant_tokens
-
     low = grounding_text.lower()
     kept = []
     for name, subject in components[:_MAX_DIA_NODES]:
-        sig = _significant_tokens(name)
-        if not sig or any(re.search(r"\b" + re.escape(t), low) for t in sig):
+        discriminating = _component_label_tokens(name)
+        if discriminating and any(re.search(r"\b" + re.escape(t), low) for t in discriminating):
             kept.append((name, subject))
     return kept
 
@@ -1188,13 +1193,31 @@ def _render_cluster_diagram(
 _FEATURE_STOPWORDS = {
     "about", "agent", "agents", "allow", "allows", "also", "and", "based",
     "because", "being", "both", "built", "called", "calls", "can", "connect",
-    "connects", "could", "data", "design", "develop", "development", "docs",
-    "documentation", "from", "has", "have", "include", "includes", "into",
-    "like", "local", "main", "minimal", "named", "platform", "provides",
+    "connects", "contains", "could", "data", "design", "develop",
+    "development", "docs", "documentation", "examples", "files", "from",
+    "has", "have", "include", "includes", "including", "into", "like",
+    "local", "main", "minimal",
+    "named", "over", "platform", "provides", "repository", "repositories",
     "report", "research", "source", "sources", "subject", "support",
     "supports", "task", "tasks", "that", "their", "through", "used", "uses",
-    "using", "with", "workflow", "workflows",
+    "using", "various", "with", "workflow", "workflows",
 }
+
+
+def _component_label_tokens(label: str) -> list[str]:
+    """Discriminating lowercase tokens that make a diagram label component-like.
+
+    This is intentionally generic: it rejects sentence glue and architecture
+    nouns by category, not task-specific names. Short all-caps acronyms (API,
+    MCP) are allowed because they are common real component/interface labels.
+    """
+    from studio.diagram_render import _GENERIC_LABELS, _significant_tokens
+
+    sig = _significant_tokens(label)
+    if not sig:
+        stripped = label.strip()
+        return [stripped.lower()] if re.fullmatch(r"[A-Z0-9]{2,6}", stripped) else []
+    return [t for t in sig if t not in _GENERIC_LABELS and t not in _FEATURE_STOPWORDS]
 
 
 def _subject_feature_labels(
@@ -1218,6 +1241,8 @@ def _subject_feature_labels(
             return
         low = label.lower()
         if low in subject_names or any(name in low for name in subject_names) or low in labels:
+            return
+        if not _component_label_tokens(label):
             return
         if low not in [x.lower() for x in labels]:
             labels.append(label)
