@@ -43,10 +43,9 @@ inventing them. (Escape hatch, deferred until a real non-literal node is ever
 observed: one cheap LLM-verify per zero-token-overlap residual node. Currently the
 residual == the fabrications, so it would add cost for nothing — not added.)
 
-A label with no significant token (all <4 chars, e.g. "AI", "DB") cannot be
-literal-checked → it FALLS OPEN (kept). The accept gate (rubric/lint non-regression
-+ strict opportunity-count drop) is the final backstop, so grounding must never
-hard-reject what it cannot check.
+Short all-caps acronym labels (for example "API", "MCP", "DB") are checked
+against their lowercase acronym form. Other labels with no significant token are
+dropped as sentence glue rather than falling open.
 """
 from __future__ import annotations
 
@@ -60,7 +59,7 @@ _MIN_NODES = 4
 _MAX_NODES = 15
 
 #: Minimum length for a label token to count as a grounding signal. Below this,
-#: tokens are glue words / acronyms too generic to discriminate real from fabricated.
+#: tokens are glue words or too short to discriminate real from fabricated.
 _MIN_TOKEN_LEN = 4
 
 #: A diagram's whole value is RELATIONSHIPS: N boxes with zero edges is a (worse) bullet
@@ -131,14 +130,32 @@ _GENERIC_LABELS = frozenset({
     "tools", "platform", "platforms", "application", "applications", "layer", "layers",
     "output", "outputs", "input", "inputs", "result", "results", "object", "objects",
     "interface", "interfaces", "function", "functions", "pipeline", "pipelines",
+    "repository", "repositories", "contains", "including", "various", "over", "files",
+    "examples",
 })
 
 
 def _significant_tokens(label: str) -> list[str]:
     """Lowercased alphanumeric tokens of ``label`` at least ``_MIN_TOKEN_LEN`` chars —
     the terms specific enough to ground against ("planner", "executor"). Short glue
-    ("a", "the", "of") and bare acronyms ("AI", "DB") are dropped as non-discriminating."""
+    ("a", "the", "of") are dropped as non-discriminating."""
     return [t for t in re.findall(r"[a-z0-9]+", label.lower()) if len(t) >= _MIN_TOKEN_LEN]
+
+
+def _short_acronym(label: str) -> str | None:
+    """Groundable form for short real acronym labels; ``The``/``And`` stay invalid."""
+    stripped = label.strip()
+    if re.fullmatch(r"[A-Z0-9]{2,6}", stripped):
+        return stripped.lower()
+    return None
+
+
+def _discriminating_tokens(label: str) -> list[str]:
+    sig = _significant_tokens(label)
+    if not sig:
+        acronym = _short_acronym(label)
+        return [acronym] if acronym else []
+    return [t for t in sig if t not in _GENERIC_LABELS]
 
 
 def _ground(comps: list[str], artifact_text: str) -> list[str]:
@@ -149,18 +166,14 @@ def _ground(comps: list[str], artifact_text: str) -> list[str]:
 
     Real nodes survive because the model extracts the list FROM the prose (verbatim by
     construction); a fabrication sharing no ≥4-char token with the report is dropped. A
-    label with no significant token at all is un-checkable → kept (fall-open; the accept
-    gate is the backstop). A label whose ONLY significant tokens are generic
+    short all-caps acronym label is checked against its acronym token; other labels with
+    no significant token are dropped. A label whose ONLY significant tokens are generic
     ("System", "Data Process") is dropped as non-discriminating (C3). See the module
     docstring for why literal grounding beats the embedding-cosine guard it replaces."""
     low = artifact_text.lower()
     kept: list[str] = []
     for name in comps[:_MAX_NODES]:
-        sig = _significant_tokens(name)
-        if not sig:
-            kept.append(name)  # un-checkable short label (acronym) → fall open
-            continue
-        discriminating = [t for t in sig if t not in _GENERIC_LABELS]
+        discriminating = _discriminating_tokens(name)
         if not discriminating:
             continue  # generic-only label → drop (C3)
         if any(re.search(r"\b" + re.escape(t), low) for t in discriminating):
@@ -287,11 +300,10 @@ def _demo() -> None:
     edgeless = "\n".join(f"COMPONENT: {n} | r" for n in ("Planner", "Executor", "Memory", "Scorer"))
     assert render_grounded_diagram(edgeless, report) is None
 
-    # Un-checkable short-token labels (no >=4-char token) fall open — grounding must
-    # not hard-reject what it cannot check; the accept gate is the backstop. (Needs an
-    # edge to clear the _MIN_EDGES floor.)
-    short = "\n".join(f"COMPONENT: AI{i} | x" for i in range(4)) + "\nEDGE: AI0 -> AI1\n"
-    assert render_grounded_diagram(short, report) is not None
+    # Short all-caps acronym labels survive only when the report actually names them.
+    acronym_report = report + "\nAPI DB MCP CLI are named interfaces.\n"
+    short = "\n".join(f"COMPONENT: {n} | x" for n in ("API", "DB", "MCP", "CLI")) + "\nEDGE: API -> DB\n"
+    assert render_grounded_diagram(short, acronym_report) is not None
 
     out = insert_diagram_block(report, body)
     assert out.index("## Architecture") < out.index("```mermaid") < out.index("## References")

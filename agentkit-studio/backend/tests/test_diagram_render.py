@@ -98,13 +98,15 @@ def test_grounding_matches_inflected_forms() -> None:
     assert body is not None and body.startswith("flowchart TD")
 
 
-def test_short_token_labels_fall_open() -> None:
-    """Labels with no >=4-char token are un-checkable, so grounding falls open (keeps
-    them) — the accept gate is the backstop; grounding must not reject what it can't check.
-    (An edge is included to clear the _MIN_EDGES floor — grounding, not edges, is the point.)"""
-    raw = "\n".join(f"COMPONENT: AI{i} | x" for i in range(5)) + "\nEDGE: AI0 -> AI1\n"
-    body = dr.render_grounded_diagram(raw, _REPORT)
+def test_short_acronym_labels_are_kept_but_short_words_are_dropped() -> None:
+    """Short all-caps acronyms are real architecture labels; titlecase sentence glue
+    is not. This catches rendered nodes like 'The' without losing API/MCP/DB."""
+    raw = "\n".join(f"COMPONENT: API{i} | x" for i in range(5)) + "\nEDGE: API0 -> API1\n"
+    body = dr.render_grounded_diagram(raw, _REPORT + "\nAPI0 API1 API2 API3 API4 are named interfaces.")
     assert body is not None and body.startswith("flowchart TD")
+
+    weak = "COMPONENT: The | x\nCOMPONENT: An | x\nCOMPONENT: Of | x\nCOMPONENT: To | x\nEDGE: The -> An\n"
+    assert dr.render_grounded_diagram(weak, _REPORT) is None
 
 
 def test_generic_only_labels_are_dropped() -> None:
