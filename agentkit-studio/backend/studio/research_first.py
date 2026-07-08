@@ -54,10 +54,9 @@ EmitFn = Callable[[str, dict[str, Any]], None] | None
 _SECTION_REQ_RE = re.compile(r"(?i)include\s+(?:an?|the)?\s*(.+?)\s+section\b")
 #: Sections that naturally host grounded source material — the code example lands
 #: in whichever of these appears first (mirrors diagram_render._TARGET_HEADING_RE's
-#: "evidence" match, kept as a separate constant since code and diagram can route
-#: to different sections in the same report).
+#: "evidence" match). Diagram home is picked separately via the relationship
+#: section (_pick_relationship_home), not a heading regex.
 _CODE_HOME_RE = re.compile(r"(?i)evidence|analysis|implementation|example|walkthrough|code")
-_DIAGRAM_HOME_RE = re.compile(r"(?i)architect|design|topolog|overview|system|component|key findings|evidence")
 _SKIP_WRITE = frozenset({"executive summary", "references"})
 #: Cap on claims spliced into one section prompt — Evidence-shaped sections get
 #: the larger share (§10.1 WRITE: "Evidence gets most").
