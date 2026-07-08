@@ -842,6 +842,26 @@ def test_integration_label_none_when_ungrounded() -> None:
     assert rf._integration_label(["Pi", "Craft"], claims) is None
 
 
+def test_grounded_interface_words_from_claims_only() -> None:
+    # v43 live defect: the integration-code prompt was steered by the FRAME
+    # hypothesis ("SDK-based ...") so the model wrote `import pi_sdk`, and the
+    # grounding gate correctly rejected it every time (0/4) — no claim names an
+    # SDK. The interfaces the example MAY use come from claims, not the
+    # ungrounded hypothesis.
+    claims = [
+        {"claim": "Craft connects to REST APIs and MCP servers.", "subjects": ["Craft"], "url": "u1"},
+        {"claim": "Pi is a minimal harness.", "subjects": ["Pi"], "url": "u2"},
+    ]
+    words = rf._grounded_interface_words(claims)
+    assert "api" in words and "mcp" in words
+    assert "sdk" not in words  # never named in a claim → not offered to the code prompt
+
+
+def test_grounded_interface_words_empty_when_none_documented() -> None:
+    claims = [{"claim": "Pi is a minimal agent harness.", "subjects": ["Pi"], "url": "u"}]
+    assert rf._grounded_interface_words(claims) == []
+
+
 def test_fallback_cluster_diagram_none_without_grounding() -> None:
     claims = [{"claim": "Pi is a minimal agent harness.", "subjects": ["Pi"], "url": "u"}]
     assert rf._fallback_cluster_diagram(["Pi", "Craft"], claims) is None

@@ -1005,22 +1005,60 @@ def _integration_interfaces_grounded(block: str, claims: list[dict[str, Any]]) -
     return any(w in claim_text for w in code_interface_words)
 
 
+def _grounded_interface_words(claims: list[dict[str, Any]]) -> list[str]:
+    """Interface words (api/cli/mcp/...) that literally appear in the claims —
+    the ONLY interfaces a synthesized integration example may name. Order-
+    preserving over ``_INTERFACE_WORD_RE``'s alternation, deduped, lowercase.
+
+    The FRAME relationship hypothesis ("...via an SDK...") is a SEARCH directive,
+    never code content (team-lead: hypothesis directs search, never becomes
+    content). Seeding the code prompt with the raw hypothesis mechanism made the
+    model write `import pi_sdk` around an SDK no claim documents, and the
+    grounding gate then correctly rejected every sample (v43 live: 0/4). Steering
+    the prompt to the claim-grounded interfaces instead removes the contradiction
+    at the source."""
+    claim_text = " ".join(c.get("claim", "") for c in claims).lower()
+    seen: list[str] = []
+    # Same alternation as _INTERFACE_WORD_RE but with an optional plural — a
+    # claim that says "REST APIs" / "MCP servers" documents the api/mcp
+    # interface just as much as the singular form (the shared regex's trailing
+    # \b can't span the plural "s"; the code-side gate keeps the strict form).
+    for m in _INTERFACE_WORD_PLURAL_RE.finditer(claim_text):
+        w = m.group(1).lower()
+        if w not in seen:
+            seen.append(w)
+    return seen
+
+
 def _splice_integration_code(
     text: str, subjects: list[str], claims: list[dict[str, Any]], mechanism: str, client: Any
 ) -> str:
     """One PROPOSED integration example — synthesized (a real combined example
     may not exist in sources), gated on: (a) compile(), (b) only interfaces
-    named in claims, (c) captioned as proposed usage, never as quoted source."""
+    named in claims, (c) captioned as proposed usage, never as quoted source.
+
+    The prompt is steered to the CLAIM-GROUNDED interfaces, not the raw FRAME
+    hypothesis — the hypothesis's interface (e.g. "SDK") is often absent from
+    every claim, and code built around it fails the grounding gate every time
+    (v43 live: 0/4). When no interface is documented at all, no groundable
+    example can exist → skip rather than fabricate."""
     if client is None or len(subjects) < 2:
+        return text
+    grounded_ifaces = _grounded_interface_words(claims)
+    if not grounded_ifaces:
+        dbg("research_first _splice_integration_code: skipped — no claim-documented interface")
         return text
     joint = [c for c in claims if len(c.get("subjects") or []) >= 2] or claims
     ev_lines = "\n".join(f"- {c['claim']} (URL: {c['url']})" for c in joint[:10])
+    iface_phrase = ", ".join(grounded_ifaces)
     prompt = (
         f"Write a short, minimal PROPOSED usage example showing how "
-        f"{' and '.join(subjects)} could be composed, based on this hypothesis: "
-        f"{mechanism}. Use ONLY interfaces/APIs/CLI commands actually named in "
-        "the claims below — never invent one absent from them. Output ONLY a "
-        "single fenced code block, nothing else.\n\n"
+        f"{' and '.join(subjects)} could be composed. Build it around one of "
+        f"these interfaces, which ARE documented in the claims: {iface_phrase}. "
+        "Use ONLY interfaces named in the claims below — never invent one absent "
+        "from them (in particular, do NOT use an interface just because it is "
+        "mentioned in a hypothesis). Output ONLY a single fenced code block, "
+        "nothing else.\n\n"
         f"CLAIMS:\n{ev_lines}"
     )
     try:
@@ -1051,7 +1089,15 @@ _MAX_DIA_NODES = 15
 #: A cross-subject edge is grounded only if the evidence NAMES an integration
 #: mechanism — never invented from neither a joint claim nor a documented
 #: interface on each side (team-lead rule 2).
-_INTERFACE_WORD_RE = re.compile(r"(?i)\b(api|cli|mcp|sdk|extension|plugin|webhook|connector|integrat\w*|interface)\b")
+#: The one place the integration-mechanism vocabulary is spelled out — generic
+#: interface terms (never task/subject names). Both the strict edge-grounding
+#: regex and the plural-tolerant claim-scan regex are built from this single
+#: alternation so the vocabulary is defined exactly once.
+_INTERFACE_WORD_ALT = r"api|cli|mcp|sdk|extension|plugin|webhook|connector|integrat\w*|interface"
+_INTERFACE_WORD_RE = re.compile(rf"(?i)\b({_INTERFACE_WORD_ALT})\b")
+#: Plural-tolerant form for scanning documented interfaces in claim prose (see
+#: _grounded_interface_words); group(1) is the singular base.
+_INTERFACE_WORD_PLURAL_RE = re.compile(rf"(?i)\b({_INTERFACE_WORD_ALT})s?\b")
 
 
 #: Generic component-naming guidance shared by every diagram prompt. Names the
