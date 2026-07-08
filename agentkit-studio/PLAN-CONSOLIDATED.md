@@ -189,28 +189,46 @@ run clears Part 1.3 a–e *consistently* (not one lucky run). Within a phase, it
 dependency-ordered; a phase completes when its Done-when holds, then the next begins.
 Effort: S ≤ ½ day · M ≈ 1–2 days · L ≈ 3–5 days. Every landed item gets a Part 3.1 row.
 
-**Phase 0 — Measure the ceiling (do FIRST, gates Phase 1 scope). [S]**
-- 0.1 Run the bare Pi/Craft acceptance **5×** on the current (post-MVP-9) code, record a–e
-  per run + score distribution. Structure is fixed; this isolates the *generation-quality*
-  variance (v48 thin 1587w/0.49 vs v45 2802w/0.85) as the true remaining blocker.
-- **Done-when:** a distribution table in Part 3.1 showing which a–e criteria fail, how often,
-  and whether failures are word-count / diagram-count / relationship-section-landing.
+**Phase 0 — Measure the ceiling. ✅ DONE (2026-07-08, harness `scratchpad/phase0_variance.py`).**
+- 0.1 Ran the bare Pi/Craft acceptance **5×** on post-MVP-9 code. **FINDING (inverts the "variance"
+  hypothesis): output is fully DETERMINISTIC** — all 5 runs byte-identical (score 0.5797, 1546
+  words, 2 diagrams). gemma greedy-decodes deterministically + the web cache is now stable, so
+  there is no run-to-run variance to average out; there is a fixed CEILING.
+- **Deterministic a–e result: 5/6 every run.** Pass 5/5: a (craft-agents-oss cited), b (1546 >
+  1468 words), d (2 code blocks), e (relationship section "Integrated Agentic Workflow"),
+  fmt (References last, ⊆ claims). **Sole failure: c (three diagrams) — only 2 render.**
+- **Root cause (claims.jsonl, run 1): research COVERAGE imbalance, not depth-of-prose or model.**
+  14 claims total = **Pi 2 · Craft 12 · joint 0**. ZERO joint claims → the integration diagram
+  cannot ground (correct no-fabricate) → that IS the entire `c` miss. Pi under-covered (2 vs 12)
+  → its subject diagram degrades to glue-word labels ("Designed/Harness/Users/Adapt") despite the
+  naming prompt, because thin claims give the component extractor nothing better. Words/model/
+  determinism are NOT the lever; **per-subject + joint-claim coverage is.**
+- **⇒ Phase 1 re-scope:** promote 1.2 (coverage gate) to the PRIMARY item; the gate must cover
+  both a per-subject claim floor AND joint-claim coverage (0 joint claims must trigger recovery,
+  not silently drop the integration diagram). Word-count depth (old 1.1) is deprioritised — 1546
+  words already clears the bar.
 
 **Phase 1 — Close acceptance (visible outcome). [M–L] — THE priority.**
-Depends on Phase 0's readout to size each item.
-- 1.1 **Generation depth** — decide the binding lever: (a) depth relaxation (#38: findings.py
-  2–3 grounded sentences + density-cap revisit — MUST first read the prior under-delivery at
-  f6f6c65/9d30b13/ccabed3 per REBUILD-LESSONS) and/or (b) generation-model tier (gemma→haiku
-  for WRITE only; task_hash unaffected, lineage-safe — the sibling curriculum lab found the
-  reader/writer model was the binding constraint). Phase 0 decides which. [M]
-- 1.2 **Per-subject coverage gate before WRITE** (Part 8 #1 / #37 P1-core, PARTIAL) — zero-source
-  subject → ONE generic recovery query → still empty → `failed_partial` stop, not weak prose.
-  Fail-visible, generic. [M]
-- 1.3 **summary_mechanism_grounding** — resolve the persistent harness FAIL: decide real gap vs
+Scope set by the Phase-0 readout: the deterministic failure is `c` (integration diagram absent)
+caused by **0 joint claims + Pi under-coverage (2 vs 12)**. Attack coverage, not word-depth.
+- 1.1 **Coverage gate before WRITE — per-subject floor AND joint-claim coverage** (Part 8 #1 /
+  #37 P1-core, was PARTIAL; now PRIMARY). Before WRITE, require each subject ≥ a small claim
+  floor AND ≥1 joint claim for an N≥2 relationship task. On a miss, fire ONE generic recovery
+  action — an imperative directed search/fetch (per subject for the thin one; a joint
+  `"<A> <B> <mechanism>"` query for the missing joint evidence) — then re-check; still empty →
+  `failed_partial` diagnostic, never silently drop the integration diagram or ship glue labels.
+  Generic, fail-visible. [M]
+- 1.2 **Joint-research strengthening** — the FRAME relationship hypothesis already derives joint
+  queries; this run produced 0 joint claims, so either the joint fetch is too narrow or its
+  results get anchor-gated out. Widen/relax the joint fetch (still grounded) so an integration
+  task reliably yields joint claims → the integration diagram grounds → `c` passes. [M]
+- 1.3 **summary_mechanism_grounding** — resolve the persistent harness FAIL: real gap vs
   over-strict checker (it flags claim-present words like "agentcontext"/"api"). Either tighten
   `_write_summary` grounding or relax the check to domain-level, with a canary either way. [S]
-- **Done-when:** Part 1.3 a–e pass on **≥4 of 5** bare runs; a fresh acceptance run recorded +
-  separate-lane review.
+- **Done-when:** the (deterministic) bare Pi/Craft run passes Part 1.3 **a–e in full** (3 diagrams
+  incl. a grounded integration diagram; real component labels, not glue) — one run suffices since
+  output is deterministic — recorded + separate-lane review. Re-run Phase 0's 5× only to confirm
+  determinism still holds after the change.
 
 **Phase 2 — Internal quality + loop-health (unfreeze; structure is now clean enough). [M]**
 The Part 1.2 FROZEN list + the remaining L-/S-workstreams (Part 5.5 / 6.3) — was gated on
