@@ -212,14 +212,27 @@ Depends on Phase 0's readout to size each item.
 - **Done-when:** Part 1.3 a–e pass on **≥4 of 5** bare runs; a fresh acceptance run recorded +
   separate-lane review.
 
-**Phase 2 — Internal quality (unfreeze; structure is now clean enough). [M]**
-The Part 1.2 FROZEN list — was gated on "report visibly changes", now unblocked by Phase 1.
-- 2.1 Verdict memoization per text-hash (17 wasted re-verify rounds). [S]
-- 2.2 AST swallowed-content lint via markdown-it-py (already a transitive dep) — catches the
+**Phase 2 — Internal quality + loop-health (unfreeze; structure is now clean enough). [M]**
+The Part 1.2 FROZEN list + the remaining L-/S-workstreams (Part 5.5 / 6.3) — was gated on
+"report visibly changes", now unblocked by Phase 1. (Already ✅, do NOT re-do: L2, L3, L6,
+S1, S2, S4, and verdict/offtopic memoization — the DONE half of L5/S5.)
+- 2.1 **AST swallowed-content lint** via markdown-it-py (already a transitive dep) — catches the
   giant-fence-swallows-headings class generically. [M]
-- 2.3 L1 editorial pass + crashed/unscored status rule (the E1–E11 unifier; completes E3/E5). [M]
-- 2.4 S3 guard consolidation · S5 remainder · echoed-H1 + em-dash rf residuals. [S]
-- **Done-when:** no regression in Phase-1 acceptance; each guard has a canary.
+- 2.2 **L1 — Verify hardening (RC1)**: the §10.2 editorial checklist + crashed/unscored status
+  rule — this is the E1–E11 unifier and completes E3/E5 (Part 5.2). [M]
+- 2.3 **S3 — guard primitives** (`studio/guards.py`) — consolidate the scattered ad-hoc guards
+  into one module (MEDIUM risk); prerequisite for L4. [M]
+- 2.4 **L4 — Repeat-weakness escalation (RC4)**: uses the S2 pass ledger + L1 row evidence to
+  detect weaknesses recorded in ≥ REPEAT_LIMIT prior runs and drop/escalate them instead of
+  grinding forever (builds on S3). [M]
+- 2.5 **L5 remainder — acceptance economics** (verdict memoization already ✅): the per-run
+  postrun cost block — per-pass attempted/accepted counts + tokens per accepted change
+  (data already flows through `timing_sink`/`_dbg`; aggregate it). Feeds → **S5 measured
+  efficiency wins** (rubric memo, cache index) — numbers-gated, ship ONLY with before/after
+  timing. [M]
+- 2.6 **Residuals**: echoed-H1 + em-dash research_first residuals (§16). [S]
+- **Done-when:** no regression in Phase-1 acceptance; each guard has a canary; S5 wins carry
+  measured before/after numbers.
 
 **Phase 3 — Writer & design process (Part 5.1/5.3). [L]**
 - 3.1 Writer reference process P1–P4 (Part 5.1) — the P1 bundle. [L]
