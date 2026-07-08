@@ -180,6 +180,86 @@ conclusion. User principle (quote): "if 2 or more objects mentioned in task,
 all the flow in the article need to consider their relationships."
 Anything less = pivot not achieved, rediagnose.
 
+### 1.4 Prioritised implementation schedule (2026-07-08)
+
+The remaining backlog (Part 1.2 FROZEN + CARRY-OVER, Part 5 writer/editorial/design,
+Part 8 recovery) ordered into six sequential phases. Rule: **visible artifact quality
+gates everything** — no internal-quality, infra, or UX work counts until a bare Pi/Craft
+run clears Part 1.3 a–e *consistently* (not one lucky run). Within a phase, items are
+dependency-ordered; a phase completes when its Done-when holds, then the next begins.
+Effort: S ≤ ½ day · M ≈ 1–2 days · L ≈ 3–5 days. Every landed item gets a Part 3.1 row.
+
+**Phase 0 — Measure the ceiling (do FIRST, gates Phase 1 scope). [S]**
+- 0.1 Run the bare Pi/Craft acceptance **5×** on the current (post-MVP-9) code, record a–e
+  per run + score distribution. Structure is fixed; this isolates the *generation-quality*
+  variance (v48 thin 1587w/0.49 vs v45 2802w/0.85) as the true remaining blocker.
+- **Done-when:** a distribution table in Part 3.1 showing which a–e criteria fail, how often,
+  and whether failures are word-count / diagram-count / relationship-section-landing.
+
+**Phase 1 — Close acceptance (visible outcome). [M–L] — THE priority.**
+Depends on Phase 0's readout to size each item.
+- 1.1 **Generation depth** — decide the binding lever: (a) depth relaxation (#38: findings.py
+  2–3 grounded sentences + density-cap revisit — MUST first read the prior under-delivery at
+  f6f6c65/9d30b13/ccabed3 per REBUILD-LESSONS) and/or (b) generation-model tier (gemma→haiku
+  for WRITE only; task_hash unaffected, lineage-safe — the sibling curriculum lab found the
+  reader/writer model was the binding constraint). Phase 0 decides which. [M]
+- 1.2 **Per-subject coverage gate before WRITE** (Part 8 #1 / #37 P1-core, PARTIAL) — zero-source
+  subject → ONE generic recovery query → still empty → `failed_partial` stop, not weak prose.
+  Fail-visible, generic. [M]
+- 1.3 **summary_mechanism_grounding** — resolve the persistent harness FAIL: decide real gap vs
+  over-strict checker (it flags claim-present words like "agentcontext"/"api"). Either tighten
+  `_write_summary` grounding or relax the check to domain-level, with a canary either way. [S]
+- **Done-when:** Part 1.3 a–e pass on **≥4 of 5** bare runs; a fresh acceptance run recorded +
+  separate-lane review.
+
+**Phase 2 — Internal quality (unfreeze; structure is now clean enough). [M]**
+The Part 1.2 FROZEN list — was gated on "report visibly changes", now unblocked by Phase 1.
+- 2.1 Verdict memoization per text-hash (17 wasted re-verify rounds). [S]
+- 2.2 AST swallowed-content lint via markdown-it-py (already a transitive dep) — catches the
+  giant-fence-swallows-headings class generically. [M]
+- 2.3 L1 editorial pass + crashed/unscored status rule (the E1–E11 unifier; completes E3/E5). [M]
+- 2.4 S3 guard consolidation · S5 remainder · echoed-H1 + em-dash rf residuals. [S]
+- **Done-when:** no regression in Phase-1 acceptance; each guard has a canary.
+
+**Phase 3 — Writer & design process (Part 5.1/5.3). [L]**
+- 3.1 Writer reference process P1–P4 (Part 5.1) — the P1 bundle. [L]
+- 3.2 Question-first planning (P2), disambiguation probe (P3, rides on P1), not-found contract
+  (P4, rides on P1). [M]
+- 3.3 Design workstreams D1–D5 (Part 5.3). [L]
+- **Done-when:** measured artifact-quality delta vs Phase-1 baseline (else defer as gold-plating).
+
+**Phase 4 — Presentation ladder + R3 follow-ups. [M–L]**
+- 4.1 Wire `presentation_classifier.py`; table/list generators + deterministic format-fixer under
+  the SAME accept gate; frontend judge-model selector + presentation action list. [L]
+- 4.2 R3 follow-ups: comparison-table richness beyond axes+pros/cons; live-exercise the
+  competes/independent branches (currently unit-tested only); N≥3-subject relationship
+  (`n_subject_relationship_evidence`). [M]
+- **Done-when:** presentation shapes ship under the accept gate; a compete-shaped and an N≥3 task
+  each produce a correct artifact live.
+
+**Phase 5 — Persistence & observability (Part 4/5 infra). [L]**
+- 5.1 O3 JSONL finding contract (verify `_cited_urls` premise first) · O5 deterministic assembler
+  (reconcile with the rebuild WRITE/ASSEMBLE — do not double-build) · O9 `test_bad_report_quality_gate.py`. [M]
+- 5.2 K observations.py + pre-dispatch validation + SQLite store · M trace-derived metrics +
+  `metrics_json` + per-task-hash aggregation · persistence columns (`publish_gate_json`,
+  `metrics_json`, `trace_path`, `checkpoints_path`) · L PDF/PNG export. [L]
+- **Done-when:** every run persists structured metrics + publish-gate JSON for drift comparison.
+
+**Phase 6 — Config, UX & hygiene (Part 3/6). [M]**
+- 6.1 Workstream D ResearchConfig intake (HARD CONSTRAINT: stays OUT of task_hash) · Workstream J
+  remainder (loop/skill CRUD, tabs, remote sources) · GUI quick-start #5. [M]
+- 6.2 Hygiene: perf A/B benchmark · live `failed_partial` exercise · `_verify_prompt` SATISFIED-bar
+  re-evaluation · wall-clock cap for count budgets · per-task web-cache scoping · doc marker
+  back-fill · runner.py decomposition (continue the S2 −869-line trend via S-workstreams). [M]
+- **Done-when:** config is user-editable without lineage rotation; runner.py under the file-size
+  target; perf baseline recorded.
+
+**Cross-cutting invariants (hold in every phase):** no hardcoded task/subject strings or domain
+vocab in production logic · fail-open with a dbg-log on every LLM/IO path · author and review in
+separate passes (no self-approval) · verify against a live run, not a green suite · restart the
+no-reload server + confirm process start-time > commit before trusting any live result
+([[reference_stale_server_verification_trap]]).
+
 ## Part 2 — Active tracks
 
 ### 2.1 Outcome-first pivot rationale
