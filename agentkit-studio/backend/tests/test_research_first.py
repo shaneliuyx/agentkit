@@ -76,6 +76,45 @@ def test_frame_drops_whole_task_subject_coverage_branch() -> None:
     assert rf._extract_subjects(groups, requirement=requirement) == ["Pi", "Craft"]
 
 
+def test_subjects_from_requirement_fallback_validates_candidates() -> None:
+    # v39 regression class: covers-extraction degenerated to the whole task and
+    # the [title] fallback reinstated a whole-task-shaped single subject. The
+    # LLM fallback proposes; deterministic validation gates.
+    requirement = (
+        "Study how to use Pi and Craft to develop agents and create a research "
+        "report, need to include example code and design architecture."
+    )
+    client = _client("SUBJECTS: Pi, Craft")
+    assert rf._subjects_from_requirement(client, requirement) == ["Pi", "Craft"]
+
+
+def test_subjects_from_requirement_rejects_whole_task_and_hallucinations() -> None:
+    requirement = "Study how to use Pi and Craft to develop agents."
+    echo = _client(
+        "SUBJECTS: Study how to use Pi and Craft to develop agents, LangChain"
+    )
+    # whole-task echo normalizes to the base task -> rejected; LangChain is not
+    # a verbatim substring of the requirement -> rejected.
+    assert rf._subjects_from_requirement(echo, requirement) == []
+
+
+def test_subjects_from_requirement_splits_compound_and_candidate() -> None:
+    requirement = "Study how to use Pi and Craft to develop agents."
+    client = _client("SUBJECTS: Pi and Craft")
+    assert rf._subjects_from_requirement(client, requirement) == ["Pi", "Craft"]
+
+
+def test_subjects_from_requirement_fails_open() -> None:
+    requirement = "Study how to use Pi and Craft to develop agents."
+
+    def _boom(messages, tools=None):  # noqa: ANN001, ANN202
+        raise RuntimeError("llm down")
+
+    assert rf._subjects_from_requirement(SimpleNamespace(chat=_boom), requirement) == []
+    assert rf._subjects_from_requirement(None, requirement) == []
+    assert rf._subjects_from_requirement(_client("no marker here"), requirement) == []
+
+
 def test_base_task_text_strips_template_and_scoring_suffixes() -> None:
     # REBUILD-LESSONS §2: template/scoring boilerplate dilutes domain-word density.
     requirement = (

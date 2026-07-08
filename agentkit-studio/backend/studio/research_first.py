@@ -125,6 +125,55 @@ def _extract_subjects(groups: list[list[str]], *, requirement: str = "") -> list
     return subjects
 
 
+def _subjects_from_requirement(client: Any, requirement: str) -> list[str]:
+    """LLM fallback for subject identity when no covers-shaped branch names a
+    usable subject (v39 regression: extract_requirements emitted ONE covers
+    branch quoting the whole task; the whole-task guard dropped it and the
+    [title] fallback reinstated a whole-task-shaped single subject, collapsing
+    every downstream stage to generic research). The LLM only PROPOSES —
+    deterministic validation gates: a candidate must appear verbatim in the
+    requirement, stay short, and not re-echo the whole task. Fails open to []
+    (caller keeps its [title] last resort)."""
+    if client is None:
+        return []
+    prompt = (
+        f"TASK: {requirement[:400]}\n\n"
+        "List the distinct named things (products, tools, frameworks, systems) "
+        "this task asks to study or use — not the task itself. Answer in "
+        "exactly this format:\nSUBJECTS: <comma-separated names copied "
+        "verbatim from the task>"
+    )
+    try:
+        reply = client.chat([{"role": "user", "content": prompt}])
+        text = str(getattr(reply, "text", "") or "")
+    except Exception:  # noqa: BLE001 — a bad fallback call must never stall FRAME
+        return []
+    m = re.search(r"SUBJECTS:\s*(.+)", text)
+    if not m:
+        return []
+    whole_task = _norm_subject_text(_base_task_text(requirement))
+    req_norm = f" {_norm_subject_text(requirement)} "
+    subjects: list[str] = []
+    for cand in m.group(1).split(","):
+        cand = cand.strip(" .:;-")
+        norm = _norm_subject_text(cand)
+        # length + whole-task checks run BEFORE the compound split so a task
+        # echo cannot shed words into an acceptable-looking fragment
+        if not norm or norm == whole_task or len(norm.split()) > 4:
+            dbg(f"research_first FRAME: rejected fallback subject {cand!r}")
+            continue
+        # a compound "A and B" answer names two subjects, not one
+        parts = re.split(r"\s+and\s+", cand) if " and " in cand else [cand]
+        for part in (p.strip(" .:;-") for p in parts):
+            part_norm = _norm_subject_text(part)
+            if not part_norm or f" {part_norm} " not in req_norm:
+                dbg(f"research_first FRAME: rejected fallback subject {part!r}")
+                continue
+            if part.lower() not in (s.lower() for s in subjects):
+                subjects.append(part)
+    return subjects
+
+
 def _build_sections(groups: list[list[str]]) -> list[str]:
     """The generic report template plus any explicit "include an X section"
     branch, inserted before References. Never drops a template section."""
@@ -1545,7 +1594,11 @@ def generate_research_first(
     # 1. FRAME
     groups = extract_requirements(client, requirement)
     title = _derive_title_from_requirement(requirement)
-    subjects = _extract_subjects(groups, requirement=requirement) or [title]
+    subjects = (
+        _extract_subjects(groups, requirement=requirement)
+        or _subjects_from_requirement(client, requirement)
+        or [title]
+    )
     code_needed = any(_CODE_SHAPED_RE.search(b) for g in groups for b in g)
     diagram_needed = any(_DIAGRAM_SHAPED_RE.search(b) for g in groups for b in g)
     sections = _build_sections(groups)
