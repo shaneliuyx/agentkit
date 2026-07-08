@@ -146,7 +146,8 @@ def _subjects_from_requirement(client: Any, requirement: str) -> list[str]:
     try:
         reply = client.chat([{"role": "user", "content": prompt}])
         text = str(getattr(reply, "text", "") or "")
-    except Exception:  # noqa: BLE001 — a bad fallback call must never stall FRAME
+    except Exception as exc:  # noqa: BLE001 — a bad fallback call must never stall FRAME
+        dbg(f"research_first FRAME: subject-fallback LLM call failed exc={exc!r}")
         return []
     m = re.search(r"SUBJECTS:\s*(.+)", text)
     if not m:
