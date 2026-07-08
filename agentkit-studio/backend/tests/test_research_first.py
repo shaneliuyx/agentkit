@@ -8,6 +8,7 @@ per-section writing, summary-last ordering, and final assembly cleanliness.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,15 @@ from studio import artifact_lint, research_first as rf
 
 def _client(text: str) -> SimpleNamespace:
     return SimpleNamespace(chat=lambda messages, tools=None: SimpleNamespace(text=text))
+
+
+def _rel(
+    kind: str = "cooperates",
+    descriptor: str = "Integration",
+    mechanism: str = "",
+    terms: list[str] | None = None,
+) -> rf.Relationship:
+    return rf.Relationship(kind, descriptor, mechanism, terms or [])
 
 
 # ---------------------------------------------------------------------------
@@ -41,24 +51,47 @@ def test_frame_extracts_subjects_and_sections_in_order() -> None:
     assert sections[-1] == "References"
 
 
-def test_ensure_integration_section_added_for_multi_subject() -> None:
+def test_ensure_relationship_section_added_for_multi_subject() -> None:
     sections = ["Executive Summary", "Key Findings", "References"]
-    out = rf._ensure_integration_section(sections, ["Pi", "Craft"])
-    home = rf._pick_integration_home(out)
+    rel = _rel(descriptor="Integration")
+    out = rf._ensure_relationship_section(sections, ["Pi", "Craft"], rel)
+    home = rf._pick_relationship_home(out, rel)
     assert home is not None
+    # named from the per-task descriptor, not the hardcoded word "Integration"
+    assert home == "Pi and Craft: Integration"
     assert out.index(home) < out.index("References")
 
 
-def test_ensure_integration_section_noop_for_single_subject() -> None:
+def test_ensure_relationship_section_named_from_descriptor() -> None:
+    # R3: the section title comes from the LLM-derived descriptor per task.
     sections = ["Executive Summary", "Key Findings", "References"]
-    out = rf._ensure_integration_section(sections, ["Pi"])
+    rel = _rel(kind="extends", descriptor="Extension model")
+    out = rf._ensure_relationship_section(sections, ["Pi", "Craft"], rel)
+    assert "Pi and Craft: Extension model" in out
+    assert rf._pick_relationship_home(out, rel) == "Pi and Craft: Extension model"
+
+
+def test_ensure_relationship_section_noop_for_single_subject() -> None:
+    sections = ["Executive Summary", "Key Findings", "References"]
+    rel = _rel()
+    out = rf._ensure_relationship_section(sections, ["Pi"], rel)
     assert out == sections
-    assert rf._pick_integration_home(out) is None
+    assert rf._pick_relationship_home(out, rel) is None
 
 
-def test_ensure_integration_section_noop_when_already_present() -> None:
+def test_ensure_relationship_section_noop_for_independent() -> None:
+    # independent subjects → no forced relationship section.
+    sections = ["Executive Summary", "Key Findings", "References"]
+    rel = _rel(kind="independent", descriptor="Relationship")
+    out = rf._ensure_relationship_section(sections, ["Pi", "Craft"], rel)
+    assert out == sections
+    assert rf._pick_relationship_home(out, rel) is None
+
+
+def test_ensure_relationship_section_noop_when_already_present() -> None:
     sections = ["Executive Summary", "Pi and Craft Integration", "References"]
-    out = rf._ensure_integration_section(sections, ["Pi", "Craft"])
+    rel = _rel(descriptor="Integration")
+    out = rf._ensure_relationship_section(sections, ["Pi", "Craft"], rel)
     assert out == sections
 
 
@@ -194,27 +227,6 @@ def test_disambiguate_subject_fails_open_on_no_search_results(monkeypatch) -> No
     assert (descriptor, anchors) == ("Craft", ["Craft"])
 
 
-def test_resolve_relationship_fails_open_without_judge() -> None:
-    mechanism, verify_terms = rf._resolve_relationship(["Pi", "Craft"], {"Pi": "Pi", "Craft": "Craft"}, "study Pi and Craft", None)
-    assert mechanism == "composed side-by-side, mechanism unknown"
-    assert verify_terms == []
-
-
-def test_resolve_relationship_skipped_for_single_subject() -> None:
-    mechanism, verify_terms = rf._resolve_relationship(["Pi"], {"Pi": "Pi"}, "study Pi", _client("MECHANISM: x\nVERIFY: y"))
-    assert mechanism == "composed side-by-side, mechanism unknown"
-    assert verify_terms == []
-
-
-def test_resolve_relationship_parses_mechanism_and_verify_terms() -> None:
-    judge = _client("MECHANISM: Pi calls Craft via an MCP server\nVERIFY: MCP, plugin, extension")
-    mechanism, verify_terms = rf._resolve_relationship(
-        ["Pi", "Craft"], {"Pi": "Pi Agent Framework", "Craft": "Craft Agents"}, "study Pi and Craft", judge
-    )
-    assert mechanism == "Pi calls Craft via an MCP server"
-    assert verify_terms == ["MCP", "plugin", "extension"]
-
-
 def test_classify_relationship_cooperates() -> None:
     judge = _client(
         "KIND: cooperates\nDESCRIPTOR: Integration\n"
@@ -282,23 +294,36 @@ def test_classify_relationship_fails_open_on_exception() -> None:
 
 
 def test_research_joint_queries_and_assumptions_derive_from_relationship(monkeypatch, tmp_path) -> None:
-    # Team-lead rule: joint queries come FROM the relationship hypothesis
-    # (mechanism + verify terms), not generic subject-A+subject-B
-    # concatenation — and the hypothesis is visible in the Scope Assumptions.
+    # Team-lead rule: joint queries come FROM the classified relationship
+    # (mechanism + terms), not generic subject-A+subject-B concatenation — and
+    # the hypothesis is visible in the Scope Assumptions.
     queries_seen: list[str] = []
     monkeypatch.setattr(rf, "_search", lambda query, results=5: queries_seen.append(query) or [])
     judge = _client(
-        "DESCRIPTOR: X\nANCHORS: a, b\n"
-        "MECHANISM: Pi calls Craft via an MCP server\nVERIFY: MCP, plugin"
+        "KIND: cooperates\nDESCRIPTOR: X\nANCHORS: a, b\n"
+        "MECHANISM: Pi calls Craft via an MCP server\nTERMS: MCP, plugin"
     )
-    _ledger, assumptions, mechanism, verify_terms = rf._research(
+    _ledger, assumptions, relationship = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
-    assert mechanism == "Pi calls Craft via an MCP server"
-    assert verify_terms == ["MCP", "plugin"]
+    assert relationship.kind == "cooperates"
+    assert relationship.mechanism == "Pi calls Craft via an MCP server"
+    assert relationship.mechanism_terms == ["MCP", "plugin"]
     assert any("Hypothesized relationship: Pi calls Craft via an MCP server." in a for a in assumptions)
     joint_queries = queries_seen[-2:]  # the 2 joint queries are issued last
     assert any("MCP" in q for q in joint_queries)
+
+
+def test_research_independent_notes_independence_in_assumptions(monkeypatch, tmp_path) -> None:
+    # independent kind → the Scope Assumptions note independence, not a
+    # fabricated relationship mechanism.
+    monkeypatch.setattr(rf, "_search", lambda query, results=5: [])
+    judge = _client("KIND: independent\nDESCRIPTOR: Relationship\nANCHORS: a, b")
+    _ledger, assumptions, relationship = rf._research(
+        ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
+    )
+    assert relationship.kind == "independent"
+    assert any("independent" in a.lower() for a in assumptions)
 
 
 def test_research_joint_loop_drops_source_matching_no_subject_anchor(monkeypatch, tmp_path) -> None:
@@ -312,7 +337,7 @@ def test_research_joint_loop_drops_source_matching_no_subject_anchor(monkeypatch
         "DESCRIPTOR: X\nANCHORS: pi-ai, pi-agent-core\n"
         "MECHANISM: Pi calls Craft via an MCP server\nVERIFY: MCP, plugin"
     )
-    ledger, _assumptions, _mechanism, _verify_terms = rf._research(
+    ledger, _assumptions, _relationship = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert ledger["__joint__"] == []
@@ -328,7 +353,7 @@ def test_research_joint_loop_keeps_source_matching_union_anchor(monkeypatch, tmp
         "DESCRIPTOR: X\nANCHORS: pi-ai, pi-agent-core\n"
         "MECHANISM: Pi calls Craft via an MCP server\nVERIFY: MCP, plugin"
     )
-    ledger, _assumptions, _mechanism, _verify_terms = rf._research(
+    ledger, _assumptions, _relationship = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert len(ledger["__joint__"]) > 0
@@ -778,46 +803,97 @@ def test_splice_subject_code_rejects_syntax_error() -> None:
     assert out == "Some prose."
 
 
-def test_integration_interfaces_grounded_true_when_named_in_claims() -> None:
+def test_mechanism_terms_grounded_true_when_named_in_claims() -> None:
     claims = [{"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u"}]
     block = "```python\nclient.call_mcp_server()\n```"
-    assert rf._integration_interfaces_grounded(block, claims) is True
+    assert rf._mechanism_terms_grounded(block, claims, ["MCP"]) is True
 
 
-def test_integration_interfaces_grounded_false_when_invented() -> None:
+def test_mechanism_terms_grounded_falls_open_when_term_absent_from_code() -> None:
     claims = [{"claim": "Pi is a minimal agent harness.", "subjects": ["Pi"], "url": "u"}]
     block = "```python\nclient.call_grpc_endpoint()\n```"
-    assert rf._integration_interfaces_grounded(block, claims) is True  # "grpc"/"endpoint" aren't interface words — nothing to check, falls open
+    # "mcp" is not in the code at all → nothing to check, falls open.
+    assert rf._mechanism_terms_grounded(block, claims, ["MCP"]) is True
 
 
-def test_integration_interfaces_grounded_false_when_named_but_ungrounded() -> None:
-    # "webhook" is snake_case-embedded (realistic generated code) — the tokenizer
-    # must isolate it despite the underscore, unlike a bare \b regex which treats
-    # "_" as a word char and would never see it.
+def test_mechanism_terms_grounded_false_when_named_but_ungrounded() -> None:
     claims = [{"claim": "Pi is a minimal agent harness.", "subjects": ["Pi"], "url": "u"}]
     block = "```python\nclient.register_webhook_url()\n```"
-    assert rf._integration_interfaces_grounded(block, claims) is False
+    # the code names "webhook", which no claim documents → rejected.
+    assert rf._mechanism_terms_grounded(block, claims, ["webhook"]) is False
 
 
 def test_splice_integration_code_captions_as_proposed_not_source() -> None:
     claims = [{"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u"}]
     reply = "```python\ndef call_mcp_server():\n    pass\n```"
-    out = rf._splice_integration_code("Some prose.", ["Pi", "Craft"], claims, "Pi calls Craft via MCP", _client(reply))
+    rel = _rel(descriptor="Integration", mechanism="Pi calls Craft via MCP", terms=["MCP"])
+    out = rf._splice_integration_code("Some prose.", ["Pi", "Craft"], claims, rel, _client(reply))
     assert "Proposed usage" in out
     assert "not quoted source code" in out
     assert "def call_mcp_server" in out
 
 
-def test_splice_integration_code_rejects_invented_interface() -> None:
-    claims = [{"claim": "Pi is a minimal agent harness.", "subjects": ["Pi"], "url": "u"}]
+def test_splice_integration_code_rejects_ungrounded_term_in_code() -> None:
+    # A grounded term ("MCP") steers the prompt, but the generated code names a
+    # DIFFERENT term ("webhook") no claim documents → the post-check rejects it.
+    claims = [{"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u"}]
     reply = "```python\nclient.register_webhook_url()\n```"
-    out = rf._splice_integration_code("Some prose.", ["Pi", "Craft"], claims, "unknown", _client(reply))
+    rel = _rel(terms=["MCP", "webhook"])
+    out = rf._splice_integration_code("Some prose.", ["Pi", "Craft"], claims, rel, _client(reply))
+    assert out == "Some prose."
+
+
+def test_splice_integration_code_skips_when_no_grounded_term() -> None:
+    # No mechanism term appears in the claims → no groundable example → skip.
+    claims = [{"claim": "Pi is a minimal agent harness.", "subjects": ["Pi"], "url": "u"}]
+    rel = _rel(terms=["webhook"])
+    out = rf._splice_integration_code("Some prose.", ["Pi", "Craft"], claims, rel, _client("```python\npass\n```"))
     assert out == "Some prose."
 
 
 def test_splice_integration_code_noop_for_single_subject() -> None:
-    out = rf._splice_integration_code("Some prose.", ["Pi"], [], "x", _client("```python\npass\n```"))
+    out = rf._splice_integration_code("Some prose.", ["Pi"], [], _rel(terms=["MCP"]), _client("```python\npass\n```"))
     assert out == "Some prose."
+
+
+# ---------------------------------------------------------------------------
+# COMPARISON — competes/alternative branch (R3): a grounded table, no integration
+# ---------------------------------------------------------------------------
+
+
+def test_splice_comparison_table_builds_grounded_table() -> None:
+    claims = [
+        {"claim": "Redis keeps data structures in memory.", "subjects": ["Redis"], "url": "u1"},
+        {"claim": "Redis persists to disk with snapshots.", "subjects": ["Redis"], "url": "u2"},
+        {"claim": "Memcached is a volatile key-value cache.", "subjects": ["Memcached"], "url": "u3"},
+    ]
+    out = rf._splice_comparison_table("Some prose.", ["Redis", "Memcached"], claims)
+    assert "| Redis | Memcached |" in out
+    assert "| --- | --- |" in out
+    # cells are drawn only from each subject's own claims (grounded)
+    assert "Redis keeps data structures in memory." in out
+    assert "Memcached is a volatile key-value cache." in out
+
+
+def test_splice_comparison_table_fails_open_when_a_subject_is_thin() -> None:
+    # Memcached has no claim → nothing grounded to compare → unchanged text.
+    claims = [{"claim": "Redis keeps data structures in memory.", "subjects": ["Redis"], "url": "u1"}]
+    out = rf._splice_comparison_table("Some prose.", ["Redis", "Memcached"], claims)
+    assert out == "Some prose."
+
+
+def test_splice_comparison_table_noop_for_single_subject() -> None:
+    claims = [{"claim": "Redis keeps data structures in memory.", "subjects": ["Redis"], "url": "u1"}]
+    assert rf._splice_comparison_table("Some prose.", ["Redis"], claims) == "Some prose."
+
+
+def test_splice_comparison_table_escapes_pipes_in_cells() -> None:
+    claims = [
+        {"claim": "Redis supports strings | lists | sets.", "subjects": ["Redis"], "url": "u1"},
+        {"claim": "Memcached stores flat strings.", "subjects": ["Memcached"], "url": "u2"},
+    ]
+    out = rf._splice_comparison_table("Some prose.", ["Redis", "Memcached"], claims)
+    assert "strings \\| lists \\| sets" in out
 
 
 # ---------------------------------------------------------------------------
@@ -825,112 +901,57 @@ def test_splice_integration_code_noop_for_single_subject() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_integration_label_grounded_in_joint_claim_with_mechanism() -> None:
+def test_integration_label_grounded_in_joint_claim_from_per_task_term() -> None:
+    # R3: the label is a per-task mechanism term corroborated in a joint claim,
+    # never matched against a hardcoded interface enum.
     claims = [{"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u"}]
-    assert rf._integration_label(["Pi", "Craft"], claims) == "mcp"
+    assert rf._integration_label(["Pi", "Craft"], claims, _rel(terms=["MCP"])) == "mcp"
 
 
-def test_integration_label_generic_when_joint_claim_names_no_mechanism() -> None:
+def test_integration_label_generic_from_descriptor_when_no_term_grounded() -> None:
+    # A joint claim exists but no per-task term is corroborated → generic label
+    # from the descriptor, never the raw hypothesis sentence.
     claims = [{"claim": "Pi and Craft are both used to build agents.", "subjects": ["Pi", "Craft"], "url": "u"}]
-    assert rf._integration_label(["Pi", "Craft"], claims) == "integration"
-
-
-def test_integration_label_upgrades_to_mechanism_when_corroborated() -> None:
-    # Team-lead correction: the mechanism HYPOTHESIS may upgrade a generic
-    # "integration" label only when independently corroborated — its own
-    # words show up in the joint claims' text, not just asserted.
-    claims = [{"claim": "Pi and Craft are both used to build agents via a delegation pattern.",
-               "subjects": ["Pi", "Craft"], "url": "u"}]
-    label = rf._integration_label(["Pi", "Craft"], claims, "calls via a delegation pattern")
-    assert label == "calls via a delegation pattern"
-
-
-def test_integration_label_never_ships_sentence_as_label() -> None:
-    # v40 live regression (s_798eeda98bd1): the corroborated hypothesis
-    # SENTENCE rendered verbatim as the cross-edge label. A label is a
-    # mechanism name, not a sentence — long mechanisms reduce to their
-    # interface word (or corroborated verify term), never print whole.
-    claims = [{"claim": "Craft handles task delegation work initiated from Pi agents.",
-               "subjects": ["Pi", "Craft"], "url": "u"}]
-    label = rf._integration_label(
-        ["Pi", "Craft"],
-        claims,
-        "Pi calls Craft via an SDK-based task delegation pattern",
-    )
-    assert label == "sdk"
-
-
-def test_integration_label_stays_generic_when_mechanism_uncorroborated() -> None:
-    # The hypothesis directs search/prompts but never becomes content by
-    # itself — an uncorroborated mechanism must not print as the edge label.
-    claims = [{"claim": "Pi and Craft are both used to build agents.", "subjects": ["Pi", "Craft"], "url": "u"}]
-    label = rf._integration_label(["Pi", "Craft"], claims, "Pi calls Craft via an obscure webhook relay")
+    label = rf._integration_label(["Pi", "Craft"], claims, _rel(descriptor="Integration", terms=["MCP"]))
     assert label == "integration"
 
 
-def test_integration_label_excludes_multi_word_subject_tokens() -> None:
-    claims = [{
-        "claim": "Alpha Product and Beta Product are both used for operations.",
-        "subjects": ["Alpha Product", "Beta Product"],
-        "url": "u",
-    }]
-    label = rf._integration_label(
-        ["Alpha Product", "Beta Product"],
-        claims,
-        "Alpha Product calls Beta Product via gRPC",
-    )
-    assert label == "integration"
-
-
-def test_integration_label_upgrades_via_verify_terms_too() -> None:
-    # No interface word here (that path is checked first, unchanged) — only
-    # the verify term "bridging" ties the hypothesis to real evidence.
-    claims = [{"claim": "Pi and Craft share skills through a bridging layer.",
-               "subjects": ["Pi", "Craft"], "url": "u"}]
-    label = rf._integration_label(
-        ["Pi", "Craft"], claims, "some untested hypothesis", ["bridging"]
-    )
-    assert label == "some untested hypothesis"
-
-
-def test_integration_label_from_each_sides_own_documented_interface() -> None:
+def test_integration_label_from_each_sides_own_grounded_term() -> None:
     claims = [
         {"claim": "Pi exposes a CLI for automation.", "subjects": ["Pi"], "url": "u1"},
         {"claim": "Craft supports API access for extensions.", "subjects": ["Craft"], "url": "u2"},
     ]
-    label = rf._integration_label(["Pi", "Craft"], claims)
+    label = rf._integration_label(["Pi", "Craft"], claims, _rel(terms=["CLI", "API"]))
     assert label is not None and "cli" in label and "api" in label
 
 
 def test_integration_label_none_when_ungrounded() -> None:
-    # Neither a joint claim nor a per-side documented interface — must not invent one.
+    # Neither a joint claim nor a per-side grounded term — must not invent one.
     claims = [{"claim": "Pi is a minimal agent harness.", "subjects": ["Pi"], "url": "u"}]
-    assert rf._integration_label(["Pi", "Craft"], claims) is None
+    assert rf._integration_label(["Pi", "Craft"], claims, _rel(terms=["MCP"])) is None
 
 
-def test_grounded_interface_words_from_claims_only() -> None:
-    # v43 live defect: the integration-code prompt was steered by the FRAME
-    # hypothesis ("SDK-based ...") so the model wrote `import pi_sdk`, and the
-    # grounding gate correctly rejected it every time (0/4) — no claim names an
-    # SDK. The interfaces the example MAY use come from claims, not the
-    # ungrounded hypothesis.
+def test_grounded_mechanism_terms_from_claims_only() -> None:
+    # R3: the terms an example MAY use come from the per-task terms corroborated
+    # in the claims — a term the hypothesis proposed but no claim documents is
+    # dropped (v43 defect: an ungrounded "SDK" term made every sample fail).
     claims = [
         {"claim": "Craft connects to REST APIs and MCP servers.", "subjects": ["Craft"], "url": "u1"},
         {"claim": "Pi is a minimal harness.", "subjects": ["Pi"], "url": "u2"},
     ]
-    words = rf._grounded_interface_words(claims)
-    assert "api" in words and "mcp" in words
-    assert "sdk" not in words  # never named in a claim → not offered to the code prompt
+    terms = rf._grounded_mechanism_terms(claims, ["API", "MCP", "SDK"])
+    assert "api" in terms and "mcp" in terms  # plural "APIs"/"servers" still grounds the singular
+    assert "sdk" not in terms
 
 
-def test_grounded_interface_words_empty_when_none_documented() -> None:
+def test_grounded_mechanism_terms_empty_when_none_documented() -> None:
     claims = [{"claim": "Pi is a minimal agent harness.", "subjects": ["Pi"], "url": "u"}]
-    assert rf._grounded_interface_words(claims) == []
+    assert rf._grounded_mechanism_terms(claims, ["API", "MCP"]) == []
 
 
 def test_fallback_cluster_diagram_none_without_grounding() -> None:
     claims = [{"claim": "Pi is a minimal agent harness.", "subjects": ["Pi"], "url": "u"}]
-    assert rf._fallback_cluster_diagram(["Pi", "Craft"], claims) is None
+    assert rf._fallback_cluster_diagram(["Pi", "Craft"], claims, _rel(terms=["MCP"])) is None
 
 
 def test_fallback_cluster_diagram_has_subgraphs_and_cross_edge() -> None:
@@ -939,7 +960,7 @@ def test_fallback_cluster_diagram_has_subgraphs_and_cross_edge() -> None:
         {"claim": "Craft supports MCP servers and browser automation.", "subjects": ["Craft"], "url": "u2"},
         {"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u3"},
     ]
-    body = rf._fallback_cluster_diagram(["Pi", "Craft"], claims)
+    body = rf._fallback_cluster_diagram(["Pi", "Craft"], claims, _rel(terms=["MCP"]))
     assert body is not None
     assert 'subgraph' in body and '["Pi"]' in body and '["Craft"]' in body
     assert "mcp" in body.lower()
@@ -955,7 +976,7 @@ def test_fallback_cluster_diagram_preserves_cross_edge_when_feature_labels_colli
             "url": "u3",
         },
     ]
-    body = rf._fallback_cluster_diagram(["Alpha Product", "Beta Product"], claims)
+    body = rf._fallback_cluster_diagram(["Alpha Product", "Beta Product"], claims, _rel(terms=["API"]))
     assert body is not None
     assert body.count('["API"]') == 2
     cross_lines = [line for line in body.splitlines() if "-->|" in line]
@@ -988,7 +1009,7 @@ def test_fallback_cluster_diagram_does_not_put_other_subject_in_feature_node() -
             "url": "u1",
         }
     ]
-    body = rf._fallback_cluster_diagram(["Alpha Product", "Beta Product"], claims)
+    body = rf._fallback_cluster_diagram(["Alpha Product", "Beta Product"], claims, _rel(terms=["API"]))
     assert body is not None
     alpha_cluster = body.split('subgraph Alpha_Product["Alpha Product"]', 1)[1].split("    end", 1)[0]
     assert '["Beta Product"]' not in alpha_cluster
@@ -1013,7 +1034,7 @@ def test_splice_diagram_falls_back_when_model_returns_single_subject_architectur
         {"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u3"},
     ]
     section_text = "Pi ships a Planner and an Executor. Craft is an agent tool."
-    out = rf._splice_diagram(section_text, ["Pi", "Craft"], claims, _client(reply))
+    out = rf._splice_diagram(section_text, ["Pi", "Craft"], claims, _client(reply), _rel(terms=["MCP"]))
     assert "```mermaid" in out
     assert out.count("subgraph") == 2
     assert "mcp" in out.lower()
@@ -1030,7 +1051,7 @@ def test_splice_diagram_falls_back_when_model_uses_unknown_subject() -> None:
         {"claim": "Craft supports MCP servers and browser automation.", "subjects": ["Craft"], "url": "u2"},
         {"claim": "Craft connects to Pi via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u3"},
     ]
-    out = rf._splice_diagram("Pi and Craft integration overview.", ["Pi", "Craft"], claims, _client(reply))
+    out = rf._splice_diagram("Pi and Craft integration overview.", ["Pi", "Craft"], claims, _client(reply), _rel(terms=["MCP"]))
     assert "```mermaid" in out
     assert "Other System" not in out
     assert "mcp" in out.lower()
@@ -1044,7 +1065,7 @@ def test_splice_diagram_accepts_grounded_two_cluster_diagram() -> None:
     )
     claims = [{"claim": "Craft Agents connects to the Pi Agent Loop via an MCP server.", "subjects": ["Pi", "Craft"], "url": "u"}]
     section_text = "Pi Agent Loop runs the agent loop. Craft Agents is an open source agent interface."
-    out = rf._splice_diagram(section_text, ["Pi", "Craft"], claims, _client(reply))
+    out = rf._splice_diagram(section_text, ["Pi", "Craft"], claims, _client(reply), _rel(terms=["MCP"]))
     assert "```mermaid" in out
     assert out.count("subgraph") == 2
     assert "-->" in out and "MCP" in out
@@ -1206,7 +1227,7 @@ def test_summary_written_from_all_body_sections_last() -> None:
     assert "Pi ships a planner" in prompt
 
 
-def test_summary_prompt_includes_relationship_instruction_when_mechanism_given() -> None:
+def test_summary_prompt_states_cooperation_conclusion() -> None:
     captured: dict[str, list] = {}
 
     def _capture_chat(messages, tools=None):
@@ -1215,11 +1236,41 @@ def test_summary_prompt_includes_relationship_instruction_when_mechanism_given()
 
     rf._write_summary(
         "study Pi and Craft", {"Key Findings": "text"}, SimpleNamespace(chat=_capture_chat),
-        mechanism="Pi calls Craft via MCP",
+        relationship=_rel(kind="cooperates", mechanism="Pi calls Craft via MCP"),
     )
     prompt = captured["messages"][0]["content"]
     assert "conclusion on how the subjects relate" in prompt
     assert "Pi calls Craft via MCP" in prompt
+
+
+def test_summary_prompt_states_comparison_conclusion_for_competes() -> None:
+    captured: dict[str, list] = {}
+
+    def _capture_chat(messages, tools=None):
+        captured["messages"] = messages
+        return SimpleNamespace(text="summary")
+
+    rf._write_summary(
+        "compare Redis and Memcached", {"Key Findings": "text"}, SimpleNamespace(chat=_capture_chat),
+        relationship=_rel(kind="competes", descriptor="Comparison"),
+    )
+    prompt = captured["messages"][0]["content"]
+    assert "trade-offs" in prompt
+
+
+def test_summary_prompt_notes_independence() -> None:
+    captured: dict[str, list] = {}
+
+    def _capture_chat(messages, tools=None):
+        captured["messages"] = messages
+        return SimpleNamespace(text="summary")
+
+    rf._write_summary(
+        "study X and Y", {"Key Findings": "text"}, SimpleNamespace(chat=_capture_chat),
+        relationship=_rel(kind="independent", descriptor="Relationship"),
+    )
+    prompt = captured["messages"][0]["content"]
+    assert "independent concerns" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1238,6 +1289,41 @@ def test_find_duplicate_headings_flags_a_repeat() -> None:
     # is the tripwire that would catch it if that guarantee ever breaks.
     text = "# Report\n\n## Key Findings\n\nbody\n\n## Key Findings\n\nechoed body\n"
     assert rf._find_duplicate_headings(text) == ["Key Findings"]
+
+
+def test_enforce_references_last_moves_trailing_section_before_references() -> None:
+    # v44 defect: a section trailed References. It must be moved to before it,
+    # References ends up last, other sections keep their relative order.
+    text = (
+        "# Report\n\n"
+        "## Key Findings\n\nfindings body\n\n"
+        "## References\n\n- https://x.test/a\n\n"
+        "## Pi and Craft: Integration\n\nrelationship body\n"
+    )
+    out = rf._enforce_references_last(text)
+    headings = [h for h in re.findall(r"(?m)^## (.+)$", out)]
+    assert headings[-1] == "References"
+    assert headings.index("Key Findings") < headings.index("Pi and Craft: Integration")
+    # content moved with its heading
+    assert "relationship body" in out
+
+
+def test_enforce_references_last_noop_when_already_last() -> None:
+    text = "# Report\n\n## Key Findings\n\nbody\n\n## References\n\n- https://x.test/a\n"
+    assert rf._enforce_references_last(text) == text
+
+
+def test_enforce_references_last_ignores_hash_inside_code_fence() -> None:
+    # A ``## `` inside a code fence is not a heading — must not be reordered.
+    text = (
+        "# Report\n\n"
+        "## References\n\n- https://x.test/a\n\n"
+        "## Example\n\n```python\n## not a heading\nx = 1\n```\n"
+    )
+    out = rf._enforce_references_last(text)
+    top_headings = [h for h in re.findall(r"(?m)^## (.+)$", out)]
+    assert top_headings[-1] == "References"
+    assert "## not a heading" in out  # fence content preserved intact
 
 
 def test_rebuild_references_from_claims_ignores_body_scraped_links() -> None:
