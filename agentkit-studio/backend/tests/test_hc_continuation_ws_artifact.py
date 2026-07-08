@@ -93,3 +93,33 @@ def test_stale_seed_does_not_override_fresh_research_first_output(
         "this session's own workspace artifact.md still holds stale content — "
         "the NEXT continuation would seed from it and re-introduce the bug"
     )
+
+
+def test_research_first_seed_carry_forward_is_skipped(tmp_path, monkeypatch) -> None:
+    # MVP-9: research_first is cold-start (D4). Even with auto_improve + a prior
+    # lineage row, the seed carry-forward must NOT run — seeding writes the prior
+    # artifact into artifact.md AND splits it into per-section files, and a
+    # downstream merge pulled the prior's relationship section back onto the
+    # fresh output (live v45–v47: a stale "Comparison" section accumulated on top
+    # of the fresh "Integration" one and broke References-last). The generator's
+    # raw output is clean; the pollution was entirely this carry-forward.
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    store = TaskRunStore(db_path=tmp_path / "task_runs.db")
+    store.record(TaskRun(
+        task_hash=task_hash(REQ), session_id="s_prior", version=1, score=0.6,
+        weaknesses=[], artifact_path="", requirement=REQ, result_text=STALE_TEXT,
+    ))
+    session = _make_session()
+    session.use_research_first = True
+    runner = Runner(
+        session, lambda _e: None, client_factory=None,
+        embedder=None, workspace_root=tmp_path / "ws",
+    )
+    (_req, _weak, artifact_copied, _ws, seed_len, seed_text, _cross, _topic) = (
+        runner._seed_carry_forward(
+            session=session, requirement=REQ, _base_requirement=REQ,
+            _hc_cfg={"auto_improve": True},
+        )
+    )
+    assert artifact_copied is False, "research_first session must not copy a seed"
+    assert seed_len == 0 and seed_text == "", "research_first session must cold-start"

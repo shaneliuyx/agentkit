@@ -2792,7 +2792,17 @@ class Runner:
         # them from its handoff (below) instead of grinding on them forever. Empty
         # when not hill-climbing.
         _repeat_failed: set[str] = set()
-        if _hc_cfg.get("auto_improve"):
+        # research_first is COLD-START by design (D4 / _run_research_first_generation
+        # docstring: "ignores any prior-artifact content"). Seeding it is not just
+        # wasted — it actively corrupts: the seed is written to artifact.md AND split
+        # into per-section files, and although the generator overwrites artifact.md
+        # with its fresh output, the seed's section files survive and a downstream
+        # merge pulls the prior lineage's relationship section back in (live v45–v47:
+        # a stale "Architectural Comparison" section accumulated on top of the fresh
+        # "Integrated Agentic Workflow", and References stopped being last). The
+        # generator's raw output is clean (one relationship section, References last,
+        # verified offline); the pollution is entirely this carry-forward. Skip it.
+        if _hc_cfg.get("auto_improve") and not _use_research_first(session):
             from studio.task_runs import (
                 TaskRunStore,
                 base_identity as _base_identity,
