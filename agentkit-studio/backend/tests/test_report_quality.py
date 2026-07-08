@@ -102,6 +102,122 @@ preserving governance and rollback paths.
     assert result.publish_ready is True
 
 
+def test_internal_pipeline_markers_fail_publish_gate() -> None:
+    requirement = "Write a research report about catalog management. Use citations."
+    text = """
+## Executive Summary
+
+Catalog management needs versioned evidence, source tracking, and governance
+controls for every generated report (https://example.com/catalog).
+
+## Evidence and Analysis
+
+### RESEARCH_FINDING
+
+The report should not expose internal pipeline scaffolding to readers. Published
+research output must contain synthesized prose rather than worker metadata
+(https://example.com/catalog).
+
+## References
+
+- https://example.com/catalog
+"""
+
+    result = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/catalog"],
+    )
+
+    assert result.publish_ready is False
+    assert any("internal pipeline markers" in issue for issue in result.issues)
+
+
+def test_publish_gate_allows_search_as_normal_report_word() -> None:
+    requirement = "Write a research report about catalog management. Use citations."
+    text = """
+## Executive Summary
+
+Catalog search improves local and remote catalog management when it records which
+source produced each result and keeps validation metadata with every imported
+entry (https://example.com/catalog).
+
+## Evidence and Analysis
+
+The search workflow should remain auditable: each catalog query needs a source
+URL, a normalized title, and a rollback path for stale assets. These controls
+support report generation without exposing internal worker scaffolding
+(https://example.com/catalog).
+
+Teams should also preserve reviewer notes, import timestamps, and the selected
+report profile so later runs can explain why one catalog entry was used instead
+of another. That evidence trail lets operators compare local fallback entries
+with remote updates, reject stale assets, and keep generated reports tied to the
+same cited source rather than drifting into unsupported prose.
+
+## References
+
+- https://example.com/catalog
+"""
+
+    result = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/catalog"],
+    )
+
+    assert result.publish_ready is True
+
+
+def test_publish_gate_allows_reader_facing_url_and_search_headings() -> None:
+    requirement = "Write a research report about catalog management. Use citations."
+    text = """
+## Executive Summary
+
+Catalog management needs versioned evidence, source tracking, and governance
+controls for every generated report (https://example.com/catalog).
+
+## URL: Evidence Index
+
+URL governance can be reader-facing when the report explains how source
+locations are normalized and audited (https://example.com/catalog).
+
+URL: Evidence Index
+
+## Search: Method
+
+Search methodology can be a normal section heading when it describes how
+catalog entries are discovered, deduplicated, reviewed, and retained for later
+comparison (https://example.com/catalog).
+
+SEARCH: Method
+
+The method records query terms, source URLs, import timestamps, and reviewer
+decisions so later report runs can explain why one catalog entry was selected
+over another. It also distinguishes local fallback records from remote updates,
+which helps operators reject stale assets without hiding useful provenance
+(https://example.com/catalog).
+
+## Limitations
+
+This report assumes the catalog keeps source timestamps and reviewer notes
+available for follow-up validation. It does not prove that every remote source
+will stay available, so future runs still need freshness checks before publishing.
+
+## References
+
+- https://example.com/catalog
+"""
+
+    result = evaluate_publish_readiness(
+        requirement,
+        text,
+        verified_urls=["https://example.com/catalog"],
+    )
+
+    assert result.publish_ready is True
+
+
 def test_publish_gate_ignores_internal_structure_instruction_terms() -> None:
     requirement = (
         "Write a research report about catalog management for local and remote agent loops "

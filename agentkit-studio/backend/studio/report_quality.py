@@ -95,6 +95,14 @@ _REFLECTION_RE = re.compile(
     r"constraint|assumption|further\s+research|not\s+yet\s+verified"
     r")\b"
 )
+_INTERNAL_MARKER_RE = re.compile(
+    r"(?im)\bRESEARCH_FINDING\b|^[ \t]*(?:(?:[-*+>]|\d+[.)])\s*)?"
+    r"("
+    r"(?:ARTICLE_TITLE|POPULARITY|PUBLICATION|KEY_INSIGHT|PATCH_TARGET)\s*:.*"
+    r"|URL\s*:\s*(?:https?://\S+|\(?none\)?)"
+    r"|SEARCH\s*:\s*(?:ok|error)\b.*"
+    r")$"
+)
 
 
 @dataclass(frozen=True)
@@ -274,6 +282,10 @@ def evaluate_publish_readiness(
 
     if _unresolved_report_title(body):
         issues.append("[publish-gate] Final output still contains an unresolved placeholder report title.")
+
+    markers = sorted({next(g for g in m.groups(default=m.group(0)) if g).upper() for m in _INTERNAL_MARKER_RE.finditer(body)})
+    if markers:
+        issues.append(f"[publish-gate] Final output leaked internal pipeline markers: {', '.join(markers)}.")
 
     if required_sections:
         from studio.rubric import sections_present
