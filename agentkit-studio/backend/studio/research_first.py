@@ -1591,33 +1591,112 @@ def _splice_code(section_text: str, evidence_dir: Path, client: Any) -> str:
     return f"{section_text}\n\n{block}" if block else section_text
 
 
-def _splice_subject_code(text: str, subject: str, claims: list[dict[str, Any]], client: Any) -> str:
-    """One code example per subject (same pattern as ``_splice_subject_diagram``)
-    — grounded in ONLY that subject's own claims, compile-gated. ponytail: skips
-    the raw-evidence-file preference ``_splice_code`` has (no subject tag on
-    disk to filter evidence/*.md by) and always synthesizes from claims text;
-    add evidence-file filtering if scoring shows the synthesis path is weaker."""
+_EV_FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9+]*)[ \t]*\n(.*?)```", re.DOTALL)
+
+
+def _subject_evidence_code(evidence_dir: Path | None, urls: set[str]) -> tuple[str, str] | None:
+    """``(url, excerpt)`` — real code from the subject's OWN fetched sources (evidence
+    files whose header URL the subject cited). Mirrors how a researcher writes an
+    example: copy the actual command/snippet from the docs, never invent an SDK.
+    Prefers ANY fenced block (a 2-line `craft-cli run …` or `from pi import …` counts —
+    codex: `_best_code_excerpt` needs a 10-line dense run and skips short SDK snippets);
+    falls back to the dense-run heuristic. None when the sources carry no code."""
+    from studio.structural_producer import _URL_LINE_RE, _best_code_excerpt, _iter_evidence_files
+
+    dense_fallback: tuple[str, str] | None = None
+    for path in _iter_evidence_files(evidence_dir):
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = _URL_LINE_RE.match(content)
+        url = m.group(1) if m else ""
+        if not url or url not in urls:
+            continue
+        body = content[m.end() :] if m else content
+        fm = _EV_FENCE_RE.search(body)
+        if fm and fm.group(2).strip():
+            lang = fm.group(1) or _EV_LANG_HINT
+            return url, f"```{lang}\n{fm.group(2).strip()}\n```"
+        if dense_fallback is None:
+            excerpt = _best_code_excerpt(body)
+            if excerpt:
+                dense_fallback = (url, f"```{_EV_LANG_HINT}\n{excerpt}\n```")
+    return dense_fallback
+
+
+_EV_LANG_HINT = "text"
+
+#: Programming-language fences where an ``import``/``require`` line is real code, not
+#: English prose. A CLI (```bash) or natural-language (```text) block is NEVER a
+#: fabricated SDK, so the invented-import guard must not fire on it (codex: the old
+#: guard dropped Craft's real `import my skills from Claude Code` NL instruction).
+_CODE_FENCE_LANGS = frozenset({
+    "python", "py", "javascript", "js", "typescript", "ts", "tsx", "jsx", "java",
+    "go", "golang", "rust", "rs", "ruby", "rb", "c", "cpp", "csharp", "cs", "php",
+    "swift", "kotlin", "scala",
+})
+_IMPORT_RE = re.compile(
+    r"(?m)^\s*(?:import\s+[\w.{*]|from\s+[\w./@-]+\s+import\s|#include\s*[<\"]"
+    r"|using\s+[\w.]+\s*;)|(?:^|[^\w.])require\(['\"]"
+)
+
+
+def _splice_subject_code(
+    text: str, subject: str, claims: list[dict[str, Any]], client: Any,
+    evidence_dir: Path | None = None,
+) -> str:
+    """One code example per subject. Prefers a REAL code block from the subject's own
+    fetched sources; only if none exists does it synthesise — and then it is forbidden
+    to invent an SDK/import, because a tool the docs show no code for (e.g. a CLI or
+    natural-language app) must be demonstrated by its REAL interface, not a
+    hallucinated API. Live: the Craft example invented `from craft_agents import
+    Agent` — a Python SDK that exists in NO source — because the old prompt demanded
+    'runnable' code from prose claims that named no API."""
     if client is None:
         return text
     subj_claims = [c for c in claims if subject in (c.get("subjects") or [])]
     if not subj_claims:
         return text
-    ev_lines = "\n".join(f"- {c['claim']} (URL: {c['url']})" for c in subj_claims[:10])
-    prompt = (
-        f"Using ONLY the claims below about {subject}, produce a minimal runnable "
-        "code example grounded in what they describe. Output ONLY a single "
-        "fenced code block (```language ... ```), nothing else.\n\n"
-        f"CLAIMS:\n{ev_lines}"
-    )
-    try:
-        reply = client.chat([{"role": "user", "content": prompt}])
-        block = str(getattr(reply, "text", "") or "").strip()
-    except Exception as exc:  # noqa: BLE001 — a bad code call must never break the run
-        dbg(f"research_first _splice_subject_code: call failed subject={subject!r} exc={exc!r}")
-        return text
-    if "```" not in block or block.count("```") % 2 != 0 or not _fenced_code_compiles(block):
-        return text
-    candidate = f"{text}\n\nExample: {subject}.\n\n{block}"
+    # 1. Prefer the subject's OWN real code, copied from the docs (never invented).
+    real = _subject_evidence_code(evidence_dir, {c["url"] for c in subj_claims})
+    if real:
+        url, block = real  # block is already a complete fenced markdown block
+        source_line = f"Example: {subject} (from the source material, [source]({url}))."
+    else:
+        # 2. No evidenced code → the subject has no code API the docs demonstrate.
+        #    Show its REAL interface (CLI / natural-language), and forbid imports.
+        ev_lines = "\n".join(f"- {c['claim']} (URL: {c['url']})" for c in subj_claims[:10])
+        prompt = (
+            f"Show how a user actually invokes {subject}, using ONLY what the claims "
+            "below describe. RULES: use ONLY commands, CLIs, functions, or config that "
+            "the claims NAME. If the claims describe a command-line tool or a natural-"
+            "language / GUI application (not a code library), show the REAL usage — its "
+            "actual shell command(s) or the natural-language instructions — NOT an "
+            "invented code API. NEVER write an import/require of a package the claims "
+            "do not name. Output ONLY a single fenced block (```lang ... ```).\n\n"
+            f"CLAIMS:\n{ev_lines}"
+        )
+        try:
+            reply = client.chat([{"role": "user", "content": prompt}])
+            block = str(getattr(reply, "text", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001 — a bad code call must never break the run
+            dbg(f"research_first _splice_subject_code: call failed subject={subject!r} exc={exc!r}")
+            return text
+        if "```" not in block or block.count("```") % 2 != 0 or not _fenced_code_compiles(block):
+            return text
+        # Fabrication guard: the subject's docs showed NO code, so a program-language
+        # example that imports a package is an invented SDK — drop it. Gated on the
+        # fence LANGUAGE (codex): a ```bash CLI or ```text natural-language block is
+        # never a fabricated SDK, and its prose ("import my skills from Claude Code")
+        # must not trip an import regex.
+        lang_m = re.match(r"\s*```[ \t]*([A-Za-z0-9+]*)", block)
+        lang = (lang_m.group(1).lower() if lang_m else "")
+        if lang in _CODE_FENCE_LANGS and _IMPORT_RE.search(block):
+            dbg(f"research_first _splice_subject_code: dropped invented-import example subject={subject!r}")
+            return text
+        source_line = f"Example: {subject}."
+    candidate = f"{text}\n\n{source_line}\n\n{block}"
     if len(lint_artifact(candidate)) > len(lint_artifact(text)):
         return text  # never ship a splice that introduces a NEW lint issue
     return candidate
@@ -2467,7 +2546,9 @@ def generate_research_first(
             home = _pick_subject_home(written, subject, exclude)
             if home:
                 code_subject_homes[subject] = home
-                written[home] = _splice_subject_code(written[home], subject, claims, client)
+                written[home] = _splice_subject_code(
+                    written[home], subject, claims, client, evidence_dir
+                )
         # The ONE integration example ships only for the integration kinds — a
         # competes/alternative report gets the comparison table instead.
         if wants_integration and relationship_home:

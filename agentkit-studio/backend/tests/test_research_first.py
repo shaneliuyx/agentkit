@@ -490,6 +490,24 @@ def test_strip_boilerplate_keeps_content_table_drops_nav_menu() -> None:
     assert "Sign in" not in kept  # bare link menu dropped
 
 
+def test_subject_code_drops_invented_sdk_when_no_evidenced_code() -> None:
+    # Live regression: the Craft example invented `from craft_agents import Agent`
+    # (a Python SDK in NO source) because the prompt demanded 'runnable' code from
+    # prose claims naming no API. With no evidenced code for the subject, a synthesised
+    # block that imports anything is a fabricated SDK → must be dropped, not shipped.
+    class _FakeClient:
+        def chat(self, _msgs):
+            class _R:
+                text = "```python\nfrom craft_agents import Agent\nAgent().run()\n```"
+            return _R()
+
+    claims = [{"claim": "Craft connects to any API via natural language.",
+               "quote": "add Linear as a source", "url": "https://agents.craft.do/",
+               "subjects": ["Craft"]}]
+    out = rf._splice_subject_code("Body.", "Craft", claims, _FakeClient(), evidence_dir=None)
+    assert "craft_agents" not in out and out == "Body."  # fabricated import dropped
+
+
 def test_claims_clamp_mistagged_subject_to_fetch_loop() -> None:
     # Live regression: a source fetched under the "Pi" loop, but the LLM's own
     # SUBJECTS guess named "Craft" instead — source selection was gated, the
