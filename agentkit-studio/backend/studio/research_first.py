@@ -561,6 +561,20 @@ def _mentions_subject(subject: str, anchors: list[str], text: str) -> bool:
     return False
 
 
+def _subject_supported(subject: str, anchors: list[str], claim: str, quote: str) -> bool:
+    """Whether a claim's subject tag is backed by its VERBATIM quote (ground truth),
+    with the paraphrased claim as fallback ONLY when the quote is silent on the
+    subject (the quote may pronoun it). If the quote names the subject token but only
+    as a compound-proper-noun collision ("Inflection Pi"), the tag is REJECTED even
+    when the claim says a bare "Pi" — the evidence is a different product, and the LLM
+    merely paraphrased the qualifier away."""
+    if _mentions_subject(subject, anchors, quote):
+        return True
+    if re.search(r"\b" + re.escape(subject) + r"\b", quote, re.IGNORECASE):
+        return False  # token in quote but only as a collision → a different product
+    return _mentions_subject(subject, anchors, claim)  # quote silent → trust the claim
+
+
 def _tag_claim(
     claim: str,
     quote: str,
@@ -574,8 +588,10 @@ def _tag_claim(
     mint a joint claim. The page's own subject (*loop_subject*) is always included; a
     joint-loop claim (loop_subject None) naming no genuine confirmed subject grounds
     nothing and returns []."""
-    scope = f"{claim} {quote}"
-    mentioned = [s for s in page_subjects if _mentions_subject(s, all_anchors.get(s) or [s], scope)]
+    # Back a subject by the VERBATIM QUOTE (ground truth), claim only as fallback when
+    # the quote is silent — the model can paraphrase "Inflection Pi" -> bare "Pi",
+    # defeating the lexical collision guard on the claim; the quote still carries it.
+    mentioned = [s for s in page_subjects if _subject_supported(s, all_anchors.get(s) or [s], claim, quote)]
     if loop_subject is None:
         return mentioned
     return list(dict.fromkeys([loop_subject, *[s for s in mentioned if s != loop_subject]]))
@@ -960,10 +976,11 @@ def _extract_relationship_claim(
             or _is_markup_dense_quote(quote)
         ):
             continue
-        scope = f"{claim} {quote}"
+        # Quote-backed (see _subject_supported): the verbatim quote carries a dropped
+        # qualifier, so the collision guard can't be paraphrased away.
         others = [
             s for s in subjects_present
-            if s != loop_subject and _mentions_subject(s, all_anchors.get(s) or [s], scope)
+            if s != loop_subject and _subject_supported(s, all_anchors.get(s) or [s], claim, quote)
         ]
         if loop_subject is not None:
             # On a subject's OWN page the page owner is one party even when the
@@ -976,7 +993,7 @@ def _extract_relationship_claim(
             tags = list(dict.fromkeys([loop_subject, *others]))
         else:
             # Joint-fetched source with no page owner: require >=2 genuine mentions.
-            tags = [s for s in subjects_present if _mentions_subject(s, all_anchors.get(s) or [s], scope)]
+            tags = [s for s in subjects_present if _subject_supported(s, all_anchors.get(s) or [s], claim, quote)]
             if len(tags) < 2:
                 continue
         out.append({"claim": claim, "quote": quote, "url": url, "subjects": tags})

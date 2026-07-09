@@ -1768,3 +1768,26 @@ def test_coverage_gate_joint_recovery_requires_literal_naming(monkeypatch, tmp_p
         client=_client(""), judge_client=None, ws_dir=tmp_path, emit=None,
     )
     assert sum(1 for c in out if len(c["subjects"]) >= 2) == 0
+
+
+def test_tag_claim_joins_on_quote_not_paraphrased_claim() -> None:
+    # G1-noise: the LLM can paraphrase "Inflection Pi" -> bare "Pi is a compatible
+    # model", defeating the lexical collision guard on the CLAIM text. Joining on the
+    # verbatim QUOTE (which still carries "Inflection Pi") keeps it out of a joint tag.
+    anchors = {"Pi": ["pi-ai", "pi-agent-core"], "Craft": ["Craft Agents"]}
+    tags = rf._tag_claim(
+        "Pi is one of the compatible models Craft Agents can use.",  # paraphrased (bare Pi)
+        "compatible models include Inflection Pi and Moonshot",       # verbatim quote
+        "Craft", ["Pi", "Craft"], anchors,
+    )
+    assert tags == ["Craft"]  # Pi not joined — the quote shows it is Inflection Pi
+
+
+def test_tag_claim_joins_real_pi_via_quote() -> None:
+    anchors = {"Pi": ["pi-ai", "pi-agent-core"], "Craft": ["Craft Agents"]}
+    tags = rf._tag_claim(
+        "Craft utilizes both SDKs.",
+        "It uses the Claude Agent SDK and the Pi SDK side by side",  # quote genuinely names Pi
+        "Craft", ["Pi", "Craft"], anchors,
+    )
+    assert set(tags) == {"Pi", "Craft"}
