@@ -1813,34 +1813,44 @@ def test_parse_relation_triples_rejects_substring_collision() -> None:
     ]
 
 
-def test_splice_relationship_table_tabulates_fanout() -> None:
-    # Task 2 render: a genuine fan-out (one source -> several targets) becomes a
-    # deterministic routing table appended to the section; every row is a grounded
-    # triple. De-dups by (source, target).
+def test_splice_relationship_table_tabulates_subject_grounded_fanout() -> None:
+    # Task 2 render: a subject-grounded fan-out (one package/SDK -> several targets)
+    # becomes a deterministic table; de-dups by (source, target). A source NOT grounded
+    # to a subject/anchor ("extensions") is dropped even when it fans out — that is the
+    # selection fix that turns a noisy grab-bag into the real architecture story.
+    subjects = ["Pi", "Craft"]
+    anchors = {"Pi": ["pi-ai", "pi-agent-core"], "Craft": ["Claude Agent SDK"]}
     claims = [
         {"claim": "x", "relations": [
-            {"head": "Pi SDK", "rel": "routes to", "tail": "Google AI Studio"},
-            {"head": "Pi SDK", "rel": "routes to", "tail": "OpenAI"},
-            {"head": "Pi SDK", "rel": "routes to", "tail": "OpenAI"},  # dup
+            {"head": "Pi SDK", "rel": "uses", "tail": "pi-ai"},
+            {"head": "Pi SDK", "rel": "uses", "tail": "pi-agent-core"},
+            {"head": "Pi SDK", "rel": "uses", "tail": "pi-agent-core"},  # dup
         ]},
-        {"claim": "y", "relations": [
-            {"head": "Claude Agent SDK", "rel": "handles", "tail": "Anthropic"},
+        {"claim": "y", "relations": [   # NOT subject-grounded -> whole head dropped
+            {"head": "extensions", "rel": "access", "tail": "tools"},
+            {"head": "extensions", "rel": "access", "tail": "commands"},
         ]},
     ]
-    out = rf._splice_relationship_table("Body prose.", claims)
+    out = rf._splice_relationship_table("Body prose.", subjects, anchors, claims)
     assert "| Source | Relationship | Target |" in out
-    assert out.count("| Pi SDK |") == 2  # two distinct providers, dup collapsed
-    assert "| Claude Agent SDK | handles | Anthropic |" in out  # single-tail row rides along
+    assert out.count("| Pi SDK |") == 2       # two distinct targets, dup collapsed
+    assert "extensions" not in out            # ungrounded source dropped
 
 
-def test_splice_relationship_table_fail_open_without_fanout() -> None:
-    # Only one-off edges (no source with >=2 targets) -> not table-worthy -> unchanged.
-    claims = [{"claim": "x", "relations": [
-        {"head": "A", "rel": "uses", "tail": "B"},
-        {"head": "C", "rel": "uses", "tail": "D"},
-    ]}]
-    assert rf._splice_relationship_table("Body.", claims) == "Body."
-    assert rf._splice_relationship_table("Body.", [{"claim": "x"}]) == "Body."  # no relations
+def test_splice_relationship_table_fail_open_without_grounded_fanout() -> None:
+    subjects = ["Pi", "Craft"]
+    anchors = {"Pi": ["pi-ai"], "Craft": []}
+    # A grounded source with only ONE target is not a fan-out -> no table.
+    assert rf._splice_relationship_table(
+        "Body.", subjects, anchors, [{"claim": "x", "relations": [
+            {"head": "Pi SDK", "rel": "uses", "tail": "pi-ai"}]}]) == "Body."
+    # A fan-out whose source is NOT subject-grounded -> filtered out -> no table.
+    assert rf._splice_relationship_table(
+        "Body.", subjects, anchors, [{"claim": "x", "relations": [
+            {"head": "AppMenu", "rel": "has", "tail": "MobileAppMenu"},
+            {"head": "AppMenu", "rel": "has", "tail": "DesktopAppMenu"}]}]) == "Body."
+    # No relations at all -> unchanged.
+    assert rf._splice_relationship_table("Body.", subjects, anchors, [{"claim": "x"}]) == "Body."
 
 
 def test_parse_relation_triples_absent_when_no_relations_line() -> None:

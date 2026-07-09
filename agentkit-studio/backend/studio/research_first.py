@@ -2046,7 +2046,9 @@ def _splice_diagram(
 
 #: Cap on comparison rows per subject — a table, not a claim dump.
 _MAX_COMPARISON_ROWS = 4
-_MAX_RELATION_ROWS = 12
+_MAX_RELATION_ROWS = 14
+_MAX_RELATION_TARGETS_PER_HEAD = 5
+_MAX_RELATION_HEADS = 6
 
 
 def _table_cell(text: str) -> str:
@@ -2087,42 +2089,67 @@ def _splice_comparison_table(
     return candidate
 
 
-def _splice_relationship_table(text: str, claims: list[dict[str, Any]]) -> str:
-    """A deterministic integration-routing table from the claim ``relations`` triples
-    (task 2 / provider-routing gold-parity). The routing facts already exist as prose
-    claims; `relations` lifted them to grounded ``head|rel|tail`` edges at extraction —
-    here we group them by source and tabulate the fan-out (e.g. one SDK routing to
-    several providers) that a single diagram edge can't show. Generic — no provider/
-    verb literal; every row is a triple whose endpoints were quote-grounded upstream.
+def _head_is_subject_grounded(
+    head: str, subjects: list[str], all_anchors: dict[str, list[str]]
+) -> bool:
+    """A relationship is table-worthy only when its SOURCE is one of the report's
+    actual subjects or a named component of one (an anchor) — never an arbitrary
+    structural token the model happened to emit (``AppMenu``, ``extensions``, ``It``).
+    Generic: keyed purely on the run's own subjects/anchors, no domain literal. Uses
+    the same whole-token match as the anti-fabrication grounding, so ``pi-agent-core``
+    grounds on subject ``Pi`` and ``Craft Agents`` on ``Craft``."""
+    h = head.lower()
+    for s in subjects:
+        if _token_in(s, h):
+            return True
+        if any(_token_in(anc, h) for anc in (all_anchors.get(s) or [])):
+            return True
+    return False
 
-    Fires ONLY when a genuine fan-out exists (some source with >=2 distinct targets):
-    a run of one-off edges reads better as prose/diagram than a sparse table. De-dups
-    by (source, target), caps rows, and fail-opens to unchanged text (no triples, no
-    fan-out, or a splice that would introduce a new lint issue)."""
-    triples: list[tuple[str, str, str]] = []
+
+def _splice_relationship_table(
+    text: str, subjects: list[str], all_anchors: dict[str, list[str]],
+    claims: list[dict[str, Any]],
+) -> str:
+    """A deterministic relationship table from the claim ``relations`` triples (task 2).
+    Facts already exist as prose claims; `relations` lifted them to quote-grounded
+    ``head|rel|tail`` edges at extraction — here we tabulate the SUBJECT fan-out (one
+    package/SDK to several targets: its components, providers, or dependencies) that a
+    single diagram edge can't show. Generic — no provider/verb literal.
+
+    Selection is what makes the table useful rather than noisy: keep only triples whose
+    SOURCE grounds to a subject/anchor (drops arbitrary structural edges), keep only
+    genuine fan-outs (a source with >=2 distinct targets), rank sources by fan-out size,
+    and cap heads/targets/rows so the strongest architecture story leads instead of an
+    alphabetical grab-bag. De-dups by (source, target); fail-opens to unchanged text
+    (no grounded fan-out, or a splice that would introduce a new lint issue)."""
+    by_head: dict[str, list[tuple[str, str]]] = {}  # source -> [(relation, target)]
     seen: set[tuple[str, str]] = set()
     for c in claims:
         for r in (c.get("relations") or []):
             head, rel, tail = (r.get("head") or ""), (r.get("rel") or ""), (r.get("tail") or "")
             if not (head and rel and tail):
                 continue
+            if not _head_is_subject_grounded(head, subjects, all_anchors):
+                continue
             key = (head.lower(), tail.lower())
             if key in seen:
                 continue
             seen.add(key)
-            triples.append((head, rel, tail))
-    if len(triples) < 2:
-        return text
-    fanout: dict[str, int] = {}
-    for h, _, _ in triples:
-        fanout[h.lower()] = fanout.get(h.lower(), 0) + 1
-    if max(fanout.values()) < 2:
-        return text  # only one-off edges — not table-worthy
-    triples.sort(key=lambda t: (t[0].lower(), t[2].lower()))
+            by_head.setdefault(head, []).append((rel, tail))
+    fanned = {h: rt for h, rt in by_head.items() if len(rt) >= 2}
+    if not fanned:
+        return text  # no grounded fan-out — not table-worthy
+    ranked = sorted(fanned.items(), key=lambda kv: (-len(kv[1]), kv[0].lower()))
     lines = ["| Source | Relationship | Target |", "| --- | --- | --- |"]
-    for head, rel, tail in triples[:_MAX_RELATION_ROWS]:
-        lines.append("| " + " | ".join(_table_cell(x) for x in (head, rel, tail)) + " |")
-    caption = "Integration routing (from documented claims)."
+    rows = 0
+    for head, rt in ranked[:_MAX_RELATION_HEADS]:
+        for rel, tail in rt[:_MAX_RELATION_TARGETS_PER_HEAD]:
+            if rows >= _MAX_RELATION_ROWS:
+                break
+            lines.append("| " + " | ".join(_table_cell(x) for x in (head, rel, tail)) + " |")
+            rows += 1
+    caption = "Key relationships (from documented claims)."
     candidate = f"{text}\n\n{caption}\n\n" + "\n".join(lines)
     if len(lint_artifact(candidate)) > len(lint_artifact(text)):
         return text  # never ship a splice that introduces a NEW lint issue
@@ -2621,10 +2648,11 @@ def generate_research_first(
             text = _splice_code(text, evidence_dir, client)
         if name == diagram_home and wants_integration:
             text = _splice_diagram(text, subjects, claims, render_client, relationship)
-            # The diagram shows the integration EDGE; the routing table enumerates the
-            # fan-out a single edge can't (one SDK -> several providers). Fail-open when
-            # no grounded fan-out exists, so a non-routing integration is unaffected.
-            text = _splice_relationship_table(text, claims)
+            # The diagram shows the integration EDGE; the relationship table enumerates
+            # the fan-out a single edge can't (one package/SDK -> several targets). Fail-
+            # open when no subject-grounded fan-out exists, so a thin integration is
+            # unaffected.
+            text = _splice_relationship_table(text, subjects, all_anchors, claims)
         if name == relationship_home and wants_comparison:
             # competes/alternative: a grounded comparison table replaces the
             # integration diagram/code entirely (R3).
