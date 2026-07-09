@@ -278,6 +278,21 @@ Newly-DONE since the last gap pass (do not re-open): section-synthesis (distinct
 the `_claims_for_section` per-section rotation + the `_write_section` synthesis directive), assembler
 references-last (`assemble_artifact_from_sections`).
 
+**RESULT — query-directed extraction closed G3+G5 (2026-07-09, deterministic).** The "app reads all
+evidence but not equally" question (user) traced to extraction, not fetch: the Pi README's 4-package
+table produced 0 package claims (3 compounding causes — priority-blind `extract 3-6 facts` prompt;
+package names trapped in `[name](url)` markdown; `_strip_boilerplate` deleting the link-dense table as
+nav chrome). Fix = query-directed + structure-aware extraction + `_plainer_markdown` + per-line
+nav-vs-content boilerplate rule (all in `_extract_claims_from_source` / `_strip_boilerplate`).
+Direct evidence-replay: Pi README 0/4 → 3/4 named, 4/4 by role. Live (deterministic, confirmed ×2):
+**score 0.5706 → 0.92, a-e 6/6**, report now names pi-ai/pi-agent-core/pi-coding-agent + the correct
+`Claude Agent SDK` + `Pi SDK` two-backend integration (gold-standard content). G5 (architectural
+depth) and most of G3 (source authority — primary content now dominates the vocabulary) are CLOSED by
+this. Remaining minor: G1-diagram edge grounding, G2-residual (`Inflection Pi` label harvest), G4
+citation dedup, G6 heading-leak lint. The one-sentence contract was NOT relaxed (verified unnecessary:
+the depth came from reading the source better, not from longer claims — the contract stays load-bearing
+for anti-fabrication).
+
 **Phase 1 — Close acceptance (visible outcome). [M–L] — THE priority.**
 Scope set by the Phase-0 readout: the deterministic failure is `c` (integration diagram absent)
 caused by **0 joint claims + Pi under-coverage (2 vs 12)**. Attack coverage, not word-depth.
