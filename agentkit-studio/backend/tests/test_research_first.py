@@ -490,6 +490,48 @@ def test_strip_boilerplate_keeps_content_table_drops_nav_menu() -> None:
     assert "Sign in" not in kept  # bare link menu dropped
 
 
+def test_relation_triple_grounds_direction_and_rejects_reversed_or_invented() -> None:
+    # KGGen/GraphRAG pattern: LLM emits an ordered SPO triple, code assembles the
+    # edge. Both guardrails must hold: relation grounded in a joint claim (CON-1) and
+    # direction confirmed by source-before-target in an active-voice claim (CON-2).
+    joint = [{"claim": "Craft Agents utilizes both the Claude Agent SDK and the Pi SDK.",
+              "subjects": ["Craft", "Pi"]}]
+
+    class _C:
+        def __init__(self, line): self._line = line
+        def chat(self, _m):
+            class _R: pass
+            r = _R(); r.text = self._line; return r
+
+    subjects = ["Craft", "Pi"]
+    # Good: active direction, relation grounded in the cited claim → 4-tuple w/ claim.
+    ok = rf._extract_relation_triple(subjects, joint, _C("Craft | utilizes | Pi | 1"))
+    assert ok[:3] == ("Craft", "utilizes", "Pi") and "utilizes" in ok[3]
+    # CON-2: reversed direction rejected.
+    assert rf._extract_relation_triple(subjects, joint, _C("Pi | utilizes | Craft | 1")) is None
+    # CON-1: fully invented relation rejected.
+    assert rf._extract_relation_triple(subjects, joint, _C("Craft | orchestrates delegation | Pi | 1")) is None
+    # CON-1 (codex HIGH): partially-grounded invented phrase — 'sdk' is in the claim but
+    # 'delegation' is not, so one grounded token must NOT launder the invented phrase.
+    assert rf._extract_relation_triple(subjects, joint, _C("Craft | sdk delegation | Pi | 1")) is None
+
+
+def test_relation_triple_confirms_passive_voice_direction() -> None:
+    # codex HIGH: 'B is used by A' → A->B. Positional order alone would reverse it;
+    # the active/passive check against the cited claim resolves it correctly.
+    joint = [{"claim": "The Pi SDK is used by Craft Agents as one of two backends.",
+              "subjects": ["Craft", "Pi"]}]
+
+    class _C:
+        def chat(self, _m):
+            class _R:
+                text = "Craft | used by | Pi | 1"
+            return _R()
+
+    ok = rf._extract_relation_triple(["Craft", "Pi"], joint, _C())
+    assert ok and ok[0] == "Craft" and ok[2] == "Pi"  # passive resolved to Craft->Pi
+
+
 def test_subject_code_drops_invented_sdk_when_no_evidenced_code() -> None:
     # Live regression: the Craft example invented `from craft_agents import Agent`
     # (a Python SDK in NO source) because the prompt demanded 'runnable' code from
@@ -1856,3 +1898,18 @@ def test_tag_claim_joins_real_pi_via_quote() -> None:
         "Craft", ["Pi", "Craft"], anchors,
     )
     assert set(tags) == {"Pi", "Craft"}
+
+
+def test_base_client_unwraps_tool_augmented_for_deterministic_renders() -> None:
+    """ASSEMBLE-phase diagram renders must run on the BARE client, not inside the
+    web-search tool loop (which degrades the plain SOURCE|RELATION|TARGET output).
+    ``base_client`` unwraps a ToolAugmentedClient to its inner client and is a
+    no-op on a bare client."""
+    from studio.tools import ToolAugmentedClient, base_client
+
+    inner = _client("SOURCE | RELATION | TARGET")
+    wrapped = ToolAugmentedClient(inner, search_fn=lambda *a, **k: [], fetch_fn=lambda *a, **k: "")
+    assert base_client(wrapped) is inner
+    assert base_client(inner) is inner
+    # double-wrap unwinds fully
+    assert base_client(ToolAugmentedClient(wrapped, search_fn=lambda *a, **k: [])) is inner

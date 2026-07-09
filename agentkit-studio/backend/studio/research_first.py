@@ -1831,25 +1831,44 @@ _COMPONENT_NAMING_RULE = (
 
 def _diagram_prompt(subjects: list[str], claims: list[dict[str, Any]], mechanism: str = "") -> str:
     subj_list = ", ".join(subjects)
+    joint = [c for c in claims if len(c.get("subjects") or []) >= 2]
+    others = [c for c in claims if len(c.get("subjects") or []) < 2]
     ev_lines = "\n".join(
-        f"- [{','.join(c.get('subjects') or [])}] {c['claim']} (URL: {c['url']})" for c in claims[:16]
+        f"- [{','.join(c.get('subjects') or [])}] {c['claim']} (URL: {c['url']})" for c in others[:12]
     )
-    # The relationship hypothesis (FRAME) DIRECTS which edge to look for; it
-    # never becomes content by itself — the evidence-only instruction below is
-    # unchanged, and _integration_label's grounding gate still decides what
-    # actually ships regardless of what this hint suggests.
-    hint = f"A candidate mechanism to look for in the evidence: {mechanism}\n\n" if mechanism else ""
+    # The cross-subject edge is drawn from the JOINT CLAIMS — the only evidence that
+    # actually states the relationship — never from the FRAME hypothesis. Live: the
+    # hypothesis guessed "Pi calls Craft via SDK task delegation" (backwards; reality
+    # is Craft embeds the Pi SDK), and feeding it as a "mechanism to look for" made the
+    # diagram draw that wrong-direction edge, contradicting the grounded joint claims.
+    # A hypothesis directs SEARCH, it must never shape the drawn artifact.
+    if joint:
+        ranked_joint = sorted(
+            joint, key=lambda c: _relationship_claim_score(c, subjects), reverse=True
+        )
+        joint_lines = "\n".join(f"- {c['claim']}" for c in ranked_joint[:6])
+        edge_rule = (
+            "Draw the cross-subject EDGE to reflect EXACTLY the JOINT EVIDENCE below — "
+            "use the two components it names and the DIRECTION it asserts (if it says "
+            "'X uses/embeds Y', the edge is X -> Y). Do NOT reverse the direction and "
+            "do NOT invent a mechanism the joint evidence does not state.\n\n"
+            f"JOINT EVIDENCE (states the relationship):\n{joint_lines}\n\n"
+        )
+    else:
+        hint = f"A candidate mechanism to look for in the evidence: {mechanism}\n\n" if mechanism else ""
+        edge_rule = (
+            "Include at least one EDGE connecting a component from one subject to a "
+            "component from the OTHER subject, labeled with the actual integration "
+            "mechanism (e.g. an API, CLI, MCP, or extension-point interface) NAMED in "
+            f"the evidence below — never invent a mechanism.\n\n{hint}"
+        )
     return (
         "List the architecture of the subjects below as plain lines — no prose, "
         "no markdown, no code fences:\n"
         f"COMPONENT: <name> | <subject, EXACTLY one of: {subj_list}> | <one-line role>\n"
         "EDGE: <name A> -> <name B> | <optional label>\n\n"
-        f"Cover BOTH subjects ({subj_list}), several components each. Include at "
-        "least one EDGE connecting a component from one subject to a component "
-        "from the OTHER subject, labeled with the actual integration mechanism "
-        "(e.g. an API, CLI, MCP, or extension-point interface) NAMED in the "
-        f"evidence below — never invent a mechanism the evidence doesn't name.\n\n"
-        f"{_COMPONENT_NAMING_RULE}\n\n{hint}"
+        f"Cover BOTH subjects ({subj_list}), several components each. {edge_rule}"
+        f"{_COMPONENT_NAMING_RULE}\n\n"
         f"EVIDENCE:\n{ev_lines}"
     )
 
@@ -1945,6 +1964,169 @@ def _integration_label(
     if len(per_subject) >= len(subjects) >= 2:
         return " / ".join(dict.fromkeys(per_subject))
     return None
+
+
+#: Generic English relationship cues (a component USES/EMBEDS/POWERS another) — used
+#: to surface the joint claim that states the relationship above incidental co-mentions.
+#: Language-level, not task vocabulary (same category as a programming-language set).
+_REL_VERB_RE = re.compile(
+    r"\b(uses?|utiliz\w+|embed\w+|integrat\w+|power\w+|calls?|wrap\w+|leverag\w+|"
+    r"combin\w+|depend\w+|support\w+|extend\w+|implement\w+|provid\w+|expos\w+|"
+    r"built\s+on|based\s+on|backend\s+(?:for|of)|run\w*\s+on|plugs?\s+into|"
+    r"compatible\s+with|works?\s+with|side\s+by\s+side)\b",
+    re.IGNORECASE,
+)
+
+
+def _relationship_claim_score(claim: dict[str, Any], subjects: list[str]) -> int:
+    text = str(claim.get("claim") or "").lower()
+    return len(_REL_VERB_RE.findall(text)) + sum(1 for s in subjects if s.lower() in text)
+
+
+#: Structural stopwords dropped before grounding a RELATION phrase — a use-verb is
+#: kept (it IS the stated mechanism and must ground against the cited claim).
+_TRIPLE_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "via", "both", "into", "that", "this", "its", "are", "was",
+})
+
+
+def _extract_relation_triple(  # noqa: PLR0911
+    subjects: list[str], joint_claims: list[dict[str, Any]], client: Any
+) -> tuple[str, str, str, str] | None:
+    """A grounded, directional ``(source_subject, relation, target_subject)`` triple
+    for the integration edge — the KGGen/GraphRAG pattern (LLM extracts an ordered
+    SPO triple; code assembles the edge) rather than letting the model free-draw the
+    edge, which hallucinated BOTH direction and label (live: 'Pi -> Craft' labelled
+    'craft agents' when the evidence says Craft embeds the Pi SDK). Two guardrails,
+    both required to return a triple (else None → caller keeps the old LLM edge):
+      • CON-1 (over-general/invented relation, per iText2KG's merge risk): the
+        source/target must BE the two subjects and the RELATION must carry >=1
+        content token that literally appears in a joint claim.
+      • CON-2 (ambiguous direction): an independent positional cross-check — in an
+        active-voice claim 'A <verb> B' the source precedes the target; the triple's
+        direction must agree, else it is unconfirmed and rejected.
+    Generic: keyed on the two ``subjects`` + joint-claim text, no task literal."""
+    if client is None or len(subjects) < 2 or not joint_claims:
+        return None
+    a, b = subjects[0], subjects[1]
+    # Rank so the joint claims that actually STATE a relationship lead (not version/
+    # preset noise); the LLM then cites WHICH one it used (provenance — Triple Context
+    # Restoration, arXiv 2501.15378), and relation + direction are validated against
+    # THAT single claim, so one incidentally-grounded token can't launder an invented
+    # phrase (codex). Generic — keyed on subjects + joint-claim text, no task literal.
+    ranked = sorted(
+        joint_claims, key=lambda c: _relationship_claim_score(c, subjects), reverse=True
+    )[:6]
+    jl = "\n".join(f"- {c['claim']}" for c in ranked)
+    prompt = (
+        f"The claims below state how {a} and {b} relate. Output EXACTLY ONE line:\n"
+        "SOURCE | RELATION | TARGET\n"
+        f"SOURCE and TARGET are {a} or {b}: SOURCE uses/embeds/calls/powers the other, "
+        "TARGET is the one used. RELATION is that mechanism as a short verb phrase "
+        "(2-4 words) COPIED from a claim. Use ONLY what the claims state; if none "
+        f"states a directed relationship, output the single word NONE.\n\nCLAIMS:\n{jl}"
+    )
+    try:
+        reply = client.chat([{"role": "user", "content": prompt}])
+        text = str(getattr(reply, "text", "") or "").strip()
+    except Exception as exc:  # noqa: BLE001 — a bad triple call never breaks the run
+        dbg(f"research_first _extract_relation_triple: call failed exc={exc!r}")
+        return None
+    line = next((ln for ln in text.splitlines() if ln.count("|") >= 2), "")
+    parts = [p.strip() for p in line.split("|")]
+    if len(parts) < 3:
+        return None
+    raw_src, rel, raw_tgt = parts[0], parts[1], parts[2]
+
+    def _as_subject(x: str) -> str | None:
+        xl = x.lower()
+        return next((s for s in subjects if s.lower() in xl or xl in s.lower()), None)
+
+    src_s, tgt_s = _as_subject(raw_src), _as_subject(raw_tgt)
+    if not src_s or not tgt_s or src_s == tgt_s:
+        return None
+    rel_tokens = [t for t in re.findall(r"[a-z]{3,}", rel.lower()) if t not in _TRIPLE_STOPWORDS]
+    if not rel_tokens:
+        return None
+    # Provenance (codex / Triple-Context-Restoration): CODE selects the ONE confirming
+    # claim — the highest-ranked joint claim that names BOTH subjects AND contains every
+    # RELATION content token — rather than trusting a weak model to cite it (asking
+    # gemma for a claim number made it pick a worse claim, live). CON-1 (relation
+    # grounded) is then folded into that selection: an invented phrase like 'sdk
+    # delegation' matches no claim → None.
+    confirming = next(
+        (c["claim"] for c in ranked
+         if src_s.lower() in c["claim"].lower() and tgt_s.lower() in c["claim"].lower()
+         and all(t in c["claim"].lower() for t in rel_tokens)),
+        None,
+    )
+    if not confirming:
+        dbg(f"research_first _extract_relation_triple: no confirming claim for rel={rel!r}")
+        return None
+    # CON-2: direction confirmed by an explicit active/passive pattern in that claim
+    # ('A uses B' AND 'B is used by A'); no pattern → reject rather than guess.
+    if not _direction_ok(src_s, tgt_s, confirming):
+        dbg(f"research_first _extract_relation_triple: direction unconfirmed {src_s!r}->{tgt_s!r}")
+        return None
+    return (src_s, " ".join(rel.split())[:40], tgt_s, confirming)
+
+
+#: A passive-voice cue ('is used by', 'powered by', 'is embedded by') — its presence
+#: between target and source flips the surface order back to source→target.
+_PASSIVE_RE = re.compile(
+    r"\b(?:is|are|was|were|be|being|been)\s+\w+ed\s+by\b|"
+    r"\b(?:used|powered|embedded|driven|backed|built|based)\s+(?:on\s+|by\s+)",
+    re.IGNORECASE,
+)
+
+
+def _direction_ok(src_s: str, tgt_s: str, claim: str) -> bool:
+    """``src_s -> tgt_s`` confirmed by an explicit pattern in the CITED claim:
+    active ``{src} <verb> {tgt}`` (src before tgt, no passive marker between) OR
+    passive ``{tgt} ... <verb>ed by {src}`` (tgt before src with a passive marker).
+    No explicit pattern → False, so an ambiguous direction is dropped, never guessed."""
+    low = claim.lower()
+    s, t = src_s.lower(), tgt_s.lower()
+    si, ti = low.find(s), low.find(t)
+    if si < 0 or ti < 0:
+        return False
+    seg = low[min(si, ti): max(si, ti) + max(len(s), len(t))]
+    passive = bool(_PASSIVE_RE.search(seg))
+    return (si < ti) != passive  # src-before-tgt active, or tgt-before-src passive
+
+
+def _pick_endpoint(
+    subject: str, components: list[tuple[str, str]], confirming: str, rel: str
+) -> str | None:
+    """The *subject*'s component best NAMED by the cited claim / relation (prefer a
+    node whose token appears there — e.g. an 'SDK'/'backend' node over an incidental
+    config constant); else its first grounded component (codex: first-component alone
+    picked a noisy 'OPENAI_COMPAT_…' node instead of 'Craft Agents')."""
+    subj_comps = [n for n, s in components if s == subject]
+    if not subj_comps:
+        return None
+    hay = (confirming + " " + rel).lower()
+    return max(
+        subj_comps,
+        key=lambda n: sum(1 for tok in _component_label_tokens(n) if tok in hay),
+    )
+
+
+def _triple_cross_edge(
+    triple: tuple[str, str, str, str] | None, components: list[tuple[str, str]]
+) -> list[tuple[str, str, str]] | None:
+    """Deterministic cross-cluster edge from the grounded triple: connect the SOURCE
+    subject's best-named component to the TARGET subject's, in the triple's direction,
+    labelled with its relation. None if either subject has no grounded component (then
+    the caller keeps the LLM-derived edge)."""
+    if not triple:
+        return None
+    src_s, rel, tgt_s, confirming = triple
+    src_comp = _pick_endpoint(src_s, components, confirming, rel)
+    tgt_comp = _pick_endpoint(tgt_s, components, confirming, rel)
+    if not src_comp or not tgt_comp:
+        return None
+    return [(src_comp, tgt_comp, rel)]
 
 
 def _mermaid_safe_id(text: str) -> str:
@@ -2145,11 +2327,18 @@ def _splice_diagram(
             components, edges = _parse_cluster_diagram(raw, subjects)
             grounding_text = section_text + "\n" + " ".join(c["claim"] for c in claims)
             components = _ground_components(components, grounding_text)
-            cross = _cross_cluster_edges(components, edges)
+            # KGGen/GraphRAG pattern: the cross-subject EDGE comes from a grounded,
+            # directional triple the LLM extracts (code assembles it), NOT the model's
+            # free-drawn edge, which hallucinated direction+label. Fall back to the old
+            # LLM edge only when no grounded triple is available.
+            joint = [c for c in claims if len(c.get("subjects") or []) >= 2]
+            triple = _extract_relation_triple(subjects, joint, client)
+            cross = _triple_cross_edge(triple, components) or _cross_cluster_edges(components, edges)
             # Structure (rule 1) AND grounding (rule 2): a single-subject diagram
             # or two disconnected islands both fail here — no grounded cross-edge
-            # means no diagram, not a fabricated one.
-            if len(components) >= 2 and cross and _integration_label(subjects, claims, relationship):
+            # means no diagram, not a fabricated one. A confirmed triple IS the
+            # grounding; otherwise the label-grounding gate still decides.
+            if len(components) >= 2 and cross and (triple or _integration_label(subjects, claims, relationship)):
                 body = _render_cluster_diagram(components, cross, subjects)
     if not body:
         body = _fallback_cluster_diagram(subjects, claims, relationship)
@@ -2488,6 +2677,14 @@ def generate_research_first(
     diagram_home = relationship_home if (diagram_needed and wants_integration) else None
     code_home = _pick_home(sections, _CODE_HOME_RE) if code_needed and not multi else None
     scope_home = _pick_home(sections, _SCOPE_HOME_RE)
+    # ASSEMBLE-phase diagram renders (integration triple + per-subject diagrams)
+    # extract plain structured lines from ALREADY-gathered claims — the tool loop
+    # degrades that output (live: the triple prompt returned a self-referential
+    # "Pi | powered by | Pi SDK" under the tool wrapper, collapsing src==tgt and
+    # dropping the grounded Craft->Pi edge to a freehand fallback). Render on the
+    # bare client; only the section prose writer keeps tools for any late lookup.
+    from studio.tools import base_client
+    render_client = base_client(client)
     written: dict[str, str] = {}
     for seq, name in enumerate(sections):
         if name.lower() in _SKIP_WRITE:
@@ -2505,7 +2702,7 @@ def generate_research_first(
             # unchanged from before this round.
             text = _splice_code(text, evidence_dir, client)
         if name == diagram_home and wants_integration:
-            text = _splice_diagram(text, subjects, claims, client, relationship)
+            text = _splice_diagram(text, subjects, claims, render_client, relationship)
         if name == relationship_home and wants_comparison:
             # competes/alternative: a grounded comparison table replaces the
             # integration diagram/code entirely (R3).
@@ -2532,7 +2729,7 @@ def generate_research_first(
             home = _pick_subject_home(written, subject, exclude)
             if home:
                 subject_homes[subject] = home
-                written[home] = _splice_subject_diagram(written[home], subject, claims, client)
+                written[home] = _splice_subject_diagram(written[home], subject, claims, render_client)
 
     # Per-subject code examples + ONE integration example (user: "sample code
     # also needs to show the integration") — same iterate-subjects-then-

@@ -673,6 +673,25 @@ def _parse_inline_tool_calls(
     return out
 
 
+def base_client(client: Any) -> Any:
+    """The underlying non-tool client for deterministic sub-prompts that must NOT
+    enter the web-search tool loop.
+
+    ASSEMBLE-phase renders (diagram triple/component extraction, per-subject
+    diagrams) operate on already-gathered claims — routing them through the tool
+    loop measurably degrades the plain structured output (live: gemma answered a
+    ``SOURCE | RELATION | TARGET`` prompt as ``Pi | powered by | Pi SDK`` under the
+    tool wrapper vs. the correct ``Craft Agents | utilizes | Pi`` bare, silently
+    breaking the grounded cross-subject edge). Unwraps a ``ToolAugmentedClient``
+    (recursively, in case of double-wrap) to its inner client; returns any other
+    client unchanged. Keeps the private ``_inner`` attribute encapsulated in this
+    module rather than reached into from callers."""
+    inner = client
+    while isinstance(inner, ToolAugmentedClient):
+        inner = inner._inner
+    return inner
+
+
 class ToolAugmentedClient:
     """An ``LLMClient`` that runs a ``web_search`` tool loop over an inner client.
 
