@@ -278,6 +278,37 @@ Newly-DONE since the last gap pass (do not re-open): section-synthesis (distinct
 the `_claims_for_section` per-section rotation + the `_write_section` synthesis directive), assembler
 references-last (`assemble_artifact_from_sections`).
 
+### Part 1.4-GS3 — Thorough 4-axis comparison vs the CURRENT 0.92 report (2026-07-09)
+
+Redone against `s_dd5d05c27ae6` (score 0.92, the post-extraction-fix output), on the four axes the
+user named. Gold baseline = primary-README-sourced reference report.
+
+| Axis | Studio 0.92 | Gap to gold | Parity |
+|------|-------------|-------------|--------|
+| **Detail** | Names pi-ai/pi-agent-core/pi-coding-agent + the correct "Claude Agent SDK and Pi SDK side by side" integration (gold-parity on core facts) | Misses layered DEPENDENCY order, omits pi-tui, no provider-routing table; theme repetition across 4 sections | ~80% |
+| **Sections** | 9 sections match gold's skeleton | 2 HEADING LEAKS (H1 inside body: `# To run the project…` L47, `# Minimal example…` L77) break ToC (G6); flatter (no H3) | ~90% |
+| **References** | 7 refs | Still cites deepwiki (secondary), hotools.com (aggregator), dead `pi.dev/packages/*`; citation stuffing (`agents.craft.do` ×13, `earendil-works/pi` ×9) (G3-residual + G4) | ~60% |
+| **Diagrams** | 3 present | WEAKEST. D1 deepwiki vocab (AgentHarness/AgentLoop/AgentInstance), only 2 packages; D2 circular+empty (`Craft→Craft Agents`), misses two-backend; D3 integration EDGE wrong (`coding-agent-CLI → "specialized task-execution layer" → Craft`), Craft subgraph empty (G1-diagram + G2-residual) | ~40% |
+
+**NEW serious finding — fabricated example code (G7).** The Craft code block invents a Python SDK that
+exists in NO fetched source: `from craft_agents import Agent`, `agent.connect_model()`,
+`agent.navigate_to()`. Craft is an Electron/Bun app driven by natural language + `craft-cli` — no Python
+API. This is fabrication in the deliverable: the anti-fabrication contract (verbatim quote per CLAIM)
+does NOT cover generated CODE, so `_splice_code`/`_splice_integration_code` can hallucinate an API.
+
+**Ranked remaining work to gold-parity (updates the priority list above):**
+1. **Diagram grounding (G1-diagram / G2-residual)** — diagram nodes+edges must come from the claims'
+   asserted structure (the two-backend relationship; the pi-ai→pi-agent-core→pi-coding-agent stack),
+   not deepwiki internals or a generic default edge; drop empty/circular subgraphs.
+2. **Code grounding (G7)** — example code must be grounded in a fetched API surface (Pi's real TS SDK)
+   or the actual CLI (`craft-cli run …`); never invent an SDK. A code-fabrication guard.
+3. **Reference quality (G3-residual + G4)** — drop secondary-mirror/aggregator URLs from the References
+   list; cap repeats of one URL.
+4. **Heading-leak lint (G6)** — AST pass to demote H1s that leaked inside a section/code comment.
+5. **Detail residue** — dependency order + pi-tui + provider routing; trim theme repetition.
+
+### Part 1.4-GS2 result
+
 **RESULT — query-directed extraction closed G3+G5 (2026-07-09, deterministic).** The "app reads all
 evidence but not equally" question (user) traced to extraction, not fetch: the Pi README's 4-package
 table produced 0 package claims (3 compounding causes — priority-blind `extract 3-6 facts` prompt;
