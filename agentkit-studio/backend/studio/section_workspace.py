@@ -290,5 +290,15 @@ def assemble_artifact_from_sections(root: Path) -> str:
         if path.exists():
             parts.append(path.read_text(encoding="utf-8").strip())
     assembled = "\n\n".join(p for p in parts if p).rstrip() + "\n"
+    # This is a finalize path too: the presentation/editor round-trips
+    # (_write_artifact_through_sections) reassemble here after a diagram/table
+    # pass, so enforce the same References-last invariant that _assemble and
+    # normalize_artifact hold. A pass that appends or reorders a section past
+    # References must not ship refs-not-last (live: the diagram pass pushed the
+    # relationship section below References → scored fmt_refslast=0). Idempotent
+    # + fail-open, so a no-op when the outline is already ordered correctly.
+    from studio.artifact_text import references_last  # noqa: PLC0415 — avoid import cycle
+
+    assembled = references_last(assembled)
     (root / "artifact.md").write_text(assembled, encoding="utf-8")
     return assembled

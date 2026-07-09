@@ -236,6 +236,48 @@ Gaps found (studio vs gold), each mapped to a work item and status:
 source-quality + citation-integrity rows measure directly). Do them right after Phase 1's live-verify.
 G5/G7 fold into the existing shallowness/writer tracks; G6 into Phase 2.1.
 
+### Part 1.4-GS2 — Refreshed gap analysis (2026-07-09, POST synthesis + refs-last fix)
+
+Re-ran the gold eval against the CURRENT pipeline (run `s_9f3534785ca6`, index rotation, 2152 words,
+3 diagrams, 3 code) after the section-synthesis fix (byte-identical section openers → real synthesis,
+0.4438 → 0.5706/0.6552 deterministic) and the assembler references-last fix. Gold baseline re-verified
+2026-07-09 against the **primary READMEs** (`earendil-works/pi` — MIT, 4 packages pi-ai→pi-agent-core→
+pi-coding-agent→pi-tui; `lukilabs/craft-agents-oss` — Apache-2.0, Electron/Bun, *"uses the Claude Agent
+SDK and the Pi SDK side by side"*, Pi SDK routes Google/Codex/Copilot/OpenAI, Claude Agent SDK routes
+Anthropic + third-party). The four axes the user named:
+
+| Axis | Studio (current) | Gold | Verdict |
+|------|------------------|------|---------|
+| **Detail level** | Generic prose — "a stateful loop", "the `AgentHarness`" (deepwiki vocabulary); no package taxonomy, no layer stack, no lifecycle hooks | Names all 4 packages + responsibilities, dependency order, `beforeToolCall`/`afterToolCall` hooks, tree sessions | **GAP — G5.** Depth ceiling still real; content reads as a *paraphrase of a secondary wiki*, not the primary structure. |
+| **Sections** | 9 flat H2 (Exec/Scope/Background/Findings/Evidence/Implications/Limitations/Refs/Integration); distinct now (synthesis fix landed) | Same skeleton **+ H3 sub-sections** (F1–F4, per-architecture, per-example) | **NARROWED + small new gap G8.** Section coverage now matches; gold's H3 granularity aids depth/readability. |
+| **Reference docs** | 7 refs incl. **`deepwiki.com/badlogic/pi-mono`** (secondary mirror), **`hotools.com`** (aggregator), `pi.dev/packages/pi-agents` (unverified); MISSES every primary README + the "two backends" source | 8 refs, all primary/authoritative (repo READMEs, SDK docs, Craft OSS README, PR) | **GAP — G3, now the #1 lever.** Studio's *deep content came from deepwiki, not the README* → this is the master cause of the detail + diagram gaps below. |
+| **Diagram quality** | 3 mermaid, but: (1) Craft diagram has a **`Inflection Pi`** node (wrong-Pi collision leaked into label harvest); (2) integration diagram draws a **fabricated `AgentHarness --MCP--> Craft MCP servers` bridge** — NOT the real "Craft runs the Pi SDK as one of two backends"; (3) Pi diagram uses deepwiki's `AgentHarness` vocab, not the 4-package stack | 3 correct purpose-built: Pi layered dependency, Craft two-backend selector, Craft-embeds-Pi provider routing | **GAP — G1-diagram + G2-residual.** Joint claims now exist, but the diagram *edges* are invented, and the integration is mis-drawn as an MCP link. |
+
+**Master finding (new): source authority (G3) is the root lever, not a peer gap.** Studio grounded its
+deep content in `deepwiki` (a secondary Pi-mono mirror) and `hotools.com` (an aggregator). That single
+choice cascades into three of the four axes: the *detail* is deepwiki's "AgentHarness/stateful loop"
+framing instead of the README's package taxonomy; the *diagram vocab* inherits the same secondary terms;
+and the *integration diagram* invents an MCP bridge because the real "two backends side by side"
+statement (README line, primary) was never fetched/cited. **Fix G3 first — prefer primary
+repo/README/vendor-doc sources, de-rank aggregators + secondary mirrors, ground selection in the
+disambiguation anchors — and G5/diagram-vocab/G1-diagram all move with it.** The synthesis fix proved
+the WRITE stage can now integrate what it's given; the binding constraint has shifted upstream to WHAT
+it's given (source selection), exactly as the "shallowness root cause" memory predicts once the
+one-sentence-contract is relaxed.
+
+Refreshed priority after Phase 1 closes:
+1. **G3 source authority** (master lever — primary-source selection + aggregator/mirror de-rank).
+2. **G1-diagram grounding** — diagram edges must come from the joint claim's asserted mechanism
+   (Craft→Pi backend), not a generic MCP default; drop wrong-Pi (`Inflection Pi`) nodes from the
+   label harvest (G2-residual — the collision guard covers text joins but not diagram-label harvest).
+3. **G5 architectural depth** — package/layer extraction from primary content (unblocked once G3 feeds
+   primary READMEs).
+4. **G8 (minor)** — optional H3 sub-section granularity in Key Findings / Evidence.
+
+Newly-DONE since the last gap pass (do not re-open): section-synthesis (distinct openers + analysis;
+the `_claims_for_section` per-section rotation + the `_write_section` synthesis directive), assembler
+references-last (`assemble_artifact_from_sections`).
+
 **Phase 1 — Close acceptance (visible outcome). [M–L] — THE priority.**
 Scope set by the Phase-0 readout: the deterministic failure is `c` (integration diagram absent)
 caused by **0 joint claims + Pi under-coverage (2 vs 12)**. Attack coverage, not word-depth.

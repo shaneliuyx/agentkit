@@ -88,13 +88,20 @@ def test_write_section_workspace_reorders_to_active_outline(tmp_path) -> None:
     )
     assembled = (tmp_path / "artifact.md").read_text(encoding="utf-8")
 
+    # The outline (section FILE order) still appends the extra section after the
+    # template's References entry — that ordering is unchanged.
     assert [s["title"] for s in outline["sections"]] == [
         "Executive Summary",
         "References",
         "New Section",
     ]
-    assert assembled.index("## Executive Summary") < assembled.index("## References")
-    assert assembled.index("## References") < assembled.index("## New Section")
+    # But the ASSEMBLED artifact enforces References-last (assemble_artifact_from_
+    # sections now applies the same references_last invariant _assemble/normalize_
+    # artifact hold): an extra section that would trail References is moved before
+    # it, so a diagram/relationship section a presentation round-trip appends can
+    # never ship refs-not-last (scored fmt_refslast).
+    assert assembled.index("## Executive Summary") < assembled.index("## New Section")
+    assert assembled.index("## New Section") < assembled.index("## References")
 
 
 def test_write_section_workspace_drops_stray_h1_inside_sections(tmp_path) -> None:

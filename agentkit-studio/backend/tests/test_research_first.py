@@ -443,6 +443,26 @@ def test_claims_for_section_round_robins_across_subjects() -> None:
     assert len([c for c in selected if c["subjects"] == ["Craft"]]) == 2  # both got in
 
 
+def test_claims_for_section_leads_with_different_claim_per_section() -> None:
+    # Live regression (deterministic, 3/3 byte-identical, judge synthesis 0.0):
+    # every same-cap section got the identical claim slice, so gemma opened each
+    # with the same lead claim → "nearly identical paragraphs". Distinct sections
+    # must lead with distinct claims (per-subject bucket rotation), while subject
+    # coverage is preserved regardless of section name.
+    claims = [{"claim": f"pi claim {i}", "subjects": ["Pi"]} for i in range(10)]
+    claims += [{"claim": f"craft claim {i}", "subjects": ["Craft"]} for i in range(2)]
+    # seq = the section's outline index (distinct per section); with buckets larger
+    # than the section count each leads with a different claim.
+    leads = {
+        seq: rf._claims_for_section(claims, name, seq)[0]["claim"]
+        for seq, name in enumerate(("Background and Context", "Key Findings", "Implications"))
+    }
+    assert len(set(leads.values())) == 3, leads  # all three sections lead differently
+    for seq in leads:  # coverage still holds for each
+        subs = {c["subjects"][0] for c in rf._claims_for_section(claims, "x", seq)}
+        assert subs == {"Pi", "Craft"}
+
+
 def test_claims_clamp_mistagged_subject_to_fetch_loop() -> None:
     # Live regression: a source fetched under the "Pi" loop, but the LLM's own
     # SUBJECTS guess named "Craft" instead — source selection was gated, the

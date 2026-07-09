@@ -1212,7 +1212,9 @@ def _coverage_gate(
         return claims
 
 
-def _claims_for_section(claims: list[dict[str, Any]], section: str) -> list[dict[str, Any]]:
+def _claims_for_section(
+    claims: list[dict[str, Any]], section: str, seq: int = 0
+) -> list[dict[str, Any]]:
     """Cap claims per section, ROUND-ROBIN across subjects (keyed by each claim's
     first subject tag — generic, works for any subject count/name) so a
     claims-heavy subject can never starve a claims-light one out of the cap.
@@ -1231,6 +1233,23 @@ def _claims_for_section(claims: list[dict[str, Any]], section: str) -> list[dict
         key = tags[0] if len(tags) == 1 else "__joint__"
         groups.setdefault(key, []).append(c)
     order = list(groups)
+    # The same claims fed to every same-cap section made gemma (greedy) open each
+    # section with the IDENTICAL lead claim — live: 4 sections shared a byte-
+    # identical first sentence and the judge scored evidence-synthesis 0.0. Rotate
+    # each subject's bucket by the section's outline index (`seq`) so a section
+    # leads with a DIFFERENT claim per subject. Rotating *within* buckets (not the
+    # flat pool) keeps the round-robin interleave, so a claims-light subject is
+    # never starved out of the cap regardless of offset. Index (not an ord-sum of
+    # the name — those collide on same-parity names, codex 2026-07-09) gives
+    # distinct leads whenever #sections ≤ bucket size; below that the pigeonhole
+    # is unavoidable (a size-N bucket has only N rotations) and leads degrade
+    # gracefully — acceptable, since the live bug was zero-rotation, not collision.
+    # ponytail: seq-mod-len ceiling; only tiny low-evidence buckets can still tie.
+    off = seq
+    for k in order:
+        b = groups[k]
+        r = off % len(b)
+        groups[k] = b[r:] + b[:r]
     out: list[dict[str, Any]] = []
     i = 0
     while len(out) < cap and any(groups[k] for k in order):
@@ -1325,12 +1344,16 @@ def _write_section(name: str, requirement: str, claims: list[dict[str, Any]], cl
     prompt = (
         f"You are writing the '{name}' section of a research report.\n\n"
         f"TASK: {requirement}\n\n"
-        "Use ONLY the claims below as your factual basis — never invent a fact "
-        "or a citation. Write 2-4 plain prose paragraphs (no headings). Every "
-        "paragraph must cite at least one claim's URL inline, copied EXACTLY "
-        "from the claims below — never a URL from memory. Do not comment on "
-        "the quality or sufficiency of the claims; if there is little to say, "
-        "write less.\n\n"
+        "Write 2-4 prose paragraphs (no headings) that SYNTHESIZE the claims "
+        "below for the specific purpose of THIS section — connect and interpret "
+        "them into an argument: draw out patterns, tensions, cause-and-effect, "
+        "and what they imply. Do NOT enumerate or restate the claims one by one "
+        "— a section that just lists facts has failed its job. Use ONLY these "
+        "claims as your factual basis — never invent a fact or a citation. Every "
+        "paragraph must cite at least one claim's URL inline, copied EXACTLY from "
+        "the claims below — never a URL from memory. Do not comment on the quality "
+        "or sufficiency of the claims; if there is genuinely little to say, write "
+        "less.\n\n"
         f"CLAIMS:\n{ev_lines}\n\nOutput ONLY the section body prose, nothing else."
     )
     try:
@@ -2332,10 +2355,10 @@ def generate_research_first(
     code_home = _pick_home(sections, _CODE_HOME_RE) if code_needed and not multi else None
     scope_home = _pick_home(sections, _SCOPE_HOME_RE)
     written: dict[str, str] = {}
-    for name in sections:
+    for seq, name in enumerate(sections):
         if name.lower() in _SKIP_WRITE:
             continue
-        text = _write_section(name, requirement, _claims_for_section(claims, name), client)
+        text = _write_section(name, requirement, _claims_for_section(claims, name, seq), client)
         # Ruling (c): strip the section's own self-heading echo + drop/demote any
         # stray in-body heading BEFORE splicing adds legitimate fences below, so a
         # duplicate ``##`` is impossible by construction (finalize dedupe stays cold).
