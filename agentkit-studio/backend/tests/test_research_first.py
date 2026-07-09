@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
-from studio import artifact_lint, research_first as rf
+from studio import artifact_lint, diagram_render, research_first as rf
 
 
 def _client(text: str) -> SimpleNamespace:
@@ -518,15 +518,15 @@ def test_relation_triple_grounds_direction_and_rejects_reversed_or_invented() ->
 
     subjects = ["Craft", "Pi"]
     # Good: active direction, relation grounded in the cited claim → 4-tuple w/ claim.
-    ok = rf._extract_relation_triple(subjects, joint, _C("Craft | utilizes | Pi | 1"))
+    ok = diagram_render._extract_relation_triple(subjects, joint, _C("Craft | utilizes | Pi | 1"))
     assert ok[:3] == ("Craft", "utilizes", "Pi") and "utilizes" in ok[3]
     # CON-2: reversed direction rejected.
-    assert rf._extract_relation_triple(subjects, joint, _C("Pi | utilizes | Craft | 1")) is None
+    assert diagram_render._extract_relation_triple(subjects, joint, _C("Pi | utilizes | Craft | 1")) is None
     # CON-1: fully invented relation rejected.
-    assert rf._extract_relation_triple(subjects, joint, _C("Craft | orchestrates delegation | Pi | 1")) is None
+    assert diagram_render._extract_relation_triple(subjects, joint, _C("Craft | orchestrates delegation | Pi | 1")) is None
     # CON-1 (codex HIGH): partially-grounded invented phrase — 'sdk' is in the claim but
     # 'delegation' is not, so one grounded token must NOT launder the invented phrase.
-    assert rf._extract_relation_triple(subjects, joint, _C("Craft | sdk delegation | Pi | 1")) is None
+    assert diagram_render._extract_relation_triple(subjects, joint, _C("Craft | sdk delegation | Pi | 1")) is None
 
 
 def test_relation_triple_confirms_passive_voice_direction() -> None:
@@ -541,7 +541,7 @@ def test_relation_triple_confirms_passive_voice_direction() -> None:
                 text = "Craft | used by | Pi | 1"
             return _R()
 
-    ok = rf._extract_relation_triple(["Craft", "Pi"], joint, _C())
+    ok = diagram_render._extract_relation_triple(["Craft", "Pi"], joint, _C())
     assert ok and ok[0] == "Craft" and ok[2] == "Pi"  # passive resolved to Craft->Pi
 
 
@@ -1151,7 +1151,7 @@ def test_fallback_cluster_diagram_does_not_put_other_subject_in_feature_node() -
 def test_cross_cluster_edges_rejects_ambiguous_duplicate_labels() -> None:
     components = [("API", "Alpha Product"), ("API", "Beta Product")]
     edges = [("API", "API", "API bridge")]
-    assert rf._cross_cluster_edges(components, edges) == []
+    assert diagram_render._cross_cluster_edges(components, edges) == []
 
 
 def test_splice_diagram_falls_back_when_model_returns_single_subject_architecture() -> None:

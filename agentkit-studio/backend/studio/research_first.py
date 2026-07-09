@@ -39,6 +39,7 @@ from studio.artifact_text import (
     _repair_fence_contamination,
     references_last,
 )
+from studio import diagram_render
 from studio.report_profiles import GENERIC_RESEARCH_PROFILE
 from studio.requirement_compliance import (
     _CODE_SHAPED_RE,
@@ -1802,139 +1803,6 @@ def _splice_integration_code(
     return candidate
 
 
-#: A subject-tagged component line: ``COMPONENT: <name> | <subject> | <role>``.
-_DIA_COMPONENT_RE = re.compile(r"COMPONENT:\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|.*$")
-_DIA_EDGE_RE = re.compile(r"EDGE:\s*(.+?)\s*->\s*([^|]+?)\s*(?:\|\s*(.*))?$")
-_MAX_DIA_NODES = 15
-#: A cross-subject edge is grounded only if the evidence NAMES the relationship's
-#: mechanism — never invented from neither a joint claim nor a per-task mechanism
-#: term corroborated on each side (team-lead rule 2). The vocabulary is per-task
-#: (``relationship.mechanism_terms``, R3), no longer a fixed enum.
-
-
-#: Generic component-naming guidance shared by every diagram prompt. Names the
-#: MORPHOLOGY of a real architectural component (proper module/class/package/
-#: service names) versus sentence glue — categorically, never by listing the
-#: task's actual weak words (that would game a specific failing case rather than
-#: fix the class). Root cause it addresses: with rich claims naming real
-#: components (e.g. an "AgentContext" class, a hyphenated core package), a weak
-#: model still emitted bare prose words ("Designed", "Commits") lifted from a
-#: claim sentence, and literal-token grounding could not tell them apart because
-#: both appear in the prose.
-_COMPONENT_NAMING_RULE = (
-    "Each <name> must be a PROPER named component — a module, class, package, "
-    "service, or interface as named in the evidence (multi-word names, CamelCase "
-    "identifiers, and hyphenated/dotted package names are all good). Never use a "
-    "bare verb, adjective, participle, or generic sentence word as a name."
-)
-
-
-def _diagram_prompt(subjects: list[str], claims: list[dict[str, Any]], mechanism: str = "") -> str:
-    subj_list = ", ".join(subjects)
-    joint = [c for c in claims if len(c.get("subjects") or []) >= 2]
-    others = [c for c in claims if len(c.get("subjects") or []) < 2]
-    ev_lines = "\n".join(
-        f"- [{','.join(c.get('subjects') or [])}] {c['claim']} (URL: {c['url']})" for c in others[:12]
-    )
-    # The cross-subject edge is drawn from the JOINT CLAIMS — the only evidence that
-    # actually states the relationship — never from the FRAME hypothesis. Live: the
-    # hypothesis guessed "Pi calls Craft via SDK task delegation" (backwards; reality
-    # is Craft embeds the Pi SDK), and feeding it as a "mechanism to look for" made the
-    # diagram draw that wrong-direction edge, contradicting the grounded joint claims.
-    # A hypothesis directs SEARCH, it must never shape the drawn artifact.
-    if joint:
-        ranked_joint = sorted(
-            joint, key=lambda c: _relationship_claim_score(c, subjects), reverse=True
-        )
-        joint_lines = "\n".join(f"- {c['claim']}" for c in ranked_joint[:6])
-        edge_rule = (
-            "Draw the cross-subject EDGE to reflect EXACTLY the JOINT EVIDENCE below — "
-            "use the two components it names and the DIRECTION it asserts (if it says "
-            "'X uses/embeds Y', the edge is X -> Y). Do NOT reverse the direction and "
-            "do NOT invent a mechanism the joint evidence does not state.\n\n"
-            f"JOINT EVIDENCE (states the relationship):\n{joint_lines}\n\n"
-        )
-    else:
-        hint = f"A candidate mechanism to look for in the evidence: {mechanism}\n\n" if mechanism else ""
-        edge_rule = (
-            "Include at least one EDGE connecting a component from one subject to a "
-            "component from the OTHER subject, labeled with the actual integration "
-            "mechanism (e.g. an API, CLI, MCP, or extension-point interface) NAMED in "
-            f"the evidence below — never invent a mechanism.\n\n{hint}"
-        )
-    return (
-        "List the architecture of the subjects below as plain lines — no prose, "
-        "no markdown, no code fences:\n"
-        f"COMPONENT: <name> | <subject, EXACTLY one of: {subj_list}> | <one-line role>\n"
-        "EDGE: <name A> -> <name B> | <optional label>\n\n"
-        f"Cover BOTH subjects ({subj_list}), several components each. {edge_rule}"
-        f"{_COMPONENT_NAMING_RULE}\n\n"
-        f"EVIDENCE:\n{ev_lines}"
-    )
-
-
-def _parse_cluster_diagram(
-    raw: str, subjects: list[str]
-) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:
-    """``(components, edges)`` — components is ``[(name, subject)]``, order-
-    preserving, deduped by subject+lowercase name; a component whose subject
-    doesn't match one of *subjects* (loosely, case/substring-insensitive) is
-    dropped."""
-    components: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    edges: list[tuple[str, str, str]] = []
-    for ln in raw.splitlines():
-        ln = ln.strip()
-        m = _DIA_COMPONENT_RE.match(ln)
-        if m:
-            name, subj_raw = m.group(1).strip(), m.group(2).strip().lower()
-            matched = next((s for s in subjects if s.lower() == subj_raw), None) or next(
-                (s for s in subjects if s.lower() in subj_raw or subj_raw in s.lower()), None
-            )
-            if not (name and matched):
-                continue
-            key = (matched.lower(), name.lower())
-            if key not in seen:
-                seen.add(key)
-                components.append((name, matched))
-            continue
-        m = _DIA_EDGE_RE.match(ln)
-        if m:
-            edges.append((m.group(1).strip(), m.group(2).strip(), (m.group(3) or "").strip()))
-    return components, edges
-
-
-def _ground_components(components: list[tuple[str, str]], grounding_text: str) -> list[tuple[str, str]]:
-    """Keep a component iff >=1 significant (>=4 char) token of its name is
-    literally present in *grounding_text* — same literal-token principle as
-    ``diagram_render._ground`` (reused directly, not re-derived)."""
-    low = grounding_text.lower()
-    kept = []
-    for name, subject in components[:_MAX_DIA_NODES]:
-        discriminating = _component_label_tokens(name)
-        if discriminating and any(re.search(r"\b" + re.escape(t), low) for t in discriminating):
-            kept.append((name, subject))
-    return kept
-
-
-def _cross_cluster_edges(
-    components: list[tuple[str, str]], edges: list[tuple[str, str, str]]
-) -> list[tuple[str, str, str]]:
-    """Edges whose two endpoints belong to DIFFERENT subject clusters."""
-    subjects_of: dict[str, list[str]] = {}
-    for name, subject in components:
-        subjects_of.setdefault(name.lower(), [])
-        if subject not in subjects_of[name.lower()]:
-            subjects_of[name.lower()].append(subject)
-    out = []
-    for a, b, label in edges:
-        a_subjects, b_subjects = subjects_of.get(a.lower(), []), subjects_of.get(b.lower(), [])
-        pairs = [(sa, sb) for sa in a_subjects for sb in b_subjects if sa != sb]
-        if len(pairs) == 1:
-            out.append((a, b, label))
-    return out
-
-
 def _integration_label(
     subjects: list[str],
     claims: list[dict[str, Any]],
@@ -1966,246 +1834,6 @@ def _integration_label(
     return None
 
 
-#: Generic English relationship cues (a component USES/EMBEDS/POWERS another) — used
-#: to surface the joint claim that states the relationship above incidental co-mentions.
-#: Language-level, not task vocabulary (same category as a programming-language set).
-_REL_VERB_RE = re.compile(
-    r"\b(uses?|utiliz\w+|embed\w+|integrat\w+|power\w+|calls?|wrap\w+|leverag\w+|"
-    r"combin\w+|depend\w+|support\w+|extend\w+|implement\w+|provid\w+|expos\w+|"
-    r"built\s+on|based\s+on|backend\s+(?:for|of)|run\w*\s+on|plugs?\s+into|"
-    r"compatible\s+with|works?\s+with|side\s+by\s+side)\b",
-    re.IGNORECASE,
-)
-
-
-def _relationship_claim_score(claim: dict[str, Any], subjects: list[str]) -> int:
-    text = str(claim.get("claim") or "").lower()
-    return len(_REL_VERB_RE.findall(text)) + sum(1 for s in subjects if s.lower() in text)
-
-
-#: Structural stopwords dropped before grounding a RELATION phrase — a use-verb is
-#: kept (it IS the stated mechanism and must ground against the cited claim).
-_TRIPLE_STOPWORDS = frozenset({
-    "the", "and", "for", "with", "via", "both", "into", "that", "this", "its", "are", "was",
-})
-
-
-def _extract_relation_triple(  # noqa: PLR0911
-    subjects: list[str], joint_claims: list[dict[str, Any]], client: Any
-) -> tuple[str, str, str, str] | None:
-    """A grounded, directional ``(source_subject, relation, target_subject)`` triple
-    for the integration edge — the KGGen/GraphRAG pattern (LLM extracts an ordered
-    SPO triple; code assembles the edge) rather than letting the model free-draw the
-    edge, which hallucinated BOTH direction and label (live: 'Pi -> Craft' labelled
-    'craft agents' when the evidence says Craft embeds the Pi SDK). Two guardrails,
-    both required to return a triple (else None → caller keeps the old LLM edge):
-      • CON-1 (over-general/invented relation, per iText2KG's merge risk): the
-        source/target must BE the two subjects and the RELATION must carry >=1
-        content token that literally appears in a joint claim.
-      • CON-2 (ambiguous direction): an independent positional cross-check — in an
-        active-voice claim 'A <verb> B' the source precedes the target; the triple's
-        direction must agree, else it is unconfirmed and rejected.
-    Generic: keyed on the two ``subjects`` + joint-claim text, no task literal."""
-    if client is None or len(subjects) < 2 or not joint_claims:
-        return None
-    a, b = subjects[0], subjects[1]
-    # Rank so the joint claims that actually STATE a relationship lead (not version/
-    # preset noise); the LLM then cites WHICH one it used (provenance — Triple Context
-    # Restoration, arXiv 2501.15378), and relation + direction are validated against
-    # THAT single claim, so one incidentally-grounded token can't launder an invented
-    # phrase (codex). Generic — keyed on subjects + joint-claim text, no task literal.
-    ranked = sorted(
-        joint_claims, key=lambda c: _relationship_claim_score(c, subjects), reverse=True
-    )[:6]
-    jl = "\n".join(f"- {c['claim']}" for c in ranked)
-    prompt = (
-        f"The claims below state how {a} and {b} relate. Output EXACTLY ONE line:\n"
-        "SOURCE | RELATION | TARGET\n"
-        f"SOURCE and TARGET are {a} or {b}: SOURCE uses/embeds/calls/powers the other, "
-        "TARGET is the one used. RELATION is that mechanism as a short verb phrase "
-        "(2-4 words) COPIED from a claim. Use ONLY what the claims state; if none "
-        f"states a directed relationship, output the single word NONE.\n\nCLAIMS:\n{jl}"
-    )
-    try:
-        reply = client.chat([{"role": "user", "content": prompt}])
-        text = str(getattr(reply, "text", "") or "").strip()
-    except Exception as exc:  # noqa: BLE001 — a bad triple call never breaks the run
-        dbg(f"research_first _extract_relation_triple: call failed exc={exc!r}")
-        return None
-    line = next((ln for ln in text.splitlines() if ln.count("|") >= 2), "")
-    parts = [p.strip() for p in line.split("|")]
-    if len(parts) < 3:
-        return None
-    raw_src, rel, raw_tgt = parts[0], parts[1], parts[2]
-
-    def _as_subject(x: str) -> str | None:
-        xl = x.lower()
-        return next((s for s in subjects if s.lower() in xl or xl in s.lower()), None)
-
-    src_s, tgt_s = _as_subject(raw_src), _as_subject(raw_tgt)
-    if not src_s or not tgt_s or src_s == tgt_s:
-        return None
-    rel_tokens = [t for t in re.findall(r"[a-z]{3,}", rel.lower()) if t not in _TRIPLE_STOPWORDS]
-    if not rel_tokens:
-        return None
-    # Provenance (codex / Triple-Context-Restoration): CODE selects the ONE confirming
-    # claim — the highest-ranked joint claim that names BOTH subjects AND contains every
-    # RELATION content token — rather than trusting a weak model to cite it (asking
-    # gemma for a claim number made it pick a worse claim, live). CON-1 (relation
-    # grounded) is then folded into that selection: an invented phrase like 'sdk
-    # delegation' matches no claim → None.
-    confirming = next(
-        (c["claim"] for c in ranked
-         if src_s.lower() in c["claim"].lower() and tgt_s.lower() in c["claim"].lower()
-         and all(t in c["claim"].lower() for t in rel_tokens)),
-        None,
-    )
-    if not confirming:
-        dbg(f"research_first _extract_relation_triple: no confirming claim for rel={rel!r}")
-        return None
-    # CON-2: direction confirmed by an explicit active/passive pattern in that claim
-    # ('A uses B' AND 'B is used by A'); no pattern → reject rather than guess.
-    if not _direction_ok(src_s, tgt_s, confirming):
-        dbg(f"research_first _extract_relation_triple: direction unconfirmed {src_s!r}->{tgt_s!r}")
-        return None
-    return (src_s, " ".join(rel.split())[:40], tgt_s, confirming)
-
-
-#: A passive-voice cue ('is used by', 'powered by', 'is embedded by') — its presence
-#: between target and source flips the surface order back to source→target.
-_PASSIVE_RE = re.compile(
-    r"\b(?:is|are|was|were|be|being|been)\s+\w+ed\s+by\b|"
-    r"\b(?:used|powered|embedded|driven|backed|built|based)\s+(?:on\s+|by\s+)",
-    re.IGNORECASE,
-)
-
-
-def _direction_ok(src_s: str, tgt_s: str, claim: str) -> bool:
-    """``src_s -> tgt_s`` confirmed by an explicit pattern in the CITED claim:
-    active ``{src} <verb> {tgt}`` (src before tgt, no passive marker between) OR
-    passive ``{tgt} ... <verb>ed by {src}`` (tgt before src with a passive marker).
-    No explicit pattern → False, so an ambiguous direction is dropped, never guessed."""
-    low = claim.lower()
-    s, t = src_s.lower(), tgt_s.lower()
-    si, ti = low.find(s), low.find(t)
-    if si < 0 or ti < 0:
-        return False
-    seg = low[min(si, ti): max(si, ti) + max(len(s), len(t))]
-    passive = bool(_PASSIVE_RE.search(seg))
-    return (si < ti) != passive  # src-before-tgt active, or tgt-before-src passive
-
-
-def _pick_endpoint(
-    subject: str, components: list[tuple[str, str]], confirming: str, rel: str
-) -> str | None:
-    """The *subject*'s component best NAMED by the cited claim / relation (prefer a
-    node whose token appears there — e.g. an 'SDK'/'backend' node over an incidental
-    config constant); else its first grounded component (codex: first-component alone
-    picked a noisy 'OPENAI_COMPAT_…' node instead of 'Craft Agents')."""
-    subj_comps = [n for n, s in components if s == subject]
-    if not subj_comps:
-        return None
-    hay = (confirming + " " + rel).lower()
-    return max(
-        subj_comps,
-        key=lambda n: sum(1 for tok in _component_label_tokens(n) if tok in hay),
-    )
-
-
-def _triple_cross_edge(
-    triple: tuple[str, str, str, str] | None, components: list[tuple[str, str]]
-) -> list[tuple[str, str, str]] | None:
-    """Deterministic cross-cluster edge from the grounded triple: connect the SOURCE
-    subject's best-named component to the TARGET subject's, in the triple's direction,
-    labelled with its relation. None if either subject has no grounded component (then
-    the caller keeps the LLM-derived edge)."""
-    if not triple:
-        return None
-    src_s, rel, tgt_s, confirming = triple
-    src_comp = _pick_endpoint(src_s, components, confirming, rel)
-    tgt_comp = _pick_endpoint(tgt_s, components, confirming, rel)
-    if not src_comp or not tgt_comp:
-        return None
-    return [(src_comp, tgt_comp, rel)]
-
-
-def _mermaid_safe_id(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_]", "_", text) or "S"
-
-
-def _render_cluster_diagram(
-    components: list[tuple[str, str]], edges: list[tuple[str, str, str]], subjects: list[str]
-) -> str:
-    """Names + edges → a guaranteed-valid mermaid ``flowchart TD`` with one
-    ``subgraph`` per subject cluster. Valid by construction: synthetic ``Nx``
-    ids (never the raw label), every label quoted, edges only between rendered
-    nodes — same pattern as ``diagram_render._render``, extended with clusters."""
-    ids: dict[tuple[str, str], str] = {}
-    ids_by_name: dict[str, list[tuple[str, str]]] = {}
-    lines = ["flowchart TD"]
-    i = 0
-    for subject in subjects:
-        names = [name for name, s in components if s == subject]
-        if not names:
-            continue
-        lines.append(f'    subgraph {_mermaid_safe_id(subject)}["{subject}"]')
-        for name in names:
-            nid = f"N{i}"
-            i += 1
-            key = (subject.lower(), name.lower())
-            ids[key] = nid
-            ids_by_name.setdefault(name.lower(), []).append(key)
-            lines.append(f'        {nid}["{name.replace(chr(34), chr(39))}"]')
-        lines.append("    end")
-    for a, b, label in edges:
-        a_keys = ids_by_name.get(a.lower(), [])
-        b_keys = ids_by_name.get(b.lower(), [])
-        pairs = [(ak, bk) for ak in a_keys for bk in b_keys if ak[0] != bk[0]]
-        if not pairs:
-            pairs = [(ak, bk) for ak in a_keys for bk in b_keys]
-        if not pairs:
-            continue
-        ak, bk = pairs[0]
-        ida, idb = ids.get(ak), ids.get(bk)
-        if not ida or not idb or ida == idb:
-            continue
-        if label:
-            lines.append(f'    {ida} -->|"{label.replace(chr(34), chr(39))}"| {idb}')
-        else:
-            lines.append(f"    {ida} --> {idb}")
-    return "\n".join(lines)
-
-
-_FEATURE_STOPWORDS = {
-    "about", "agent", "agents", "allow", "allows", "also", "and", "based",
-    "because", "being", "both", "built", "called", "calls", "can", "connect",
-    "connects", "contains", "could", "data", "design", "develop",
-    "development", "docs", "documentation", "examples", "files", "from",
-    "has", "have", "include", "includes", "including", "into", "like",
-    "local", "main", "minimal",
-    "named", "over", "platform", "provides", "repository", "repositories",
-    "report", "research", "source", "sources", "subject", "support",
-    "supports", "task", "tasks", "that", "their", "through", "used", "uses",
-    "using", "various", "with", "workflow", "workflows",
-}
-
-
-def _component_label_tokens(label: str) -> list[str]:
-    """Discriminating lowercase tokens that make a diagram label component-like.
-
-    This is intentionally generic: it rejects sentence glue and architecture
-    nouns by category, not task-specific names. Short all-caps acronyms (API,
-    MCP) are allowed because they are common real component/interface labels.
-    """
-    from studio.diagram_render import _GENERIC_LABELS, _significant_tokens
-
-    sig = _significant_tokens(label)
-    if not sig:
-        stripped = label.strip()
-        return [stripped.lower()] if re.fullmatch(r"[A-Z0-9]{2,6}", stripped) else []
-    return [t for t in sig if t not in _GENERIC_LABELS and t not in _FEATURE_STOPWORDS]
-
-
 def _subject_feature_labels(
     subject: str,
     claims: list[dict[str, Any]],
@@ -2232,7 +1860,7 @@ def _subject_feature_labels(
         # them for a substring match is what forced the prose-glue fallback.
         if low in subject_names or low in labels:
             return
-        if not _component_label_tokens(label):
+        if not diagram_render._component_label_tokens(label):
             return
         if low not in [x.lower() for x in labels]:
             labels.append(label)
@@ -2268,7 +1896,7 @@ def _fallback_subject_diagram(subject: str, claims: list[dict[str, Any]]) -> str
     labels = _subject_feature_labels(subject, claims, all_subjects=[subject])
     if len(labels) < 2:
         return None
-    sid = _mermaid_safe_id(subject)
+    sid = diagram_render._mermaid_safe_id(subject)
     lines = ["flowchart TD", f'    {sid}["{subject}"]']
     for i, label in enumerate(labels):
         nid = f"{sid}_N{i}"
@@ -2301,7 +1929,7 @@ def _fallback_cluster_diagram(
     edges: list[tuple[str, str, str]] = [
         (by_subject[first_subjects[0]][0], by_subject[first_subjects[1]][0], label)
     ]
-    return _render_cluster_diagram(components, edges, subjects)
+    return diagram_render._render_cluster_diagram(components, edges, subjects)
 
 
 def _splice_diagram(
@@ -2317,29 +1945,31 @@ def _splice_diagram(
     if client is not None and claims and len(subjects) >= 2:
         try:
             reply = client.chat(
-                [{"role": "user", "content": _diagram_prompt(subjects, claims, relationship.mechanism)}]
+                [{"role": "user", "content": diagram_render.build_cluster_components_prompt(subjects, claims, relationship.mechanism)}]
             )
             raw = str(getattr(reply, "text", "") or "")
         except Exception as exc:  # noqa: BLE001 — a bad diagram call must never break the run
             dbg(f"research_first _splice_diagram: call failed exc={exc!r}")
             raw = ""
         if raw:
-            components, edges = _parse_cluster_diagram(raw, subjects)
             grounding_text = section_text + "\n" + " ".join(c["claim"] for c in claims)
-            components = _ground_components(components, grounding_text)
-            # KGGen/GraphRAG pattern: the cross-subject EDGE comes from a grounded,
-            # directional triple the LLM extracts (code assembles it), NOT the model's
-            # free-drawn edge, which hallucinated direction+label. Fall back to the old
-            # LLM edge only when no grounded triple is available.
-            joint = [c for c in claims if len(c.get("subjects") or []) >= 2]
-            triple = _extract_relation_triple(subjects, joint, client)
-            cross = _triple_cross_edge(triple, components) or _cross_cluster_edges(components, edges)
-            # Structure (rule 1) AND grounding (rule 2): a single-subject diagram
-            # or two disconnected islands both fail here — no grounded cross-edge
-            # means no diagram, not a fabricated one. A confirmed triple IS the
-            # grounding; otherwise the label-grounding gate still decides.
-            if len(components) >= 2 and cross and (triple or _integration_label(subjects, claims, relationship)):
-                body = _render_cluster_diagram(components, cross, subjects)
+            # KGGen/GraphRAG pattern (in diagram_render.render_subject_cluster_diagram):
+            # the cross-subject EDGE comes from a grounded, directional triple the LLM
+            # extracts (code assembles it), NOT the model's free-drawn edge, which
+            # hallucinated direction+label. Falls back to the old LLM edge only when no
+            # grounded triple is available. Structure (rule 1) AND grounding (rule 2): a
+            # single-subject diagram or two disconnected islands both fail — no grounded
+            # cross-edge means no diagram, not a fabricated one. A confirmed triple IS
+            # the grounding; otherwise the label-grounding gate still decides.
+            integration_label = _integration_label(subjects, claims, relationship)
+            body = diagram_render.render_subject_cluster_diagram(
+                raw,
+                grounding_text,
+                subjects=subjects,
+                claims=claims,
+                integration_label=integration_label,
+                client=client,
+            )
     if not body:
         body = _fallback_cluster_diagram(subjects, claims, relationship)
     if not body:
@@ -2436,7 +2066,7 @@ def _subject_components_prompt(subject: str, claims_text: str) -> str:
         "EDGE: <name A> -> <name B> | <optional label>\n\n"
         f"Only include components that belong to {subject} — never a component "
         "belonging to another subject.\n\n"
-        f"{_COMPONENT_NAMING_RULE}\n\n"
+        f"{diagram_render._COMPONENT_NAMING_RULE}\n\n"
         f"=== CLAIMS ===\n{claims_text}\n=== END CLAIMS ==="
     )
 
