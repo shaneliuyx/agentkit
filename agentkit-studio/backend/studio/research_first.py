@@ -2805,8 +2805,11 @@ def generate_research_first(
     # LLM-classified (no host/path rule separates a canonical repo from its mirror),
     # order-only (never drops → no dangling marker), fail-open to unchanged order.
     _ref_urls = list(dict.fromkeys(c["url"] for c in claims if c.get("url")))
+    # base_client: classification is a deterministic text task — unwrap the tool-
+    # augmented client so its tool loop can't inject noise that degrades the reply
+    # (same client-provenance trap that base_client exists for on the render path).
     ordered_claims = _order_claims_primary_first(
-        claims, _classify_source_authority(_ref_urls, subjects, client)
+        claims, _classify_source_authority(_ref_urls, subjects, base_client(client))
     )
     if any(s.lower() == "references" for s in sections):
         text = _rebuild_references_from_claims(text, ordered_claims, _url_title_map(evidence_dir))
