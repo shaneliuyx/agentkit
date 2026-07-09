@@ -941,10 +941,16 @@ def _extract_claims_from_source(
             "component/package LIST or TABLE ROW is itself a high-value claim — capture "
             "it. Each claim MUST be grounded in a QUOTE copied VERBATIM from the source "
             "(exact wording); a short list/table row such as a 'name — role' line is a "
-            "perfectly good quote and need NOT be a full sentence. Output ONE block per "
-            "claim in exactly this format, nothing else:\n\n"
+            "perfectly good quote and need NOT be a full sentence. If the QUOTE states "
+            "that one named thing uses, routes to, powers, depends on, connects to, or "
+            "provides another (including one thing linked to SEVERAL targets, e.g. one "
+            "SDK connecting to several providers), add a RELATIONS line listing each as "
+            "'head | relation | tail', ONE per line, using only names that appear in the "
+            "quote; omit RELATIONS when the claim states no such link. Output ONE block "
+            "per claim in exactly this format, nothing else:\n\n"
             "CLAIM: <one sentence>\nQUOTE: <verbatim quote from the source>\n"
-            f"SUBJECTS: <comma-separated subset of: {', '.join(subjects) or '(none named)'}>\n\n"
+            f"SUBJECTS: <comma-separated subset of: {', '.join(subjects) or '(none named)'}>\n"
+            "RELATIONS:\n<head | relation | tail>  (optional; omit line if none)\n\n"
             f"=== SOURCE ({url}) ===\n{window}\n=== END SOURCE ==="
         )
         try:
@@ -983,7 +989,52 @@ def _extract_claims_from_source(
                     tags = [loop_subject]
             else:
                 tags = [s for s in subjects if _subject_named(s, content)]
-            out.append({"claim": claim, "quote": quote, "url": url, "subjects": tags})
+            rels = _parse_relation_triples(block, norm_quote)
+            out.append({"claim": claim, "quote": quote, "url": url, "subjects": tags, "relations": rels})
+    return out
+
+
+def _token_in(token: str, norm_text: str) -> bool:
+    """Whole-token membership via word boundary — the file's anti-fabrication
+    convention (cf. _subject_supported), not a raw substring test. ``norm_text`` is
+    already lowercased by the caller."""
+    return bool(re.search(r"\b" + re.escape(token.lower()) + r"\b", norm_text))
+
+
+def _parse_relation_triples(block: str, norm_quote: str) -> list[dict[str, str]]:
+    """Lift ``head | relation | tail`` triples from a claim block's optional RELATIONS
+    line(s). Anti-fabrication (same bar as the QUOTE): a triple survives only if BOTH
+    its head and tail appear in the verbatim quote — the model may NAME the relation
+    verb freely, but the two endpoints must be quote-grounded, so a hallucinated party
+    can't enter the graph. Directed and de-duplicated by (head, tail). This is the
+    KGGen shape — the weak local model does the in-quote NER, code validates + keeps
+    only grounded edges (mirrors the diagram triple pattern). Generic: no domain/
+    provider/verb literal — grounding is purely 'is this token in the quote'."""
+    m = re.search(r"RELATIONS:\s*(.+?)(?:\nCLAIM:|\Z)", block, re.S)
+    if not m:
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for line in m.group(1).splitlines():
+        parts = [p.strip().strip('"').strip() for p in line.split("|")]
+        if len(parts) != 3:
+            continue
+        head, rel, tail = parts
+        if not (head and rel and tail):
+            continue
+        # Endpoints must be grounded in the verbatim quote as WHOLE tokens (the relation
+        # verb is free text). Word-boundary, not substring — matching the file's own
+        # anti-fabrication convention (_subject_supported): a short product name like
+        # "Pi"/"Go"/"AI" must not ground on being a substring of "shipping"/"Google".
+        if not (_token_in(head, norm_quote) and _token_in(tail, norm_quote)):
+            continue
+        if head.lower() == tail.lower():
+            continue  # a self-edge is noise, not a relationship
+        key = (head.lower(), tail.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"head": head, "rel": rel, "tail": tail})
     return out
 
 
@@ -1004,9 +1055,15 @@ def _extract_relationship_claim(
         f"The SOURCE below discusses BOTH {a} and {b}. Extract 1-2 CLAIMS stating HOW "
         f"{a} and {b} relate — integration, dependency, one using or embedding the "
         f"other, or a direct comparison. Each claim MUST be grounded in a QUOTE copied "
-        f"VERBATIM from the source (10-40 words, exact wording). If the page does not "
-        f"actually relate them, output nothing. Output ONE block per claim, nothing "
-        f"else:\nCLAIM: <one sentence>\nQUOTE: <verbatim quote>\n\n"
+        f"VERBATIM from the source (10-40 words, exact wording). After the QUOTE, if it "
+        f"states directed relationships between named things (one component using, "
+        f"routing to, powering, depending on, or embedding another — including one "
+        f"component connecting to several targets), add a RELATIONS line listing each as "
+        f"'head | relation | tail', ONE per line, using only names that appear in the "
+        f"quote; omit RELATIONS entirely if there are none. If the page does not actually "
+        f"relate them, output nothing. Output ONE block per claim, nothing else:\n"
+        f"CLAIM: <one sentence>\nQUOTE: <verbatim quote>\n"
+        f"RELATIONS:\n<head | relation | tail>\n<head | relation | tail>\n\n"
         f"=== SOURCE ({url}) ===\n{_extraction_window(content, subjects_present, all_anchors)}\n=== END SOURCE ==="
     )
     try:
@@ -1032,6 +1089,7 @@ def _extract_relationship_claim(
             or _is_markup_dense_quote(quote)
         ):
             continue
+        rels = _parse_relation_triples(block, norm_quote)
         # Quote-backed (see _subject_supported): the verbatim quote carries a dropped
         # qualifier, so the collision guard can't be paraphrased away.
         others = [
@@ -1052,7 +1110,7 @@ def _extract_relationship_claim(
             tags = [s for s in subjects_present if _subject_supported(s, all_anchors.get(s) or [s], claim, quote)]
             if len(tags) < 2:
                 continue
-        out.append({"claim": claim, "quote": quote, "url": url, "subjects": tags})
+        out.append({"claim": claim, "quote": quote, "url": url, "subjects": tags, "relations": rels})
     return out[:2]
 
 
@@ -1988,6 +2046,7 @@ def _splice_diagram(
 
 #: Cap on comparison rows per subject — a table, not a claim dump.
 _MAX_COMPARISON_ROWS = 4
+_MAX_RELATION_ROWS = 12
 
 
 def _table_cell(text: str) -> str:
@@ -2022,6 +2081,48 @@ def _splice_comparison_table(
         cells = [per_subject[s][i] if i < len(per_subject[s]) else "" for s in subs]
         lines.append("| " + " | ".join(_table_cell(c) for c in cells) + " |")
     caption = f"Comparison: {' vs '.join(subs)} (from documented claims)."
+    candidate = f"{text}\n\n{caption}\n\n" + "\n".join(lines)
+    if len(lint_artifact(candidate)) > len(lint_artifact(text)):
+        return text  # never ship a splice that introduces a NEW lint issue
+    return candidate
+
+
+def _splice_relationship_table(text: str, claims: list[dict[str, Any]]) -> str:
+    """A deterministic integration-routing table from the claim ``relations`` triples
+    (task 2 / provider-routing gold-parity). The routing facts already exist as prose
+    claims; `relations` lifted them to grounded ``head|rel|tail`` edges at extraction —
+    here we group them by source and tabulate the fan-out (e.g. one SDK routing to
+    several providers) that a single diagram edge can't show. Generic — no provider/
+    verb literal; every row is a triple whose endpoints were quote-grounded upstream.
+
+    Fires ONLY when a genuine fan-out exists (some source with >=2 distinct targets):
+    a run of one-off edges reads better as prose/diagram than a sparse table. De-dups
+    by (source, target), caps rows, and fail-opens to unchanged text (no triples, no
+    fan-out, or a splice that would introduce a new lint issue)."""
+    triples: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for c in claims:
+        for r in (c.get("relations") or []):
+            head, rel, tail = (r.get("head") or ""), (r.get("rel") or ""), (r.get("tail") or "")
+            if not (head and rel and tail):
+                continue
+            key = (head.lower(), tail.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            triples.append((head, rel, tail))
+    if len(triples) < 2:
+        return text
+    fanout: dict[str, int] = {}
+    for h, _, _ in triples:
+        fanout[h.lower()] = fanout.get(h.lower(), 0) + 1
+    if max(fanout.values()) < 2:
+        return text  # only one-off edges — not table-worthy
+    triples.sort(key=lambda t: (t[0].lower(), t[2].lower()))
+    lines = ["| Source | Relationship | Target |", "| --- | --- | --- |"]
+    for head, rel, tail in triples[:_MAX_RELATION_ROWS]:
+        lines.append("| " + " | ".join(_table_cell(x) for x in (head, rel, tail)) + " |")
+    caption = "Integration routing (from documented claims)."
     candidate = f"{text}\n\n{caption}\n\n" + "\n".join(lines)
     if len(lint_artifact(candidate)) > len(lint_artifact(text)):
         return text  # never ship a splice that introduces a NEW lint issue
@@ -2520,6 +2621,10 @@ def generate_research_first(
             text = _splice_code(text, evidence_dir, client)
         if name == diagram_home and wants_integration:
             text = _splice_diagram(text, subjects, claims, render_client, relationship)
+            # The diagram shows the integration EDGE; the routing table enumerates the
+            # fan-out a single edge can't (one SDK -> several providers). Fail-open when
+            # no grounded fan-out exists, so a non-routing integration is unaffected.
+            text = _splice_relationship_table(text, claims)
         if name == relationship_home and wants_comparison:
             # competes/alternative: a grounded comparison table replaces the
             # integration diagram/code entirely (R3).

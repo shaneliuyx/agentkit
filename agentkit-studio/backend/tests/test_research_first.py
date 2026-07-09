@@ -1774,6 +1774,109 @@ def test_build_claims_targeted_extraction_rejects_same_page_collision(tmp_path) 
     assert [c for c in claims if len(c["subjects"]) >= 2] == []  # no fabricated joint
 
 
+def test_parse_relation_triples_grounds_endpoints_in_quote() -> None:
+    # KGGen shape (task 2 / provider-routing): the model may name the relation verb
+    # freely, but BOTH endpoints must appear in the verbatim quote — a fabricated tail
+    # and a self-edge are dropped, directed pairs de-dup by (head, tail). No provider/
+    # verb lexicon in code: grounding is purely 'is this token in the quote'.
+    quote = "The Pi SDK manages connections for Google AI Studio and OpenAI"
+    nq = " ".join(quote.split()).lower()
+    block = (
+        f"CLAIM: x\nQUOTE: {quote}\nRELATIONS:\n"
+        "Pi SDK | routes to | Google AI Studio\n"
+        "Pi SDK | routes to | OpenAI\n"
+        "Pi SDK | routes to | Anthropic\n"          # tail absent from quote -> dropped
+        "Pi SDK | routes to | Pi SDK\n"             # self-edge -> dropped
+        "Pi SDK | routes to | Google AI Studio\n"   # duplicate -> dropped
+    )
+    assert rf._parse_relation_triples(block, nq) == [
+        {"head": "Pi SDK", "rel": "routes to", "tail": "Google AI Studio"},
+        {"head": "Pi SDK", "rel": "routes to", "tail": "OpenAI"},
+    ]
+
+
+def test_parse_relation_triples_rejects_substring_collision() -> None:
+    # Reviewer catch: grounding is whole-token (word boundary), NOT substring — a short
+    # product name must not ground on being a substring of an unrelated word. Here "Pi"
+    # is a substring of "shipping" and "Go" of "Google", but neither is a real token in
+    # the quote, so both fabricated endpoints are dropped.
+    quote = "for shipping and mapping to Google Cloud, Craft handles the rest"
+    nq = " ".join(quote.split()).lower()
+    block = (
+        f"CLAIM: x\nQUOTE: {quote}\nRELATIONS:\n"
+        "Pi | routes to | Craft\n"   # "pi" only inside "shipping" -> dropped
+        "Go | routes to | Craft\n"   # "go" only inside "Google" -> dropped
+        "Craft | maps to | Google Cloud\n"  # both whole tokens -> kept
+    )
+    assert rf._parse_relation_triples(block, nq) == [
+        {"head": "Craft", "rel": "maps to", "tail": "Google Cloud"},
+    ]
+
+
+def test_splice_relationship_table_tabulates_fanout() -> None:
+    # Task 2 render: a genuine fan-out (one source -> several targets) becomes a
+    # deterministic routing table appended to the section; every row is a grounded
+    # triple. De-dups by (source, target).
+    claims = [
+        {"claim": "x", "relations": [
+            {"head": "Pi SDK", "rel": "routes to", "tail": "Google AI Studio"},
+            {"head": "Pi SDK", "rel": "routes to", "tail": "OpenAI"},
+            {"head": "Pi SDK", "rel": "routes to", "tail": "OpenAI"},  # dup
+        ]},
+        {"claim": "y", "relations": [
+            {"head": "Claude Agent SDK", "rel": "handles", "tail": "Anthropic"},
+        ]},
+    ]
+    out = rf._splice_relationship_table("Body prose.", claims)
+    assert "| Source | Relationship | Target |" in out
+    assert out.count("| Pi SDK |") == 2  # two distinct providers, dup collapsed
+    assert "| Claude Agent SDK | handles | Anthropic |" in out  # single-tail row rides along
+
+
+def test_splice_relationship_table_fail_open_without_fanout() -> None:
+    # Only one-off edges (no source with >=2 targets) -> not table-worthy -> unchanged.
+    claims = [{"claim": "x", "relations": [
+        {"head": "A", "rel": "uses", "tail": "B"},
+        {"head": "C", "rel": "uses", "tail": "D"},
+    ]}]
+    assert rf._splice_relationship_table("Body.", claims) == "Body."
+    assert rf._splice_relationship_table("Body.", [{"claim": "x"}]) == "Body."  # no relations
+
+
+def test_parse_relation_triples_absent_when_no_relations_line() -> None:
+    # Additive contract: a plain claim block (no RELATIONS line) yields no triples —
+    # the field is optional, so the GS2-hardened extraction path is unperturbed.
+    assert rf._parse_relation_triples("CLAIM: x\nQUOTE: a desktop app", "a desktop app") == []
+
+
+def test_claims_extraction_attaches_grounded_routing_relations() -> None:
+    # Provider-routing gold-parity (task 2): the routing fan-out is already present as a
+    # prose claim (the main extractor's descriptive enumeration); the RELATIONS line
+    # lifts it into grounded (head, rel, tail) triples so ASSEMBLE can tabulate. The
+    # fabricated provider (not in the quote) must NOT enter the graph.
+    subjects = ["Pi", "Craft"]
+    all_anchors = {"Pi": ["pi-ai", "pi-agent-core"], "Craft": ["Claude Agent SDK", "Craft Agents"]}
+    readme = "The Pi SDK manages connections for Google AI Studio and OpenAI."
+
+    def chat(messages, tools=None):
+        return SimpleNamespace(text=(  # main extractor: the provider enumeration + triples
+            "CLAIM: The Pi SDK routes to multiple providers.\n"
+            "QUOTE: The Pi SDK manages connections for Google AI Studio and OpenAI\n"
+            "SUBJECTS: Pi\n"
+            "RELATIONS:\n"
+            "Pi SDK | routes to | Google AI Studio\n"
+            "Pi SDK | routes to | OpenAI\n"
+            "Pi SDK | routes to | Anthropic\n"))  # not in quote -> dropped
+
+    rows = rf._extract_claims_from_source(
+        "u", readme, subjects, SimpleNamespace(chat=chat), loop_subject=None, all_anchors=all_anchors
+    )
+    rels = [r for c in rows for r in c.get("relations", [])]
+    tails = {r["tail"] for r in rels if r["head"] == "Pi SDK"}
+    assert "Google AI Studio" in tails and "OpenAI" in tails
+    assert "Anthropic" not in tails  # ungrounded tail dropped
+
+
 def test_coverage_gate_recovers_joint_claim(monkeypatch, tmp_path) -> None:
     # CLAIMS produced 0 joint claims (both starting claims tagged one subject) so
     # the integration diagram could not ground. The gate fires ONE joint-recovery
