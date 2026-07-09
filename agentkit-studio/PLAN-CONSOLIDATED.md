@@ -95,8 +95,8 @@ or memory files written before this restructure.
 | 3.1 | Execution log | living log — one row per committed fix with measured result |
 | 2.3 (slate) / 4.2–4.3 (narrative) | Attempt-8 results + attempt-9 slate | items 1–4 ✅ committed (item 1 = BOTH erasers: A `27beff6` synth fence guard, B `d4e84a9` duplicate-section birth fix + fold-merges; 925 passed) · items 5–8 queued behind §15 re-prioritization (now Part 2.1) |
 | 2.1 (body) / 1.3 (success check) | Outcome-first re-prioritization | ✅ SUCCESS CHECK MET via the research_first rebuild (row 2.2): deterministic acceptance 0.92–1.0, Craft cited, fuller sections, grounded Pi+Craft integration diagram (`686d7b0`). The old hub/spoke P1-core/depth/8b items are moot (superseded by §16). Now closing GS4 gold-parity axes. |
-| 2.2 | Rebuild track: research_first.py | 🟢 ACCEPTANCE REACHED — live deterministic runs hold 0.92–1.0 (task_hash `492bae60177b`). Now closing the GS3 gold-parity axes one at a time (see Part 1.4-GS4): Code ✅ `0bf8c69` · Diagram edge ✅ `686d7b0` (live v80, `Craft→Pi "utilizes"`; RCA reversal = client-provenance, not wrong module) · References A (titled numbered) ◐ on disk, live-verify pending · References B (inline `[N]`) + Sections (heading leaks) + Detail ⬜ · diagram_render hygiene ⬜ starting |
-| 1.4-GS4 | Gold-parity axis tracker | ◐ ACTIVE — 5-axis status table (Detail/Sections/References/Diagrams + Code); acceptance = live-run artifact per axis, not score |
+| 2.2 | Rebuild track: research_first.py | 🟢 ACCEPTANCE REACHED — live deterministic runs hold 0.92–1.0 (task_hash `492bae60177b`). GS3 gold-parity axes (Part 1.4-GS4) ALL CLOSED: Code ✅ `0bf8c69` · Diagram edge ✅ `686d7b0` (client-provenance RCA) · References A titled ✅ `030ffba` + B inline `[N]` ✅ `4fb0240` · Sections heading-leak ✅ `5009d8a` + H3 ✅ `bf32bbe` · Detail (relations table + pi-tui roster + dep-order) ✅ `728e524`/`353a95e`/`f807903` · diagram_render hygiene ✅ `1575cc2`. Only residual: G3 aggregator/mirror de-rank |
+| 1.4-GS4 | Gold-parity axis tracker | ✅ COMPLETE — all 5 axes (Code/Diagram/References/Sections/Detail) live-verified per artifact (not score); see §Part 1.4-GS4 table. Sole open gold item outside the 5 axes: G3 aggregator/mirror de-rank in the References list |
 | 1.2 (backlog) / 7.1–7.4 (matrix/negatives/disposition) | Master ledger (merged PLAN-CONSOLIDATED) | ✅ merged 2026-07-05 night — §17.3 (now Part 1.2) = THE unified backlog · matrix delta §17.1 (now Part 7.1) · +4 settled negatives (Part 7.3) · CONSOLIDATED now a stub |
 
 ### 1.2 Unified backlog
@@ -124,9 +124,10 @@ or memory files written before this restructure.
    attempt-11 recovery RCAs (whole-task subject extraction, source-selection leakage,
    marker leaks, filler diagram labels) are all resolved; deterministic acceptance
    reached (0.92–1.0). No rerun pending.
-6. **Success check (Part 1.3 a–e)** — ✅ MET live. Now closing GS4 gold-parity axes:
-   Code ✅ `0bf8c69` · Diagram edge ✅ `686d7b0` · References-A ✅ `030ffba` · remaining =
-   References-B inline `[N]` + G4 cap + G6 heading-leak + detail residue + diagram_render hygiene.
+6. **Success check (Part 1.3 a–e)** — ✅ MET live. GS4 gold-parity axes ALL CLOSED:
+   Code ✅ `0bf8c69` · Diagram edge ✅ `686d7b0` · References-A ✅ `030ffba` · References-B `[N]` ✅ `4fb0240`
+   · G4 cap ✅ `3807144` · G6 heading-leak ✅ `5009d8a` · H3 ✅ `bf32bbe` · detail residue (relations table +
+   pi-tui roster) ✅ `728e524`/`353a95e`/`f807903` · diagram_render hygiene ✅ `1575cc2`. Only residual = G3 aggregator de-rank.
 
 **FROZEN until the report visibly changes** (internal-quality, from §14/§12):
 verdict memoization per text-hash · AST swallowed-content lint (markdown-it-py) ·
@@ -227,15 +228,16 @@ Gaps found (studio vs gold), each mapped to a work item and status:
 | G2 | **Diagram labels are prose glue** | `Pi→Designed/Harness/Users/Adapt` | Identifier-shaped component harvest (hyphenated/dotted/CamelCase + all-caps acronyms), drop bare prose words; stop rejecting real sub-components that contain the subject token (`pi-ai`) | ✅ DONE 2026-07-09 (`_subject_feature_labels`) |
 | G3 | **Source authority** — cites an aggregator (`hotools.com`) + the WRONG product (`www.craft.do` doc editor, not the agent app); misses every primary repo/README/PR | 7 refs, ~3 low-value/wrong | **NEW — source-selection authority pass**: prefer official repos/READMEs/vendor docs; de-rank aggregators + same-name-wrong-product; ground selection in disambiguation anchors | ◐ PARTIAL — primary-content selection CLOSED by the query-directed extraction fix (GS2 result: names pi-ai/pi-agent-core/pi-coding-agent from the README, not deepwiki); titled-numbered references landed `030ffba`. Residual = aggregator/mirror **de-rank** in the References list (hotools/deepwiki still appear) |
 | G4 | **Citation stuffing** — same URL repeated after every sentence | `pi.dev/docs/latest` ×N | **NEW — citation diversity/dedup**: distinct source per claim; cap repeats of one URL | ✅ DONE — raw-URL stuffing eliminated by References-B `[N]` render (`4fb0240`) + per-paragraph repeat cap `_dedup_markers_per_paragraph` (`3807144`, valid-ref-guarded so a non-citation `[2024]` survives). Live v84: 0 paragraphs with a repeated marker |
-| G5 | **Architectural depth** — generic prose, no package/layer structure | "minimal harness, extensible" vs gold's pi-ai→pi-agent-core→pi-coding-agent table | Ties to known **shallowness root cause** (findings.py one-sentence contract); component/layer extraction from claims | ◐ largely closed by query-directed extraction (names the 3 packages live); residual = layered DEPENDENCY order + pi-tui + provider-routing table |
+| G5 | **Architectural depth** — generic prose, no package/layer structure | "minimal harness, extensible" vs gold's pi-ai→pi-agent-core→pi-coding-agent table | Ties to known **shallowness root cause** (findings.py one-sentence contract); component/layer extraction from claims | ✅ DONE — full package taxonomy via query-directed extraction + roster enumeration (`f807903`, pi-tui now named, was 3+summary); dependency order + integration relationships surface in the `relations` fan-out table (`728e524`+`353a95e`): live `Pi SDK → pi-ai/pi-coding-agent/pi-agent-core`, `pi-agent-core sits between pi-ai/pi-coding-agent`, `Craft Agents → REST APIs/MCP servers/local filesystem`. Live-verified `s_b320f6fb3670` |
 | G6 | **Heading leak** — content bullets promoted to H2, breaks ToC | 5 leaked H2s ("Initialize the open-source interface…") | **Phase 2.1 AST swallowed-content lint** (markdown-it-py) | ✅ DONE `5009d8a` — per-section `_sanitize_section_headings` (demotes body `#`/`##`→`###`) + artifact-wide `_demote_stray_h1` backstop; live v83 = 1 H1 |
 | G7 | **Example code is generic**, not grounded in the real API surface | 2 generic blocks vs gold's real `Agent` hooks/SDK/RPC | **Phase 3 writer** — code grounded in fetched SDK docs, not invented | ✅ DONE `0bf8c69` — example code grounded in real evidence + invented-SDK guard; live 0.92, fabricated `from craft_agents import` gone |
 
-**⇒ Phase 1.5 — quality-parity pass (UPDATED 2026-07-09 PM).** Acceptance closed (0.92–1.0 live).
-G3 primary-content selection CLOSED by extraction; G7 DONE `0bf8c69`; diagram edge DONE `686d7b0`;
-References-A titled entries DONE `030ffba`. Remaining un-done: **G4 (per-URL cap) + References-B inline
-`[N]`** (codex design = writer-proposes/code-verifies), aggregator de-rank, G6 heading-leak lint, and
-detail residue (dependency order + pi-tui + provider routing). See Part 1.4-GS4 for the live axis tracker.
+**⇒ Phase 1.5 — quality-parity pass (UPDATED 2026-07-10).** Acceptance closed (0.92–1.0 live).
+DONE: G3 primary-content selection (extraction), G4 per-URL cap + References-B inline `[N]` (`4fb0240`+`3807144`),
+G5 architectural depth (relations table + roster `f807903`), G6 heading-leak lint (`5009d8a`), G7 code
+grounding (`0bf8c69`), diagram edge (`686d7b0`), References-A titled entries (`030ffba`), detail residue
+(dependency order + pi-tui + provider/relations table — tasks 1/2/3, live-verified). **Only remaining un-done:
+G3 aggregator/mirror DE-RANK** (hotools/deepwiki still appear in the References list). See Part 1.4-GS4 tracker.
 
 ### Part 1.4-GS2 — Refreshed gap analysis (2026-07-09, POST synthesis + refs-last fix)
 
@@ -272,14 +274,11 @@ the WRITE stage can now integrate what it's given; the binding constraint has sh
 it's given (source selection), exactly as the "shallowness root cause" memory predicts once the
 one-sentence-contract is relaxed.
 
-Refreshed priority after Phase 1 closes:
-1. **G3 source authority** (master lever — primary-source selection + aggregator/mirror de-rank).
-2. **G1-diagram grounding** — diagram edges must come from the joint claim's asserted mechanism
-   (Craft→Pi backend), not a generic MCP default; drop wrong-Pi (`Inflection Pi`) nodes from the
-   label harvest (G2-residual — the collision guard covers text joins but not diagram-label harvest).
-3. **G5 architectural depth** — package/layer extraction from primary content (unblocked once G3 feeds
-   primary READMEs).
-4. **G8 (minor)** — optional H3 sub-section granularity in Key Findings / Evidence.
+Refreshed priority after Phase 1 closes (2026-07-10: only G3 de-rank remains open):
+1. **G3 source authority** (master lever — primary-source selection ✅ done; **aggregator/mirror de-rank still OPEN** — hotools/deepwiki appear in the References list).
+2. ~~**G1-diagram grounding**~~ ✅ DONE `686d7b0` — integration edge from the joint claim's directional triple (`Craft→Pi "utilizes"`); wrong-Pi collision guard covers label harvest.
+3. ~~**G5 architectural depth**~~ ✅ DONE — package/layer + dependency order via query-directed extraction + roster (`f807903`) + relations table (`728e524`+`353a95e`).
+4. ~~**G8 (minor)** — H3 sub-section granularity~~ ✅ DONE `bf32bbe` — `_write_section` licenses `###` sub-topics; live 7 subheadings.
 
 Newly-DONE since the last gap pass (do not re-open): section-synthesis (distinct openers + analysis;
 the `_claims_for_section` per-section rotation + the `_write_section` synthesis directive), assembler
@@ -314,10 +313,12 @@ does NOT cover generated CODE, so `_splice_code`/`_splice_integration_code` can 
 1. ~~**Diagram grounding (G1-diagram / G2-residual)**~~ ✅ DONE `686d7b0` — integration edge grounded from
    the directional triple (`Craft→Pi "utilizes"`), live v80; endpoint-pick nit remains.
 2. ~~**Code grounding (G7)**~~ ✅ DONE `0bf8c69` — example code grounded in real evidence; invented-SDK guard.
-3. **Reference quality (G3-residual + G4)** — titled numbered entries DONE `030ffba`; still to do: drop
-   secondary-mirror/aggregator URLs from the References list; cap repeats of one URL; inline `[N]` (B).
-4. **Heading-leak lint (G6)** — AST pass to demote H1s that leaked inside a section/code comment.
-5. **Detail residue** — dependency order + pi-tui + provider routing; trim theme repetition.
+3. ~~**Reference quality (G3-residual + G4)**~~ ✅ DONE — titled numbered entries `030ffba`; inline `[N]` (B)
+   `4fb0240`; grounding residual (strip same-domain non-claim URL) `5009d8a`; G4 per-paragraph cap `3807144`.
+4. ~~**Heading-leak lint (G6)**~~ ✅ DONE `5009d8a` — `_demote_stray_h1` artifact-wide backstop (1 H1, fence-aware).
+5. ~~**Detail residue**~~ ✅ DONE — `relations:[{head,rel,tail}]` field + subject-grounded fan-out table
+   (`728e524`+`353a95e`, reviewer MEDIUMs fixed `f841c51`); pi-tui roster enumeration `f807903`; dep-order lands
+   via relations (`pi-agent-core sits between pi-ai/pi-coding-agent`). All live-verified. See Part 1.4-GS4 tracker.
 
 ### Part 1.4-GS4 — Axis status (2026-07-09 PM, live-verified)
 
