@@ -463,6 +463,33 @@ def test_claims_for_section_leads_with_different_claim_per_section() -> None:
         assert subs == {"Pi", "Craft"}
 
 
+def test_plainer_markdown_renders_link_and_table_to_quotable_text() -> None:
+    # Live regression: the Pi README states its architecture as `[@earendil-works/
+    # pi-ai](url): Unified LLM API` rows; the package NAME lives inside link syntax,
+    # so a verbatim quote could never name it (0/4 packages extracted). Rendering the
+    # markup down makes the name+role a clean, quotable substring.
+    md = "| **[@earendil-works/pi-ai](/pkgs/ai)** | Unified multi-provider LLM API |"
+    out = rf._plainer_markdown(md)
+    assert "@earendil-works/pi-ai" in out and "Unified multi-provider LLM API" in out
+    assert "](" not in out and "**" not in out and "|" not in out
+
+
+def test_strip_boilerplate_keeps_content_table_drops_nav_menu() -> None:
+    # The nav-chrome heuristic must not eat a link-heavy CONTENT table (a package
+    # list is links WITH descriptions); it should still drop a bare link menu (links
+    # with no prose). Live: the package table was scored as chrome by raw link-char
+    # density and stripped before extraction → 0/4 packages.
+    nav = "[Home](/) [Docs](/docs) [About](/about) [Sign in](/login)"
+    # CONCISE row (codex regression): a short `[name](url): role` line where the label
+    # is >50% of the visible text must still survive — a ratio test wrongly stripped it.
+    concise = "[pi-ai](/pkgs/ai): Unified LLM API"
+    table = "| [pi-agent-core](/pkgs/agent) | Agent runtime with tool calling and state |"
+    kept = rf._strip_boilerplate(nav + "\n\n" + concise + "\n\n" + table)
+    assert "pi-ai" in kept and "Unified LLM API" in kept  # concise row survives
+    assert "pi-agent-core" in kept and "Agent runtime with tool calling" in kept
+    assert "Sign in" not in kept  # bare link menu dropped
+
+
 def test_claims_clamp_mistagged_subject_to_fetch_loop() -> None:
     # Live regression: a source fetched under the "Pi" loop, but the LLM's own
     # SUBJECTS guess named "Craft" instead — source selection was gated, the

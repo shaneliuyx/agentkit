@@ -768,7 +768,7 @@ def _research(
 _CLAIM_BLOCK_RE = re.compile(r"\n(?=CLAIM:)")
 
 
-_MD_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")  # group(1) = link label (for _plainer_markdown)
 
 
 def _strip_boilerplate(text: str) -> str:
@@ -783,16 +783,24 @@ def _strip_boilerplate(text: str) -> str:
     for para in re.split(r"\n\s*\n", text):
         if not para.strip():
             continue
-        link_chars = sum(len(m.group(0)) for m in _MD_LINK_RE.finditer(para))
-        if link_chars / max(len(para), 1) > 0.5:
-            continue  # link-dominated menu block
+        # Chrome = links with almost NO prose around them (a menu is a list of bare
+        # links). A CONTENT row (`[name](url): role`, a package table) is a link PLUS a
+        # real description — keep it. Decide PER LINE: a "menu line" is a linked line
+        # whose non-link text is ≤1 word. Both the old ratio test AND the old short-
+        # line test wrongly stripped a concise row like `[pi-ai](url): Unified LLM API`
+        # (label >50% of a short line), so the Pi package table died before extraction
+        # (0/4 packages; codex 2026-07-09). Bias to KEEP: a surviving nav block is
+        # harmless (query-directed, verbatim-grounded extraction won't quote a menu),
+        # a stripped content row loses the fact forever.
         lines = [ln for ln in para.splitlines() if ln.strip()]
-        if (
-            lines
-            and _MD_LINK_RE.search(para)
-            and sum(1 for ln in lines if len(ln.strip()) < 40) / len(lines) > 0.8
-        ):
-            continue  # run of short menu/link lines
+        linky = [ln for ln in lines if _MD_LINK_RE.search(ln)]
+        if linky:
+            menu_lines = sum(
+                1 for ln in linky
+                if len(re.findall(r"[A-Za-z0-9]{2,}", _MD_LINK_RE.sub(" ", ln))) <= 1
+            )
+            if menu_lines / len(lines) > 0.8:
+                continue  # mostly bare-link lines = nav chrome
         kept.append(para)
     out = "\n\n".join(kept)
     return out if out.strip() else text
@@ -864,6 +872,27 @@ def _content_windows(content: str, size: int = _CLAIM_SOURCE_CHARS, overlap: int
     return windows
 
 
+_MD_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_MD_BULLET_RE = re.compile(r"(?m)^[ \t]*[*\-]\s+")
+_MD_PIPE_RE = re.compile(r"[ \t]*\|[ \t]*")
+
+
+def _plainer_markdown(text: str) -> str:
+    """Render link/bold/table markup down to the readable text a human sees, so a
+    VERBATIM quote can capture a fact that lives INSIDE the markup. Live proof: the Pi
+    README states its architecture as `[@earendil-works/pi-ai](url): Unified LLM API`
+    rows — the package NAME sits inside link syntax, so no clean verbatim quote could
+    ever name it, and extraction produced 0/4 packages. Stripping the decoration
+    (link→text, bold→text, bullet markers dropped, table pipes→space) yields 4/4.
+    Structural only — it never rewrites prose. Applied AFTER `_content_windows`'
+    boilerplate detection (which keys on link density), never before, so nav-chrome
+    stripping is unaffected."""
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _MD_BOLD_RE.sub(r"\1", text)
+    text = _MD_BULLET_RE.sub("", text)
+    return _MD_PIPE_RE.sub(" ", text)
+
+
 def _extract_claims_from_source(
     url: str, content: str, subjects: list[str], client: Any, *,
     loop_subject: str | None = None, all_anchors: dict[str, list[str]] | None = None,
@@ -879,14 +908,40 @@ def _extract_claims_from_source(
     is needed here."""
     if client is None or not (content or "").strip():
         return []
-    norm_content = " ".join(content.split()).lower()
+    # Verbatim check runs against markdown-stripped content so a quote the model reads
+    # off a de-decorated window (e.g. a package name freed from its `[..](url)` link)
+    # still matches. Windows come from RAW content (boilerplate detection intact), then
+    # get stripped for the model's view — see _plainer_markdown.
+    norm_content = " ".join(_plainer_markdown(content).split()).lower()
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for window in _content_windows(content):
+        window = _plainer_markdown(window)
+        subj = ", ".join(subjects) or "the topic"
+        # Query-directed + structure-aware extraction. A generic "extract 3-6 facts"
+        # pass reads a source the way nobody researches it — it grabs the easiest
+        # declarative sentences and misses the architecture. Live proof: the Pi
+        # README's 4-package table produced ZERO package claims; the 4 extracted were
+        # peripheral (permissions, session-sharing). A researcher reads a source
+        # AGAINST the question ("what's the architecture, how do I use it, how do these
+        # relate?") and reads a component TABLE as the architecture. So: direct the
+        # model at those universal research facets (generic — keyed on `subjects`, no
+        # task/domain literal) and explicitly license a terse list/table ROW as a valid
+        # quote, since that is exactly where READMEs put the component structure the old
+        # "10-40 word prose" framing skipped. Verbatim-quote grounding is unchanged
+        # (still the anti-fabrication check), so this widens WHAT is captured, not
+        # whether it must be real.
         prompt = (
-            "Extract 3-6 factual CLAIMS from the SOURCE TEXT below. Each claim MUST be "
-            "grounded in a QUOTE copied VERBATIM from the source (10-40 words, exact "
-            "wording). Output ONE block per claim in exactly this format, nothing else:\n\n"
+            f"Extract the 3-8 MOST IMPORTANT factual CLAIMS about {subj} from the SOURCE "
+            "TEXT below. Prioritise, in this order: (1) architecture and components — "
+            "packages, layers, modules, and what each does; (2) how to build with or use "
+            "it; (3) how the subjects relate to or depend on each other. Prefer these "
+            "over peripheral facts (licensing, install trivia, contribution notes). A "
+            "component/package LIST or TABLE ROW is itself a high-value claim — capture "
+            "it. Each claim MUST be grounded in a QUOTE copied VERBATIM from the source "
+            "(exact wording); a short list/table row such as a 'name — role' line is a "
+            "perfectly good quote and need NOT be a full sentence. Output ONE block per "
+            "claim in exactly this format, nothing else:\n\n"
             "CLAIM: <one sentence>\nQUOTE: <verbatim quote from the source>\n"
             f"SUBJECTS: <comma-separated subset of: {', '.join(subjects) or '(none named)'}>\n\n"
             f"=== SOURCE ({url}) ===\n{window}\n=== END SOURCE ==="
