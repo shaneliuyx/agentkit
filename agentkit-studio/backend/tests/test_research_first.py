@@ -1774,6 +1774,54 @@ def test_build_claims_targeted_extraction_rejects_same_page_collision(tmp_path) 
     assert [c for c in claims if len(c["subjects"]) >= 2] == []  # no fabricated joint
 
 
+def test_order_claims_primary_first_is_stable_and_lossless() -> None:
+    # G3 de-rank: secondary-source claims sink below primaries; primaries keep their
+    # first-appearance order (stable sort); nothing is dropped.
+    claims = [
+        {"claim": "a", "url": "https://github.com/org/pi"},
+        {"claim": "b", "url": "https://deepwiki.com/x/pi-mono"},   # secondary
+        {"claim": "c", "url": "https://pi.dev/"},
+    ]
+    out = rf._order_claims_primary_first(claims, {"https://deepwiki.com/x/pi-mono"})
+    assert [c["url"] for c in out] == [
+        "https://github.com/org/pi", "https://pi.dev/", "https://deepwiki.com/x/pi-mono",
+    ]
+    assert len(out) == len(claims)                              # lossless
+    assert rf._order_claims_primary_first(claims, set()) is claims  # no-op when none secondary
+
+
+def test_classify_source_authority_parses_and_fails_open() -> None:
+    urls = ["https://github.com/org/pi", "https://deepwiki.com/x/pi-mono", "https://hotools.com/item/c"]
+
+    def chat(messages, tools=None):
+        return SimpleNamespace(text="1: PRIMARY\n2: SECONDARY\n3: SECONDARY\n")
+
+    assert rf._classify_source_authority(urls, ["Pi", "Craft"], SimpleNamespace(chat=chat)) == {
+        "https://deepwiki.com/x/pi-mono", "https://hotools.com/item/c",
+    }
+    # Fail-open to empty (all primary): too few URLs, no client, or a raising client.
+    assert rf._classify_source_authority(urls[:2], ["Pi"], SimpleNamespace(chat=chat)) == set()
+    assert rf._classify_source_authority(urls, ["Pi"], None) == set()
+
+    def boom(messages, tools=None):
+        raise RuntimeError("x")
+
+    assert rf._classify_source_authority(urls, ["Pi"], SimpleNamespace(chat=boom)) == set()
+
+
+def test_primary_first_ordering_makes_refs_and_markers_agree() -> None:
+    # The shared reorder feeds BOTH _citation_index and the references rebuild, so a
+    # primary numbered #1 in the list is [1] inline — no dangling/mismatched marker.
+    claims = [
+        {"claim": "a", "url": "https://deepwiki.com/x"},        # secondary, appears first
+        {"claim": "b", "url": "https://github.com/org/pi"},     # primary
+    ]
+    ordered = rf._order_claims_primary_first(claims, {"https://deepwiki.com/x"})
+    idx = rf._citation_index(ordered)
+    assert idx["https://github.com/org/pi"] == 1   # primary numbered first
+    assert idx["https://deepwiki.com/x"] == 2      # secondary last
+
+
 def test_sanitize_section_headings_preserves_h3_subheadings() -> None:
     # Task 3 (H3 sub-structure): _write_section now licenses `###` sub-topics. The G6
     # heading-leak guards must keep them — they demote only leaked `#`/`##`, never a

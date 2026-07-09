@@ -2471,6 +2471,56 @@ def _citation_index(claims: list[dict[str, Any]]) -> dict[str, int]:
     return {u: i for i, u in enumerate(urls, 1)}
 
 
+def _classify_source_authority(urls: list[str], subjects: list[str], client: Any) -> set[str]:
+    """LLM authority pass (G3 de-rank): which reference URLs are SECONDARY — a
+    third-party that mirrors, aggregates, or indexes a subject's content — vs PRIMARY
+    (a subject's own repo, vendor site, or official docs)? Returns the SECONDARY set.
+    This is a judgment no generic host/path rule can make: a canonical repo
+    (`github.com/org/pi`) and a mirror of it (`deepwiki.com/.../pi-mono`) are
+    structurally identical (third-party host, subject only in the path), so a
+    deterministic rule that de-ranks one de-ranks both. The model classifies; code only
+    ORDERS (below) — nothing is dropped, so no inline `[N]` can dangle. Generic: the
+    prompt names no domain/subject literal beyond the run's own subjects. Fail-open to
+    empty (all primary): a bad classify pass must never reorder wrongly or break the run."""
+    if client is None or len(urls) < 3:
+        return set()  # nothing meaningful to rank
+    listing = "\n".join(f"{i}. {u}" for i, u in enumerate(urls, 1))
+    prompt = (
+        f"These URLs are cited in a research report about {', '.join(subjects) or 'the topic'}. "
+        "Classify EACH as PRIMARY or SECONDARY.\n"
+        "PRIMARY = an official/canonical source for one of the subjects: its own code "
+        "repository, its vendor or product website, or its official documentation.\n"
+        "SECONDARY = a third party that re-hosts, mirrors, aggregates, indexes, or "
+        "tutorialises that content (wikis/mirrors of a repo, listing/aggregator sites).\n"
+        "Output ONLY lines of the form 'N: PRIMARY' or 'N: SECONDARY', nothing else.\n\n"
+        f"{listing}"
+    )
+    try:
+        reply = client.chat([{"role": "user", "content": prompt}])
+        text = str(getattr(reply, "text", "") or "")
+    except Exception as exc:  # noqa: BLE001 — a bad classify pass must never break the run
+        dbg(f"research_first _classify_source_authority: call failed exc={exc!r}")
+        return set()
+    secondary: set[str] = set()
+    for mo in re.finditer(r"(\d+)\s*:\s*(PRIMARY|SECONDARY)", text, re.I):
+        idx = int(mo.group(1)) - 1
+        if 0 <= idx < len(urls) and mo.group(2).upper() == "SECONDARY":
+            secondary.add(urls[idx])
+    return secondary
+
+
+def _order_claims_primary_first(
+    claims: list[dict[str, Any]], secondary_urls: set[str]
+) -> list[dict[str, Any]]:
+    """Stable reorder: primary-source claims first, secondary-source (mirror/aggregator)
+    claims last — so both the References list and the inline `[N]` numbering rank a
+    canonical source above the mirror that copies it (G3). `sorted` is stable, so
+    first-appearance order is preserved WITHIN each group. No claim is dropped."""
+    if not secondary_urls:
+        return claims
+    return sorted(claims, key=lambda c: 1 if c.get("url") in secondary_urls else 0)
+
+
 #: Inline-citation forms the writer emits (it is told to cite a claim's URL inline,
 #: copied verbatim): a markdown link, a parenthesised URL, or a bare URL. The paren
 #: and bare forms eat a leading horizontal space so a STRIP (non-claim URL) leaves no
@@ -2749,8 +2799,17 @@ def generate_research_first(
         dbg(f"research_first ASSEMBLE: duplicate headings {_dupes!r} — construction guarantee violated")
     # ToC guarantee (G6): exactly one H1 (the title); demote any leaked body H1 to H3.
     text = _demote_stray_h1(text)
+    # G3 source-authority de-rank: order primary sources (a subject's own repo/vendor/
+    # docs) above secondary ones (mirrors/aggregators) in BOTH the References list and
+    # the inline [N] numbering, via ONE shared reordering used by both consumers below.
+    # LLM-classified (no host/path rule separates a canonical repo from its mirror),
+    # order-only (never drops → no dangling marker), fail-open to unchanged order.
+    _ref_urls = list(dict.fromkeys(c["url"] for c in claims if c.get("url")))
+    ordered_claims = _order_claims_primary_first(
+        claims, _classify_source_authority(_ref_urls, subjects, client)
+    )
     if any(s.lower() == "references" for s in sections):
-        text = _rebuild_references_from_claims(text, claims, _url_title_map(evidence_dir))
+        text = _rebuild_references_from_claims(text, ordered_claims, _url_title_map(evidence_dir))
     text, _ = _repair_fence_contamination(text)
     text, _ = _repair_doubled_citations(text)
     # SCOPE NOTE 1 (team-lead): the URL⊆claims invariant applied per-section
@@ -2761,8 +2820,9 @@ def generate_research_first(
     text = _drop_ungrounded_sentences_artifact_wide(text, claims)
     # Render the writer's inline URL citations as numbered [N] markers pointing at the
     # References list — AFTER grounding drops (only grounded URLs remain) so a stripped
-    # sentence never leaves a dangling marker. De-stuffs raw-URL clutter (G4).
-    text = _apply_citation_markers(text, claims)
+    # sentence never leaves a dangling marker. De-stuffs raw-URL clutter (G4). Uses the
+    # SAME primary-first ordering as the References rebuild so [N] and reference N agree.
+    text = _apply_citation_markers(text, ordered_claims)
     lints = lint_artifact(text)
     dbg(
         f"research_first ASSEMBLE: words={len(text.split())} "
