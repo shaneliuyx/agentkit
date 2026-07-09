@@ -303,7 +303,7 @@ def test_research_joint_queries_and_assumptions_derive_from_relationship(monkeyp
         "KIND: cooperates\nDESCRIPTOR: X\nANCHORS: a, b\n"
         "MECHANISM: Pi calls Craft via an MCP server\nTERMS: MCP, plugin"
     )
-    _ledger, assumptions, relationship = rf._research(
+    _ledger, assumptions, relationship, _anchors = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert relationship.kind == "cooperates"
@@ -319,7 +319,7 @@ def test_research_independent_notes_independence_in_assumptions(monkeypatch, tmp
     # fabricated relationship mechanism.
     monkeypatch.setattr(rf, "_search", lambda query, results=5: [])
     judge = _client("KIND: independent\nDESCRIPTOR: Relationship\nANCHORS: a, b")
-    _ledger, assumptions, relationship = rf._research(
+    _ledger, assumptions, relationship, _anchors = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert relationship.kind == "independent"
@@ -337,23 +337,26 @@ def test_research_joint_loop_drops_source_matching_no_subject_anchor(monkeypatch
         "DESCRIPTOR: X\nANCHORS: pi-ai, pi-agent-core\n"
         "MECHANISM: Pi calls Craft via an MCP server\nVERIFY: MCP, plugin"
     )
-    ledger, _assumptions, _relationship = rf._research(
+    ledger, _assumptions, _relationship, _anchors = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert ledger["__joint__"] == []
 
 
 def test_research_joint_loop_keeps_source_matching_union_anchor(monkeypatch, tmp_path) -> None:
+    # A joint-ONLY integration page (named by no subject, so the new subject-url
+    # guard doesn't reclaim it as a subject homepage) still lands in __joint__
+    # when it hits a union anchor.
     monkeypatch.setattr(rf, "_search", lambda query, results=5: [SimpleNamespace(url="https://joint.test/good")])
     monkeypatch.setattr(rf, "_is_offtopic", lambda *a, **k: False)
     monkeypatch.setattr(
-        rf, "_fetch_and_store", lambda url, evidence_dir, idx: "This page discusses pi-agent-core integration."
+        rf, "_fetch_and_store", lambda url, evidence_dir, idx: "This page discusses mcp-bridge tool-calling integration."
     )
     judge = _client(
-        "DESCRIPTOR: X\nANCHORS: pi-ai, pi-agent-core\n"
-        "MECHANISM: Pi calls Craft via an MCP server\nVERIFY: MCP, plugin"
+        "DESCRIPTOR: X\nANCHORS: mcp-bridge, tool-calling\n"
+        "MECHANISM: A calls B via an MCP server\nVERIFY: MCP, plugin"
     )
-    ledger, _assumptions, _relationship = rf._research(
+    ledger, _assumptions, _relationship, _anchors = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert len(ledger["__joint__"]) > 0
@@ -472,21 +475,31 @@ def test_claims_clamp_drops_spurious_extra_subject() -> None:
     assert claims[0]["subjects"] == ["Pi"]
 
 
-def test_claims_joint_loop_always_tagged_all_subjects() -> None:
-    # Live shape: a joint-fetched source got tagged ['Pi'] on 3 of its 4
-    # extracted claims and ['Pi', 'Craft'] on the 4th — an LLM extraction call
-    # with nothing to clamp it isn't even self-consistent within one source.
-    # A joint source was found via the RELATIONSHIP query, not any one
-    # subject's anchors — it should never carry a single-subject tag,
-    # regardless of what the extraction call guessed.
-    content = "Pi is a minimal agent harness. It ships a planner and an executor loop."
+def test_claims_joint_source_tagged_by_literal_cooccurrence() -> None:
+    # Codex P1: a joint-fetched source (incl. per-side joint probes) is NOT
+    # guaranteed to name every subject. Tagging is grounded in literal
+    # co-occurrence, not a blanket list(subjects): a page naming only ONE subject
+    # is demoted to that subject (never a fabricated joint), and the LLM's own
+    # SUBJECTS guess is ignored.
+    pi_only = "Pi is a minimal agent harness. It ships a planner and an executor loop."
     reply_text = (
         "CLAIM: Pi ships a planner and executor loop.\n"
         "QUOTE: It ships a planner and an executor loop.\n"
-        "SUBJECTS: Craft\n"
+        "SUBJECTS: Craft\n"  # over-claims Craft; page never names Craft
+    )
+    single = rf._extract_claims_from_source(
+        "https://x.test/pi", pi_only, ["Pi", "Craft"], _client(reply_text), loop_subject=None
+    )
+    assert single[0]["subjects"] == ["Pi"]  # demoted, not fabricated joint
+
+    both = "Pi connects to Craft: Pi plans and Craft executes the tools."
+    reply2 = (
+        "CLAIM: Pi plans and Craft executes.\n"
+        "QUOTE: Pi plans and Craft executes the tools\n"
+        "SUBJECTS: Pi\n"  # under-claims; co-occurrence still earns the joint tag
     )
     joint = rf._extract_claims_from_source(
-        "https://x.test/pi", content, ["Pi", "Craft"], _client(reply_text), loop_subject=None
+        "https://x.test/both", both, ["Pi", "Craft"], _client(reply2), loop_subject=None
     )
     assert joint[0]["subjects"] == ["Pi", "Craft"]
 
@@ -1088,7 +1101,9 @@ def test_pick_subject_home_respects_exclude() -> None:
 def test_subject_diagram_falls_back_to_grounded_features() -> None:
     claims = [
         {
-            "claim": "Alpha Product exposes an API, task runner, and plugin system.",
+            # Real component-shaped labels (acronyms + a hyphenated identifier),
+            # NOT bare prose words — the fallback grounds on named components.
+            "claim": "Alpha Product exposes an API, an MCP server, and a plugin-loader module.",
             "subjects": ["Alpha Product"],
             "url": "u1",
         }
@@ -1101,7 +1116,7 @@ def test_subject_diagram_falls_back_to_grounded_features() -> None:
     )
     assert "```mermaid" in out
     assert "Alpha Product" in out
-    assert "API" in out or "Runner" in out or "Plugin" in out
+    assert "API" in out or "MCP" in out or "plugin-loader" in out
 
 
 def test_subject_feature_labels_reject_sentence_start_filler_words() -> None:
@@ -1472,3 +1487,284 @@ def test_assembly_passes_artifact_lint_clean() -> None:
     assert "## References" in text
     assert "https://x.test/pi" in text.rsplit("## References", 1)[1]
     assert artifact_lint.lint_artifact(text) == []
+
+
+# ---------------------------------------------------------------------------
+# Joint-research strengthening + coverage gate (subject names are arbitrary
+# placeholders here, not production literals)
+# ---------------------------------------------------------------------------
+
+
+def test_joint_research_finds_integration_evidence_via_per_side_query(monkeypatch, tmp_path) -> None:
+    # A both-names blob query only finds SEO junk + an already-fetched single-side
+    # homepage; the per-side `{descriptor} {terms}` query is what surfaces the real
+    # integration page. Before the per-side queries existed, __joint__ ended empty
+    # and no claim ever carried both subjects.
+    A, B = "Alpha", "Beta"
+    seo_junk = "https://spam.test/finance"
+    alpha_home = "https://alpha.test/home"
+    beta_home = "https://beta.test/home"
+    integ_url = "https://beta.test/docs/mcp"
+    contents = {
+        seo_junk: "stock market nikkei finance agent loop tool calling spam",
+        alpha_home: "Alpha is an orchestration framework. mcp bridge.",
+        beta_home: "Beta provides task execution. mcp connector.",
+        integ_url: "Alpha and Beta connect together via an MCP server for tool calling.",
+    }
+
+    def fake_search(query, results=5):
+        q = query.lower()
+        has_mcp, has_a, has_b = "mcp" in q, "alpha" in q, "beta" in q
+        if has_mcp and has_a and has_b:  # both-names joint blob → junk + single-side
+            return [SimpleNamespace(url=seo_junk), SimpleNamespace(url=beta_home)]
+        if has_mcp and has_b and not has_a:  # per-side Beta probe → integration page
+            return [SimpleNamespace(url=integ_url)]
+        if has_a and not has_b:
+            return [SimpleNamespace(url=alpha_home)]
+        if has_b and not has_a:
+            return [SimpleNamespace(url=beta_home)]
+        return [SimpleNamespace(url=alpha_home)]  # disambiguation query naming both
+
+    monkeypatch.setattr(rf, "_search", fake_search)
+    monkeypatch.setattr(rf, "_fetch_and_store", lambda url, ev, idx: contents.get(url, ""))
+    monkeypatch.setattr(rf, "_is_offtopic", lambda url, *a, **k: url == seo_junk)
+
+    def judge_chat(messages, tools=None):
+        prompt = messages[0]["content"]
+        if "Classify how A and B relate" in prompt:
+            return SimpleNamespace(
+                text="KIND: cooperates\nDESCRIPTOR: Integration\n"
+                "MECHANISM: A and B connect via MCP\nTERMS: mcp, tool calling"
+            )
+        m = re.search(r'interpretation of "([^"]+)"', prompt)
+        subj = m.group(1) if m else A
+        return SimpleNamespace(text=f"DESCRIPTOR: {subj}\nANCHORS: mcp, tool calling")
+
+    judge = SimpleNamespace(chat=judge_chat)
+    client = _client(
+        "CLAIM: Alpha and Beta connect via an MCP server.\n"
+        "QUOTE: connect together via an MCP server\n"
+        "SUBJECTS: Alpha, Beta\n"
+    )
+    ledger, _assumptions, _relationship, all_anchors = rf._research(
+        [A, B], tmp_path, "compare Alpha and Beta agent frameworks", judge, emit=None
+    )
+    assert ledger["__joint__"], "per-side query should have surfaced the integration page"
+    claims = rf._build_claims(ledger, [A, B], client, tmp_path, all_anchors)
+    assert any(len(c["subjects"]) > 1 for c in claims)
+
+
+def test_build_claims_subject_page_names_other_via_anchors_grounds_joint(tmp_path) -> None:
+    # The generic form of the Pi/Craft fix (mirrors a human researcher): a page
+    # fetched under ONE subject's loop that genuinely documents ANOTHER subject —
+    # confirmed by that subject's DISTINCTIVE anchors (pi-ai/pi-agent-core) — grounds
+    # a JOINT claim. A page whose only mention of the other subject is an ambiguous
+    # same-token collision ("Inflection Pi") does NOT: the anchors aren't present, so
+    # the page isn't confirmed to discuss it, so bare "Pi" can't cross-tag.
+    subjects = ["Pi", "Craft"]
+    all_anchors = {"Pi": ["pi-ai", "pi-agent-core"], "Craft": ["Claude Agent SDK", "Craft Agents"]}
+    readme = (
+        "Craft Agents uses the Claude Agent SDK and the Pi SDK side by side. "
+        "It depends on pi-ai and pi-agent-core for provider routing."
+    )
+    homepage = "Craft Agents connects to providers including Inflection Pi and Moonshot."
+    ledger = {"Craft": [
+        {"url": "https://github.com/x/craft", "content": readme},
+        {"url": "https://craft.example/", "content": homepage},
+    ]}
+
+    def chat(messages, tools=None):
+        if "pi-ai" in messages[0]["content"]:  # extracting from the README page
+            return SimpleNamespace(text=(
+                "CLAIM: Craft Agents uses the Pi SDK as a backend.\n"
+                "QUOTE: uses the Claude Agent SDK and the Pi SDK side by side\n"
+                "SUBJECTS: Craft\n"))
+        return SimpleNamespace(text=(  # extracting from the homepage
+            "CLAIM: Craft connects to Inflection Pi.\n"
+            "QUOTE: connects to providers including Inflection Pi and Moonshot\n"
+            "SUBJECTS: Craft\n"))
+
+    claims = rf._build_claims(ledger, subjects, SimpleNamespace(chat=chat), tmp_path, all_anchors)
+    joint = [c for c in claims if len(c["subjects"]) >= 2]
+    assert joint and all(set(c["subjects"]) == {"Pi", "Craft"} for c in joint)
+    infl = [c for c in claims if "Inflection" in c["claim"]]
+    assert infl and all(c["subjects"] == ["Craft"] for c in infl)  # collision never joint
+
+
+def test_build_claims_targeted_relationship_extraction_surfaces_joint(tmp_path) -> None:
+    # Live-observed gap: a README anchor-confirmed for both subjects still yields 0
+    # joint claims because generic per-page extraction skips the integration
+    # sentence. The targeted relationship pass (fired on any >=2-subject page) pulls
+    # it — mirroring a researcher reading the README specifically for how A relates B.
+    subjects = ["Pi", "Craft"]
+    all_anchors = {"Pi": ["pi-ai", "pi-agent-core"], "Craft": ["Claude Agent SDK", "Craft Agents"]}
+    readme = (
+        "Craft Agents is a desktop app. It uses the Claude Agent SDK and the Pi SDK "
+        "side by side. It depends on pi-ai and pi-agent-core for provider routing."
+    )
+    ledger = {"Craft": [{"url": "https://github.com/x/craft", "content": readme}]}
+
+    def chat(messages, tools=None):
+        p = messages[0]["content"]
+        if "relate" in p and "VERBATIM" in p:  # the targeted relationship prompt
+            return SimpleNamespace(text=(
+                "CLAIM: Craft uses the Pi SDK alongside the Claude Agent SDK.\n"
+                "QUOTE: uses the Claude Agent SDK and the Pi SDK side by side\n"))
+        return SimpleNamespace(text=(  # generic per-page extraction: Craft feature only
+            "CLAIM: Craft Agents is a desktop app.\n"
+            "QUOTE: Craft Agents is a desktop app\nSUBJECTS: Craft\n"))
+
+    claims = rf._build_claims(ledger, subjects, SimpleNamespace(chat=chat), tmp_path, all_anchors)
+    joint = [c for c in claims if len(c["subjects"]) >= 2]
+    assert any("Pi SDK" in c["claim"] and set(c["subjects"]) == {"Pi", "Craft"} for c in joint)
+
+
+def test_mentions_subject_rejects_compound_proper_noun_collision() -> None:
+    a = ["pi-ai", "pi-agent-core"]
+    assert rf._mentions_subject("Pi", a, "It uses the Pi SDK side by side.")     # genuine
+    assert rf._mentions_subject("Pi", a, "Google Gemini and Pi are supported.")  # 'and Pi' genuine
+    assert not rf._mentions_subject("Pi", a, "Compatible with Inflection Pi.")   # collision
+    assert not rf._mentions_subject("Pi", a, "Runs on a Raspberry Pi board.")    # collision
+
+
+def test_build_claims_targeted_extraction_rejects_same_page_collision(tmp_path) -> None:
+    # Live-observed fabrication: on a page confirmed for both subjects, the targeted
+    # relationship pass grabbed the "Inflection Pi" provider-list co-mention and
+    # minted a FALSE joint. The collision guard must drop it — a coincidental
+    # same-token co-mention is not a relationship.
+    subjects = ["Pi", "Craft"]
+    all_anchors = {"Pi": ["pi-ai", "pi-agent-core"], "Craft": ["Claude Agent SDK", "Craft Agents"]}
+    content = (
+        "Craft Agents uses the Claude Agent SDK. It depends on pi-ai and pi-agent-core. "
+        "Compatible models include Inflection Pi and Moonshot."
+    )
+    ledger = {"Craft": [{"url": "u", "content": content}]}
+
+    def chat(messages, tools=None):
+        p = messages[0]["content"]
+        if "relate" in p and "VERBATIM" in p:  # targeted pass returns the collision
+            return SimpleNamespace(text=(
+                "CLAIM: Inflection Pi is a compatible model with Craft Agents.\n"
+                "QUOTE: Compatible models include Inflection Pi and Moonshot\n"))
+        return SimpleNamespace(text=(
+            "CLAIM: Craft Agents is an app.\n"
+            "QUOTE: Craft Agents uses the Claude Agent SDK\nSUBJECTS: Craft\n"))
+
+    claims = rf._build_claims(ledger, subjects, SimpleNamespace(chat=chat), tmp_path, all_anchors)
+    assert [c for c in claims if len(c["subjects"]) >= 2] == []  # no fabricated joint
+
+
+def test_coverage_gate_recovers_joint_claim(monkeypatch, tmp_path) -> None:
+    # CLAIMS produced 0 joint claims (both starting claims tagged one subject) so
+    # the integration diagram could not ground. The gate fires ONE joint-recovery
+    # fetch against a page that literally names BOTH subjects, earning a REAL joint
+    # tag grounded in co-occurrence (present == both subjects) — via the actual
+    # _extract_claims_from_source, not a stubbed empty-tags return.
+    content = "Craft connects together with Pi via an MCP server for tool calling."
+    monkeypatch.setattr(rf, "_search", lambda q, results=5: [SimpleNamespace(url="http://x/integration")])
+    monkeypatch.setattr(rf, "_fetch_and_store", lambda url, ev, idx: content)
+    monkeypatch.setattr(rf, "_is_offtopic", lambda *a, **k: False)
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    client = _client(
+        "CLAIM: Craft connects to Pi via MCP.\n"
+        "QUOTE: connects together with Pi via an MCP server\n"
+        "SUBJECTS: Pi, Craft\n"
+    )
+    claims = [
+        {"claim": "p", "quote": "q", "url": "u", "subjects": ["Pi"]},
+        {"claim": "p2", "quote": "q", "url": "u", "subjects": ["Pi"]},
+    ]
+    rel = rf.Relationship("cooperates", "Integration", "Pi and Craft compose", ["compose"])
+    out = rf._coverage_gate(
+        claims, ["Pi", "Craft"], rel, {}, evidence_dir, "compare Pi and Craft",
+        client=client, judge_client=None, ws_dir=tmp_path, emit=None,
+    )
+    assert sum(1 for c in out if len(c["subjects"]) >= 2) >= 1
+    assert sum(1 for c in out if "Craft" in c["subjects"]) >= 1
+
+
+def test_coverage_gate_joint_recovery_rejects_single_subject_page(monkeypatch, tmp_path) -> None:
+    # Regression guard (the CRITICAL): a joint-recovery fetch whose page names only
+    # ONE subject must NOT mint a joint claim. Before the present>=2 grounding gate,
+    # _recover_claims stamped list(subjects) on every claim, fabricating a joint tag
+    # from a single-subject page and grounding a fake integration diagram. The model
+    # here over-claims "SUBJECTS: Pi, Craft" but the page never names Pi — the gate
+    # must not trust it.
+    content = "Craft provides task execution with a built-in browser and API connectors."
+    monkeypatch.setattr(rf, "_search", lambda q, results=5: [SimpleNamespace(url="http://x/craft-only")])
+    monkeypatch.setattr(rf, "_fetch_and_store", lambda url, ev, idx: content)
+    monkeypatch.setattr(rf, "_is_offtopic", lambda *a, **k: False)
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    client = _client(
+        "CLAIM: Craft runs tasks with a browser.\n"
+        "QUOTE: task execution with a built-in browser\n"
+        "SUBJECTS: Pi, Craft\n"
+    )
+    claims = [
+        {"claim": "p", "quote": "q", "url": "u", "subjects": ["Pi"]},
+        {"claim": "p2", "quote": "q", "url": "u", "subjects": ["Pi"]},
+    ]
+    rel = rf.Relationship("cooperates", "Integration", "Pi and Craft compose", ["compose"])
+    out = rf._coverage_gate(
+        claims, ["Pi", "Craft"], rel, {}, evidence_dir, "compare Pi and Craft",
+        client=client, judge_client=None, ws_dir=tmp_path, emit=None,
+    )
+    # No page named both subjects → no joint claim may be fabricated.
+    assert sum(1 for c in out if len(c["subjects"]) >= 2) == 0
+
+
+def test_coverage_gate_per_subject_recovery_requires_anchor_not_bare_name(monkeypatch, tmp_path) -> None:
+    # Codex P1: per-subject recovery must ANCHOR-CONFIRM the thin subject, not just
+    # match its bare name. A Craft page mentioning "Inflection Pi" (bare 'pi', none
+    # of Pi's distinctive anchors) must NOT pass as a Pi-recovery source and then be
+    # paired with anchor-confirmed Craft into a fabricated ['Pi','Craft'] joint.
+    all_anchors = {"Pi": ["pi-ai", "pi-agent-core"], "Craft": ["Craft Agents", "Claude Agent SDK"]}
+    content = "Craft Agents connects to providers including Inflection Pi via the Claude Agent SDK."
+    monkeypatch.setattr(rf, "_search", lambda q, results=5: [SimpleNamespace(url="http://x/craft")])
+    monkeypatch.setattr(rf, "_fetch_and_store", lambda url, ev, idx: content)
+    monkeypatch.setattr(rf, "_is_offtopic", lambda *a, **k: False)
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    client = _client(
+        "CLAIM: Craft connects to Inflection Pi.\n"
+        "QUOTE: connects to providers including Inflection Pi via the Claude Agent SDK\n"
+        "SUBJECTS: Pi, Craft\n"
+    )
+    # Pi is the THIN subject (0 claims) → recovery queries for Pi and fetches this page.
+    claims = [
+        {"claim": "c", "quote": "q", "url": "u", "subjects": ["Craft"]},
+        {"claim": "c2", "quote": "q", "url": "u", "subjects": ["Craft"]},
+    ]
+    rel = rf.Relationship("cooperates", "Integration", "compose", ["compose"])
+    out = rf._coverage_gate(
+        claims, ["Pi", "Craft"], rel, all_anchors, evidence_dir, "compare Pi and Craft",
+        client=client, judge_client=None, ws_dir=tmp_path, emit=None,
+    )
+    assert sum(1 for c in out if len(c["subjects"]) >= 2) == 0  # collision never fabricates joint
+
+
+def test_coverage_gate_joint_recovery_requires_literal_naming(monkeypatch, tmp_path) -> None:
+    # Codex P1: two MULTI-WORD subjects that merely share a generic word ("agent",
+    # "sdk") must not both count as "named" on a page that names NEITHER product —
+    # else joint recovery mints an ungrounded joint claim. _subject_named requires
+    # every significant word, so a page missing the distinctive product token
+    # ("Alpha"/"Beta") is dropped before any tag is stamped.
+    content = "Modern agent frameworks and sdk tooling are widely discussed in the ecosystem."
+    monkeypatch.setattr(rf, "_search", lambda q, results=5: [SimpleNamespace(url="http://x/generic")])
+    monkeypatch.setattr(rf, "_fetch_and_store", lambda url, ev, idx: content)
+    monkeypatch.setattr(rf, "_is_offtopic", lambda *a, **k: False)
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    claims = [
+        {"claim": "p", "quote": "q", "url": "u", "subjects": ["Alpha Agent SDK"]},
+        {"claim": "p2", "quote": "q", "url": "u", "subjects": ["Alpha Agent SDK"]},
+    ]
+    rel = rf.Relationship("cooperates", "Integration", "compose", ["agent"])
+    out = rf._coverage_gate(
+        claims, ["Alpha Agent SDK", "Beta Agent SDK"], rel, {}, evidence_dir,
+        "compare Alpha Agent SDK and Beta Agent SDK",
+        client=_client(""), judge_client=None, ws_dir=tmp_path, emit=None,
+    )
+    assert sum(1 for c in out if len(c["subjects"]) >= 2) == 0

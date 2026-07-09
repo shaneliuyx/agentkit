@@ -4,7 +4,16 @@ import json
 
 import pytest
 
+from studio import research_quality_mvp as rf_mvp
 from studio.research_quality_mvp import evaluate, evaluate_gate_health
+
+
+def test_summary_mechanism_words_ignores_substring_subject_match() -> None:
+    # 'pi' is a substring of 'apis' — a Craft-only sentence must NOT be scanned as
+    # a Pi+Craft relationship sentence and have its words harvested as ungrounded
+    # mechanism. Word-boundary matching fixes the false positive.
+    artifact = "## Executive Summary\n\nCraft connects to external APIs and a Chromium browser."
+    assert rf_mvp._summary_mechanism_words(artifact, ["Pi", "Craft"]) == set()
 
 
 def test_mvp_flags_current_recovery_blockers() -> None:

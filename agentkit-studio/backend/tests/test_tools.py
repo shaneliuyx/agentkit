@@ -1194,3 +1194,50 @@ def test_auto_fetch_page_slice_is_configurable_for_citation_grade_content() -> N
     )
     c2.chat([{"role": "user", "content": "research"}])
     assert not any("THE QUOTABLE SENTENCE" in m for m in inner2.tool_msgs)
+
+
+# --- PDF source support (fetch a PDF and read it like a README) --------------
+
+def test_fetch_page_routes_pdf_suffix_to_extractor(monkeypatch) -> None:
+    import studio.tools as tools
+    monkeypatch.setattr(tools, "_fetch_pdf_text", lambda u: "extracted pdf body about agents")
+    _key, page = tools._fetch_page("https://x.test/paper.pdf")
+    assert page is not None and page[0] == "extracted pdf body about agents"
+
+
+def test_fetch_page_routes_arxiv_pdf_path(monkeypatch) -> None:
+    # arXiv PDFs are served at /pdf/<id> with NO .pdf suffix — still routed.
+    import studio.tools as tools
+    monkeypatch.setattr(tools, "_fetch_pdf_text", lambda u: "arxiv paper text")
+    _key, page = tools._fetch_page("https://arxiv.org/pdf/1706.03762")
+    assert page is not None and page[0] == "arxiv paper text"
+
+
+def test_fetch_page_pdf_url_not_actually_pdf_falls_through_to_html(monkeypatch) -> None:
+    import studio.tools as tools
+    import types
+    import web_toolkit
+    monkeypatch.setattr(tools, "_fetch_pdf_text", lambda u: None)  # not a real PDF
+    monkeypatch.setattr(
+        web_toolkit, "web_fetch",
+        lambda u, selector=None: types.SimpleNamespace(ok=True, content="real html body", bytes=14),
+    )
+    _key, page = tools._fetch_page("https://x.test/report.pdf")
+    assert page is not None and page[0] == "real html body"
+
+
+def test_fetch_pdf_text_rejects_non_pdf_bytes(monkeypatch) -> None:
+    import studio.tools as tools
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b"<html>not a pdf</html>"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _Resp())
+    assert tools._fetch_pdf_text("https://x.test/fake.pdf") is None

@@ -217,6 +217,37 @@ def _page_for_url(url: str) -> str:
     return ""
 
 
+_MAX_PDF_BYTES = 25 * 1024 * 1024  # 25 MB download cap for a PDF source
+
+
+def _fetch_pdf_text(url: str) -> str | None:
+    """Extract text from a PDF URL so it can be read like any other source — the
+    moving-window extractor then processes the full document exactly like a README.
+    Downloads the bytes (capped), verifies the ``%PDF`` magic, and joins per-page
+    text via pypdf. Returns None on any failure (fail-open: the caller drops an
+    ungroundable source, never crashes)."""
+    from io import BytesIO
+    from urllib.request import Request, urlopen
+
+    try:
+        from pypdf import PdfReader
+    except Exception:  # noqa: BLE001 — pypdf absent → cannot read PDFs, drop stands
+        return None
+    try:
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0 (agentkit-studio)"})
+        with urlopen(req, timeout=30) as resp:  # noqa: S310 — http(s) asserted by caller
+            data = resp.read(_MAX_PDF_BYTES + 1)
+    except Exception:  # noqa: BLE001 — network/timeout failure is non-fatal
+        return None
+    if len(data) > _MAX_PDF_BYTES or not data.startswith(b"%PDF"):
+        return None  # oversized, or not actually a PDF
+    try:
+        reader = PdfReader(BytesIO(data))
+        return "\n\n".join((page.extract_text() or "") for page in reader.pages).strip() or None
+    except Exception:  # noqa: BLE001 — malformed/encrypted PDF → drop
+        return None
+
+
 def _fetch_page(url: str) -> tuple[str, tuple[str, int] | None]:
     """Pure fetch for one URL → ``(cache_key, page | None)``; NEVER touches ``_fetch_cache``.
 
@@ -231,6 +262,15 @@ def _fetch_page(url: str) -> tuple[str, tuple[str, int] | None]:
     key = f"{u}|"
     if not u.lower().startswith("http"):
         return key, None
+    if u.split("?", 1)[0].lower().endswith(".pdf") or "/pdf/" in u.lower():
+        # A PDF source (``.pdf`` suffix or an arXiv-style ``/pdf/<id>`` path): extract
+        # its text so it reads like a README/HTML page. web_fetch would return binary
+        # garbage for a PDF. ``_fetch_pdf_text`` verifies the %PDF magic and returns
+        # None when the URL is not actually a PDF — so we fall through to the normal
+        # HTML path in that case rather than dropping the source.
+        text = _fetch_pdf_text(u)
+        if text:
+            return key, (text[:_MAX_FETCH_CHARS], len(text.encode("utf-8")))
     try:
         from web_toolkit import web_fetch
     except Exception:  # noqa: BLE001 — toolkit absent → cannot ground, drop stands

@@ -18,6 +18,8 @@ dependencies = [
     # release, so the served-artifact cosmetic pass must not drift under us.
     "mdformat==1.0.0",
     "mdformat-gfm==1.0.0",
+    # PDF source extraction (studio/tools.py::_fetch_pdf_text) — read a PDF like a README.
+    "pypdf>=6.0",
 ]
 
 [project.optional-dependencies]

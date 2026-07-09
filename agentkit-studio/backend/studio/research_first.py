@@ -68,8 +68,17 @@ _MAX_CLAIMS_OTHER = 6
 #: distinct-domain sources land.
 _MAX_QUERIES_PER_SUBJECT = 3
 _MAX_SOURCES_PER_SUBJECT = 3
-_MAX_JOINT_QUERIES = 2
-_MAX_SOURCES_PER_JOINT_QUERY = 2
+#: Coverage-gate floors: fewer than this many claims for any subject, or zero
+#: joint claims when the kind wants an integration story, triggers ONE recovery
+#: fetch before WRITE (fail-visible safety net, not a fabrication path).
+_MIN_CLAIMS_PER_SUBJECT = 2
+_INTEGRATION_KINDS = ("cooperates", "extends", "unknown")
+#: Joint breadth: a paired query plus one per-side mechanism probe (3 total), each
+#: kept until 3 real integration sources land — a both-names blob alone finds no
+#: page for two tools that never co-occur; the per-side probes surface each side's
+#: integration-surface page (e.g. an MCP-server docs page) as a joint candidate.
+_MAX_JOINT_QUERIES = 3
+_MAX_SOURCES_PER_JOINT_QUERY = 3
 #: Chars of a fetched page handed to the claim extractor — enough for 3-6 claims
 #: without flooding a local model's context.
 _CLAIM_SOURCE_CHARS = 8_000
@@ -493,6 +502,85 @@ def _subject_name_absent(subject: str, content: str) -> bool:
     return not any(re.search(r"\b" + re.escape(w) + r"\b", low) for w in words)
 
 
+def _subject_named(subject: str, content: str) -> bool:
+    """Strict literal-naming test for the coverage-gate recovery co-occurrence
+    check: EVERY significant word of *subject* must appear (word-boundary), not
+    just any one (all ``_subject_name_absent`` requires). Two multi-word subjects
+    that merely share a generic word ('agents', 'sdk') must not both count as
+    'named' on a page that names neither product — that would let joint recovery
+    mint an ungrounded joint claim. The gate is a backstop, so a false-negative
+    (missing a real joint page) is safe; a false-positive fabricates. Generic for
+    any subject string via re.escape."""
+    words = _ANCHOR_TOKEN_RE.findall(subject.lower())
+    if not words:
+        return False
+    low = content.lower()
+    return all(re.search(r"\b" + re.escape(w) + r"\b", low) for w in words)
+
+
+def _subject_present(subject: str, anchors: list[str], content: str) -> bool:
+    """True if *content* identifies *subject* by a DISTINCTIVE anchor — every token
+    of at least one resolved anchor present (word-boundary). Distinctive anchors
+    disambiguate an ambiguous bare name: 'Pi' the framework is confirmed by
+    'pi-ai'/'pi-agent-core', so a stray 'Inflection Pi' on an unrelated page (which
+    carries none of those anchors) is never mistaken for it — exactly how a human
+    researcher tells the two apart. Falls back to the bare name when the subject was
+    never disambiguated (anchors == [subject]). Generic for any task: anchors come
+    from per-subject disambiguation, not baked vocabulary."""
+    low = content.lower()
+    phrases = anchors if (anchors and anchors != [subject]) else [subject]
+    for phrase in phrases:
+        toks = _ANCHOR_TOKEN_RE.findall(phrase.lower())
+        if toks and all(re.search(r"\b" + re.escape(t) + r"\b", low) for t in toks):
+            return True
+    return False
+
+
+def _page_subjects(content: str, subjects: list[str], all_anchors: dict[str, list[str]]) -> list[str]:
+    """The subjects a page genuinely discusses, by distinctive-anchor presence."""
+    return [s for s in subjects if _subject_present(s, all_anchors.get(s) or [s], content)]
+
+
+def _mentions_subject(subject: str, anchors: list[str], text: str) -> bool:
+    """True if *text* genuinely references *subject* by bare name, EXCLUDING a
+    compound-proper-noun collision where the name is a suffix of a different product
+    ("Inflection Pi", "Raspberry Pi"). A bare-name hit immediately preceded by a
+    capitalised word that is NOT part of the subject's own name/anchors is treated as
+    a different product, not the subject. Generic: handles any short/ambiguous subject
+    token within a page, no product literals — the within-page complement to the
+    cross-page anchor identity check."""
+    own = set(_ANCHOR_TOKEN_RE.findall(subject.lower()))
+    for a in anchors or []:
+        own |= set(_ANCHOR_TOKEN_RE.findall(a.lower()))
+    for m in re.finditer(r"\b" + re.escape(subject) + r"\b", text, re.IGNORECASE):
+        prev = text[: m.start()].rstrip()
+        pm = re.search(r"([A-Za-z][A-Za-z0-9-]*)\s*$", prev)
+        if pm and pm.group(1)[0].isupper() and pm.group(1).lower() not in own:
+            continue  # compound proper noun → a different product, not the subject
+        return True
+    return False
+
+
+def _tag_claim(
+    claim: str,
+    quote: str,
+    loop_subject: str | None,
+    page_subjects: list[str],
+    all_anchors: dict[str, list[str]],
+) -> list[str]:
+    """Ground a claim's subject tags. On an anchor-confirmed page a subject counts
+    only when GENUINELY mentioned — ``_mentions_subject`` rejects a compound-proper-
+    noun collision ("Inflection Pi") so a coincidental same-token co-mention can't
+    mint a joint claim. The page's own subject (*loop_subject*) is always included; a
+    joint-loop claim (loop_subject None) naming no genuine confirmed subject grounds
+    nothing and returns []."""
+    scope = f"{claim} {quote}"
+    mentioned = [s for s in page_subjects if _mentions_subject(s, all_anchors.get(s) or [s], scope)]
+    if loop_subject is None:
+        return mentioned
+    return list(dict.fromkeys([loop_subject, *[s for s in mentioned if s != loop_subject]]))
+
+
 def _research(
     subjects: list[str],
     evidence_dir: Path,
@@ -500,7 +588,7 @@ def _research(
     judge_client: Any,
     *,
     emit: EmitFn,
-) -> tuple[dict[str, list[dict[str, str]]], list[str], "Relationship"]:
+) -> tuple[dict[str, list[dict[str, str]]], list[str], "Relationship", dict[str, list[str]]]:
     """Per subject: disambiguate FIRST (never search the bare subject name
     alone), then fetch up to ``_MAX_SOURCES_PER_SUBJECT`` distinct-domain,
     on-topic pages using the resolved descriptor+anchors. Once all subjects are
@@ -597,20 +685,47 @@ def _research(
         # + per-task terms), not generic subject-A+subject-B concatenation —
         # replacing the anchor-derived version, which still left joint fetches
         # thin (team-lead: "that's why joint fetches have been thin").
-        verify_words = " ".join(terms[:4]) or mechanism
-        joint_queries = [f"{d0} {d1} {mechanism}".strip(), f"{d0} {d1} {verify_words}".strip()]
+        # The prose `mechanism` sentence (100+ chars) matches no real page — a
+        # both-names blob + that sentence returns SEO junk (live: JQ1 hit
+        # Japanese-finance spam). Search TERMS instead, and add per-side probes:
+        # each side's integration-surface page (e.g. an MCP-server docs page)
+        # only surfaces under a `{descriptor} {terms}` query, never a both-names
+        # blob. All pieces are LLM-derived (descriptors, terms) — no literals.
+        verify_words = " ".join(terms[:4])
+        paired = f"{d0} {d1}".strip()
+        joint_queries = [
+            q
+            for q in (
+                f"{paired} {verify_words}".strip(),
+                f"{d0} {verify_words}".strip(),
+                f"{d1} {verify_words}".strip(),
+            )
+            if q
+        ]
+        dbg(f"research_first RESEARCH: joint_queries={joint_queries!r}")
         # The joint loop had no anchor gate at all before this — only the
         # generic offtopic floor. A page can be broadly on-topic yet name
         # neither subject's anchors at all; gate on the UNION of every
         # subject's anchors (a joint page only needs to connect to one side
         # to be a real integration source, not both).
         union_anchors = [a for subject in subjects for a in all_anchors.get(subject, [])]
+        # A joint source must be an integration page, not a subject homepage
+        # re-fetched under the joint loop (the clamp at :698 would re-tag it with
+        # both subjects, faking a joint claim). Skip anything already in a
+        # subject ledger.
+        subject_urls = {s["url"] for subj in subjects for s in ledger.get(subj, [])}
         for query in joint_queries[:_MAX_JOINT_QUERIES]:
             results = _search(query)
             emit("research_query", {"subject": "__joint__", "query": query, "n_results": len(results)})
-            for r in results[:_MAX_SOURCES_PER_JOINT_QUERY]:
+            kept = 0
+            for r in results:
+                if kept >= _MAX_SOURCES_PER_JOINT_QUERY:
+                    break
                 url = str(getattr(r, "url", "") or "").strip()
                 if not url:
+                    continue
+                if url in subject_urls:
+                    dbg(f"research_first RESEARCH: joint subject-url skip url={url!r}")
                     continue
                 idx += 1
                 content = _fetch_and_store(url, evidence_dir, idx)
@@ -624,9 +739,10 @@ def _research(
                     _discard_evidence_file(evidence_dir, idx)
                     continue
                 joint.append({"url": url, "content": content})
+                kept += 1
         ledger["__joint__"] = joint
         dbg(f"research_first RESEARCH: joint queries={len(joint_queries[:_MAX_JOINT_QUERIES])} fetched={len(joint)}")
-    return ledger, assumptions, relationship
+    return ledger, assumptions, relationship, all_anchors
 
 
 # ---------------------------------------------------------------------------
@@ -636,29 +752,197 @@ def _research(
 _CLAIM_BLOCK_RE = re.compile(r"\n(?=CLAIM:)")
 
 
+_MD_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
+
+
+def _strip_boilerplate(text: str) -> str:
+    """Drop navigation/chrome blocks from converted page text — generic main-content
+    extraction, STRUCTURAL not phrase-based (no per-site literals): a block is chrome
+    if it is link-dominated (a menu is a list of links) or a run of very short
+    link/menu lines. Prose blocks (the actual body) are kept. Never strips to empty
+    (fail-open to the original). Used before the extraction window so a rendered
+    page's nav chrome can't crowd the real body out of the model's view — live:
+    GitHub's first 8k was pure 'Sign in / Navigation Menu / Copilot' links."""
+    kept: list[str] = []
+    for para in re.split(r"\n\s*\n", text):
+        if not para.strip():
+            continue
+        link_chars = sum(len(m.group(0)) for m in _MD_LINK_RE.finditer(para))
+        if link_chars / max(len(para), 1) > 0.5:
+            continue  # link-dominated menu block
+        lines = [ln for ln in para.splitlines() if ln.strip()]
+        if (
+            lines
+            and _MD_LINK_RE.search(para)
+            and sum(1 for ln in lines if len(ln.strip()) < 40) / len(lines) > 0.8
+        ):
+            continue  # run of short menu/link lines
+        kept.append(para)
+    out = "\n\n".join(kept)
+    return out if out.strip() else text
+
+
+def _extraction_window(
+    content: str, subjects: list[str], all_anchors: dict[str, list[str]] | None,
+    limit: int = _CLAIM_SOURCE_CHARS,
+) -> str:
+    """The most subject-relevant ``limit`` chars for claim extraction. A rendered
+    long page (a GitHub repo is 100k+ chars whose first 8k is pure nav chrome and
+    whose README body sits at char ~93k) makes a blind ``content[:limit]`` window
+    feed the extractor boilerplate — live: gemma extracted "6.5k stars" from the
+    chrome and never saw "uses the Pi SDK side by side". Score paragraphs by how many
+    distinct subject/anchor terms they contain (distinctive anchors live in the body,
+    not the nav chrome) and take the highest-scoring first, up to ``limit``. Fall back
+    to the head when nothing matches or no terms are known. Generic: no per-site rules."""
+    if len(content) <= limit:
+        return content
+    content = _strip_boilerplate(content)  # drop nav/menu chrome first
+    if len(content) <= limit:
+        return content
+    terms: set[str] = set()
+    for s in subjects:
+        terms |= {w for w in _ANCHOR_TOKEN_RE.findall(s.lower()) if len(w) >= 3}
+    for anchors in (all_anchors or {}).values():
+        for a in anchors:
+            terms |= {w for w in _ANCHOR_TOKEN_RE.findall(a.lower()) if len(w) >= 3}
+    if not terms:
+        return content[:limit]
+    pats = [re.compile(r"\b" + re.escape(w) + r"\b") for w in terms]
+    scored: list[tuple[int, int, str]] = []
+    for i, para in enumerate(re.split(r"\n\s*\n", content)):
+        low = para.lower()
+        hits = sum(1 for p in pats if p.search(low))
+        if hits:
+            scored.append((-hits, i, para))  # -hits: most-relevant first; i: stable tie-break
+    scored.sort()
+    picked: list[str] = []
+    size = 0
+    for _neg, _i, para in scored:
+        picked.append(para)
+        size += len(para) + 2
+        if size >= limit:
+            break
+    joined = "\n\n".join(picked)
+    return joined[:limit] if joined else content[:limit]
+
+
+_EXTRACT_OVERLAP = 400
+_MAX_EXTRACT_WINDOWS = 20
+
+
+def _content_windows(content: str, size: int = _CLAIM_SOURCE_CHARS, overlap: int = _EXTRACT_OVERLAP) -> list[str]:
+    """Cover the WHOLE (boilerplate-stripped) content in overlapping windows so
+    extraction reads the FULL file — never a truncated head nor a relevance-selected
+    subset that can miss a body paragraph (live: the Craft README's "uses the Pi SDK
+    side by side" sits at char ~93k / paragraph 39 of a 120k rendered page). Overlap
+    keeps a sentence split across a boundary recoverable. Bounded by
+    ``_MAX_EXTRACT_WINDOWS`` (dbg-logged when hit — never a silent truncation)."""
+    body = _strip_boilerplate(content) if len(content) > size else content
+    if len(body) <= size:
+        return [body]
+    step = max(size - overlap, 1)
+    windows = [body[i : i + size] for i in range(0, len(body), step)]
+    if len(windows) > _MAX_EXTRACT_WINDOWS:
+        dbg(f"research_first _content_windows: capped {len(windows)} -> {_MAX_EXTRACT_WINDOWS} windows (len={len(body)})")
+        windows = windows[:_MAX_EXTRACT_WINDOWS]
+    return windows
+
+
 def _extract_claims_from_source(
-    url: str, content: str, subjects: list[str], client: Any, *, loop_subject: str | None = None
+    url: str, content: str, subjects: list[str], client: Any, *,
+    loop_subject: str | None = None, all_anchors: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """3-6 (claim, quote, subject-tags) rows from one fetched page. A claim whose
-    quote is not a verbatim substring of the cached page is dropped — deterministic
-    grounding, no judge call (§11.3 D1)."""
+    """(claim, quote, subject-tags) rows from one fetched page. A claim whose quote is
+    not a verbatim substring of the cached page is dropped — deterministic grounding,
+    no judge call (§11.3 D1). Reads the FULL file via a moving window (``_content_
+    windows``): a long rendered page is processed in overlapping chunks so a body fact
+    deep in the file (e.g. an architecture statement at char ~93k) is seen, not lost
+    to a head-truncation that would be pure nav chrome. Claims are de-duplicated by
+    quote across the overlapping windows. ``all_anchors`` is accepted for signature
+    parity with the caller; windowing now covers everything so no relevance-selection
+    is needed here."""
     if client is None or not (content or "").strip():
         return []
+    norm_content = " ".join(content.split()).lower()
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for window in _content_windows(content):
+        prompt = (
+            "Extract 3-6 factual CLAIMS from the SOURCE TEXT below. Each claim MUST be "
+            "grounded in a QUOTE copied VERBATIM from the source (10-40 words, exact "
+            "wording). Output ONE block per claim in exactly this format, nothing else:\n\n"
+            "CLAIM: <one sentence>\nQUOTE: <verbatim quote from the source>\n"
+            f"SUBJECTS: <comma-separated subset of: {', '.join(subjects) or '(none named)'}>\n\n"
+            f"=== SOURCE ({url}) ===\n{window}\n=== END SOURCE ==="
+        )
+        try:
+            reply = client.chat([{"role": "user", "content": prompt}])
+            text = str(getattr(reply, "text", "") or "")
+        except Exception as exc:  # noqa: BLE001 — a bad claim call must never break the run
+            dbg(f"research_first _extract_claims_from_source: call failed url={url!r} exc={exc!r}")
+            continue
+        for block in _CLAIM_BLOCK_RE.split(text):
+            cm = re.search(r"CLAIM:\s*(.+)", block)
+            qm = re.search(r"QUOTE:\s*(.+)", block)
+            if not cm or not qm:
+                continue
+            claim = cm.group(1).strip()
+            # Escape-flood guard (REBUILD-LESSONS §2 / live findings.py precedent): a
+            # QUOTE can arrive with literal "\n"/"\t"/"\r" sequences the model typed as
+            # text rather than real whitespace — collapse before verbatim-checking.
+            quote = re.sub(r"(?:\\+[ntr])+", " ", qm.group(1).strip().strip('"'))
+            norm_quote = " ".join(quote.split()).lower()
+            if (
+                not norm_quote
+                or norm_quote in seen
+                or norm_quote not in norm_content
+                or len(quote) > _MAX_QUOTE_CHARS
+                or _is_markup_dense_quote(quote)
+            ):
+                continue  # dup across windows, unverifiable, oversized, or markup noise
+            seen.add(norm_quote)
+            # Provisional tags — the caller (_build_claims / _recover_claims) re-grounds
+            # every tag via anchor-confirmed page identity (_tag_claim), so this is only
+            # a best-effort default. Single-subject loop clamps to its own subject.
+            sm = re.search(r"SUBJECTS:\s*(.+)", block)
+            tags = [s.strip() for s in (sm.group(1).split(",") if sm else []) if s.strip()]
+            if loop_subject:
+                if tags != [loop_subject]:
+                    tags = [loop_subject]
+            else:
+                tags = [s for s in subjects if _subject_named(s, content)]
+            out.append({"claim": claim, "quote": quote, "url": url, "subjects": tags})
+    return out
+
+
+def _extract_relationship_claim(
+    url: str, content: str, subjects_present: list[str],
+    all_anchors: dict[str, list[str]], loop_subject: str | None, client: Any,
+) -> list[dict[str, Any]]:
+    """On a page anchor-confirmed for >=2 subjects, extract 1-2 claims stating HOW
+    they relate — integration, dependency, one embedding the other, or comparison.
+    Generic per-page extraction routinely skips this cross-subject fact (it pulls
+    per-subject features); a human researcher reads a README specifically for it.
+    Grounded in a verbatim quote, tagged with the co-occurring subjects so it lands
+    as a joint claim. Returns [] on any failure (fail-open)."""
+    if client is None or len(subjects_present) < 2 or not (content or "").strip():
+        return []
+    a, b = subjects_present[0], subjects_present[1]
     prompt = (
-        "Extract 3-6 factual CLAIMS from the SOURCE TEXT below. Each claim MUST be "
-        "grounded in a QUOTE copied VERBATIM from the source (10-40 words, exact "
-        "wording). Output ONE block per claim in exactly this format, nothing else:\n\n"
-        "CLAIM: <one sentence>\nQUOTE: <verbatim quote from the source>\n"
-        f"SUBJECTS: <comma-separated subset of: {', '.join(subjects) or '(none named)'}>\n\n"
-        f"=== SOURCE ({url}) ===\n{content[:_CLAIM_SOURCE_CHARS]}\n=== END SOURCE ==="
+        f"The SOURCE below discusses BOTH {a} and {b}. Extract 1-2 CLAIMS stating HOW "
+        f"{a} and {b} relate — integration, dependency, one using or embedding the "
+        f"other, or a direct comparison. Each claim MUST be grounded in a QUOTE copied "
+        f"VERBATIM from the source (10-40 words, exact wording). If the page does not "
+        f"actually relate them, output nothing. Output ONE block per claim, nothing "
+        f"else:\nCLAIM: <one sentence>\nQUOTE: <verbatim quote>\n\n"
+        f"=== SOURCE ({url}) ===\n{_extraction_window(content, subjects_present, all_anchors)}\n=== END SOURCE ==="
     )
     try:
         reply = client.chat([{"role": "user", "content": prompt}])
         text = str(getattr(reply, "text", "") or "")
-    except Exception as exc:  # noqa: BLE001 — a bad claim call must never break the run
-        dbg(f"research_first _extract_claims_from_source: call failed url={url!r} exc={exc!r}")
+    except Exception as exc:  # noqa: BLE001 — a bad relationship call must not break the run
+        dbg(f"research_first _extract_relationship_claim: call failed url={url!r} exc={exc!r}")
         return []
-
     norm_content = " ".join(content.split()).lower()
     out: list[dict[str, Any]] = []
     for block in _CLAIM_BLOCK_RE.split(text):
@@ -667,9 +951,6 @@ def _extract_claims_from_source(
         if not cm or not qm:
             continue
         claim = cm.group(1).strip()
-        # Escape-flood guard (REBUILD-LESSONS §2 / live findings.py precedent): a
-        # QUOTE can arrive with literal "\n"/"\t"/"\r" sequences the model typed as
-        # text rather than real whitespace — collapse before verbatim-checking.
         quote = re.sub(r"(?:\\+[ntr])+", " ", qm.group(1).strip().strip('"'))
         norm_quote = " ".join(quote.split()).lower()
         if (
@@ -678,26 +959,28 @@ def _extract_claims_from_source(
             or len(quote) > _MAX_QUOTE_CHARS
             or _is_markup_dense_quote(quote)
         ):
-            continue  # unverifiable, oversized, or markup noise — never woven in
-        sm = re.search(r"SUBJECTS:\s*(.+)", block)
-        tags = [s.strip() for s in (sm.group(1).split(",") if sm else []) if s.strip()]
-        # Source selection is gated by anchor/topic checks; per-claim SUBJECTS tags
-        # were not — a single-subject loop vets a source against ONLY its own
-        # anchors, so any tag other than exactly that subject is unvetted (live:
-        # a package page fetched under one subject loop was tagged with another
-        # subject that had never been checked against its own anchors).
-        if loop_subject:
-            if tags != [loop_subject]:
-                tags = [loop_subject]
+            continue
+        scope = f"{claim} {quote}"
+        others = [
+            s for s in subjects_present
+            if s != loop_subject and _mentions_subject(s, all_anchors.get(s) or [s], scope)
+        ]
+        if loop_subject is not None:
+            # On a subject's OWN page the page owner is one party even when the
+            # sentence pronouns it ("It uses the Pi SDK side by side" on Craft's
+            # README). Require >=1 GENUINE other subject — the collision guard drops
+            # "Inflection Pi", so a coincidental provider-list co-mention yields no
+            # other and is skipped.
+            if not others:
+                continue
+            tags = list(dict.fromkeys([loop_subject, *others]))
         else:
-            # A joint-fetched source was found via the RELATIONSHIP query, not
-            # any one subject's anchors — it should never carry a single-subject
-            # tag (live: one joint source got tagged with one subject on most
-            # claims and both subjects on another, purely from an LLM extraction
-            # call with nothing to clamp it).
-            tags = list(subjects)
+            # Joint-fetched source with no page owner: require >=2 genuine mentions.
+            tags = [s for s in subjects_present if _mentions_subject(s, all_anchors.get(s) or [s], scope)]
+            if len(tags) < 2:
+                continue
         out.append({"claim": claim, "quote": quote, "url": url, "subjects": tags})
-    return out
+    return out[:2]
 
 
 def _build_claims(
@@ -705,27 +988,211 @@ def _build_claims(
     subjects: list[str],
     client: Any,
     ws_dir: Path,
+    all_anchors: dict[str, list[str]],
 ) -> list[dict[str, Any]]:
     claims: list[dict[str, Any]] = []
     for key, sources in ledger.items():
         loop_subject = None if key == "__joint__" else key
-        default_tags = list(subjects) if key == "__joint__" else [key]
         for src in sources:
+            # Which subjects does THIS page genuinely discuss (distinctive anchors)?
+            # This is the identity check — a page in one subject's loop that also
+            # documents another subject (e.g. Craft's README naming its Pi backend)
+            # is a real joint source; a page merely sharing an ambiguous token is not.
+            page_subjects = _page_subjects(src["content"], subjects, all_anchors)
             for c in _extract_claims_from_source(
-                src["url"], src["content"], subjects, client, loop_subject=loop_subject
+                src["url"], src["content"], subjects, client,
+                loop_subject=loop_subject, all_anchors=all_anchors,
             ):
-                if not c["subjects"]:
-                    c["subjects"] = default_tags
+                tags = _tag_claim(c["claim"], c["quote"], loop_subject, page_subjects, all_anchors)
+                if not tags:
+                    continue  # grounds no confirmed subject — never woven in
+                c["subjects"] = tags
                 claims.append(c)
+            # A page confirmed for >=2 subjects states their relationship explicitly;
+            # a targeted pass pulls that integration/dependency claim (which generic
+            # per-page extraction skips), and the collision guard inside it drops a
+            # coincidental co-mention so only a genuine relationship lands as joint.
+            if len(page_subjects) >= 2:
+                claims.extend(
+                    _extract_relationship_claim(
+                        src["url"], src["content"], page_subjects, all_anchors, loop_subject, client
+                    )
+                )
+    _persist_claims(claims, ws_dir)
+    n_sources = sum(len(v) for v in ledger.values())
+    dbg(f"research_first CLAIMS: {len(claims)} claims from {n_sources} sources")
+    return claims
+
+
+def _persist_claims(claims: list[dict[str, Any]], ws_dir: Path) -> None:
+    """Write the claims ledger to claims.jsonl. Called by both _build_claims and
+    _coverage_gate so audit/downstream always read the augmented set."""
     try:
         with (ws_dir / "claims.jsonl").open("w", encoding="utf-8") as fh:
             for c in claims:
                 fh.write(json.dumps(c) + "\n")
-    except OSError:
-        pass
-    n_sources = sum(len(v) for v in ledger.values())
-    dbg(f"research_first CLAIMS: {len(claims)} claims from {n_sources} sources")
-    return claims
+    except OSError as exc:
+        dbg(f"research_first _persist_claims: fail-open exc={exc!r}")
+
+
+def _next_evidence_idx(evidence_dir: Path) -> int:
+    """Highest existing source-NNN index (0 if none), so recovery fetches append
+    without overwriting _research's evidence files. Fail-open to 0."""
+    try:
+        return max(
+            (int(p.stem.split("-")[1]) for p in evidence_dir.glob("source-*.md")),
+            default=0,
+        )
+    except (ValueError, OSError) as exc:
+        dbg(f"research_first _next_evidence_idx: fail-open exc={exc!r}")
+        return 0
+
+
+def _recover_claims(
+    query: str,
+    loop_subject: str | None,
+    subjects: list[str],
+    all_anchors: dict[str, list[str]],
+    evidence_dir: Path,
+    idx: int,
+    requirement: str,
+    client: Any,
+    judge_client: Any,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Fetch for *query*, extract claims, and ground the subject tags in real
+    co-occurrence — never fabricated. Per-subject recovery (*loop_subject* set)
+    forwards it so every claim clamps to that one vetted subject. Joint recovery
+    (*loop_subject* None) keeps a page only if it literally names >=2 subjects and
+    tags its claims with exactly the *present* subjects, mirroring the union-anchor
+    gate ``_research``'s joint loop applies — so a single-subject page can never
+    mint a joint claim. Returns ``(idx, rows)``."""
+    from studio.textutil import content_word_stems
+
+    req_words = content_word_stems(_base_task_text(requirement))
+    rows: list[dict[str, Any]] = []
+    for r in _search(query)[:_MAX_SOURCES_PER_JOINT_QUERY]:
+        url = str(getattr(r, "url", "") or "").strip()
+        if not url:
+            continue
+        idx += 1
+        content = _fetch_and_store(url, evidence_dir, idx)
+        if not content:
+            continue
+        if _is_offtopic(url, req_words, requirement, judge_client):
+            _discard_evidence_file(evidence_dir, idx)
+            continue
+        page_subjects = _page_subjects(content, subjects, all_anchors)
+        if loop_subject is None:
+            if len(page_subjects) < 2:
+                # Joint recovery, but <2 subjects are anchor-confirmed on the page —
+                # it cannot ground a joint claim; drop it to prevent a fabricated tag.
+                dbg(f"research_first COVERAGE-GATE: joint recovery drop page_subjects={page_subjects!r} url={url!r}")
+                _discard_evidence_file(evidence_dir, idx)
+                continue
+            tag_subjects = page_subjects
+        elif not _subject_present(loop_subject, all_anchors.get(loop_subject) or [loop_subject], content):
+            # Per-subject recovery, but the page doesn't ANCHOR-CONFIRM the thin
+            # subject (bare-name presence isn't enough — an ambiguous same-token
+            # collision like "Inflection Pi" would otherwise pass, then _tag_claim
+            # could pair it with an anchor-confirmed other subject into a fabricated
+            # joint claim). Same identity rule as the main path.
+            dbg(f"research_first COVERAGE-GATE: per-subject recovery drop subject={loop_subject!r} url={url!r}")
+            _discard_evidence_file(evidence_dir, idx)
+            continue
+        else:
+            # Page was fetched for (and names) loop_subject; include it plus any
+            # OTHER anchor-confirmed subject so a genuine joint recovery still counts.
+            tag_subjects = list(dict.fromkeys([loop_subject, *page_subjects]))
+        for c in _extract_claims_from_source(
+            url, content, subjects, client, loop_subject=loop_subject, all_anchors=all_anchors
+        ):
+            tags = _tag_claim(c["claim"], c["quote"], loop_subject, tag_subjects, all_anchors)
+            if not tags:
+                continue
+            c["subjects"] = tags
+            rows.append(c)
+    return idx, rows
+
+
+def _coverage_gate(
+    claims: list[dict[str, Any]],
+    subjects: list[str],
+    relationship: "Relationship",
+    all_anchors: dict[str, list[str]],
+    evidence_dir: Path,
+    requirement: str,
+    client: Any,
+    judge_client: Any,
+    ws_dir: Path,
+    *,
+    emit: EmitFn = None,
+) -> list[dict[str, Any]]:
+    """Fail-visible floor between CLAIMS and WRITE: if any subject is thin or a
+    needed joint claim is missing, fire ONE grounded recovery fetch and re-persist
+    the augmented set. Never fabricates tags (recovery grounds them in real
+    co-occurrence) and never drops a diagram — downstream keeps its no-fabricate
+    self-refusal. Fail-open: any error returns *claims* unchanged."""
+    emit = emit or (lambda *_a: None)
+    try:
+        multi = len(subjects) >= 2
+        # Joint recovery fires only for integration-shaped relationships. These are
+        # the classifier's own kind enum (R3 taxonomy), NOT domain/task literals: a
+        # competes/alternative task wants a comparison table, not a joint claim, so
+        # forcing one there would itself fabricate. Mirrors `wants_integration`.
+        needs_joint = multi and relationship.kind in _INTEGRATION_KINDS
+
+        def _subj_n(s: str) -> int:
+            return sum(1 for c in claims if s in (c.get("subjects") or []))
+
+        def _joint_n(cl: list[dict[str, Any]]) -> int:
+            return sum(1 for c in cl if len(c.get("subjects") or []) >= 2)
+
+        thin = [s for s in subjects if _subj_n(s) < _MIN_CLAIMS_PER_SUBJECT]
+        joint_missing = needs_joint and _joint_n(claims) < 1
+        if not thin and not joint_missing:
+            return claims
+
+        dbg(f"research_first COVERAGE-GATE: thin={thin!r} joint_missing={joint_missing}")
+        emit("coverage_recovery", {"thin": thin, "joint_missing": joint_missing})
+        idx = _next_evidence_idx(evidence_dir)
+        terms = " ".join((relationship.mechanism_terms or [])[:3])
+
+        recovered: list[dict[str, Any]] = []
+        for s in thin:
+            idx, rows = _recover_claims(
+                f"{s} {terms}".strip() or s, s, subjects, all_anchors,
+                evidence_dir, idx, requirement, client, judge_client,
+            )
+            recovered.extend(rows)
+        if joint_missing:
+            a, b = subjects[0], subjects[1]
+            # Search TERMS, not the prose mechanism sentence (100+ chars matches no
+            # real page — same fix the RESEARCH joint loop applies).
+            mech = terms or relationship.mechanism
+            idx, rows = _recover_claims(
+                f"{a} {b} {mech}".strip(), None, subjects, all_anchors,
+                evidence_dir, idx, requirement, client, judge_client,
+            )
+            recovered.extend(rows)
+
+        merged = claims + recovered
+        _persist_claims(merged, ws_dir)
+
+        still_thin = [s for s in subjects if sum(1 for c in merged if s in (c.get("subjects") or [])) < _MIN_CLAIMS_PER_SUBJECT]
+        still_joint_missing = needs_joint and _joint_n(merged) < 1
+        if still_thin or still_joint_missing:
+            dbg(f"research_first COVERAGE-GATE: failed_partial still_thin={still_thin!r} still_joint_missing={still_joint_missing}")
+            emit("coverage_failed_partial", {"still_thin": still_thin, "still_joint_missing": still_joint_missing})
+        return merged
+    except Exception as exc:  # noqa: BLE001 — the gate must never crash the run
+        dbg(f"research_first COVERAGE-GATE: fail-open exc={exc!r}")
+        try:
+            # Fail-open, but still fail-VISIBLE: signal the gate failure so a caller
+            # isn't left assuming coverage was met.
+            (emit or (lambda *_a: None))("coverage_failed_partial", {"error": repr(exc)})
+        except Exception:  # noqa: BLE001 — a failing emitter must not crash the gate
+            pass
+        return claims
 
 
 def _claims_for_section(claims: list[dict[str, Any]], section: str) -> list[dict[str, Any]]:
@@ -1403,7 +1870,11 @@ def _subject_feature_labels(
         if not (3 <= len(label) <= 48):
             return
         low = label.lower()
-        if low in subject_names or any(name in low for name in subject_names) or low in labels:
+        # Reject a node that just restates the subject ("Pi") — but NOT a real
+        # sub-component that merely contains the subject token ("pi-ai",
+        # "pi-agent-core"): those are distinct architectural parts, and dropping
+        # them for a substring match is what forced the prose-glue fallback.
+        if low in subject_names or low in labels:
             return
         if not _component_label_tokens(label):
             return
@@ -1417,12 +1888,21 @@ def _subject_feature_labels(
         claim = re.sub(r"https?://\S+", "", str(c.get("claim") or ""))
         for token in re.findall(r"`([^`]{3,48})`", claim):
             add(token)
-        for phrase in re.findall(r"\b[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*){0,3}\b", claim):
+        # Multi-word proper names ("Claude Agent SDK") or standalone all-caps
+        # acronyms ("API", "MCP", "SDK") — but NOT a single Title-case word
+        # ("Designed", "Harness"), which is sentence glue, not a component.
+        for phrase in re.findall(
+            r"\b[A-Z][A-Za-z0-9_-]*(?:\s+[A-Z][A-Za-z0-9_-]*)+\b|\b[A-Z]{2,6}\b", claim
+        ):
             add(phrase)
-        for word in _ANCHOR_TOKEN_RE.findall(claim.lower()):
-            if word in subject_tokens or word in _FEATURE_STOPWORDS or len(word) < 4:
+        # Identifier-shaped tokens (hyphenated/dotted package names like pi-ai /
+        # pi-agent-core, or CamelCase types like AgentContext) — NOT bare prose
+        # words ("designed", "harness"), which are sentence glue. Shape-based and
+        # generic: no task vocabulary, mirrors how a researcher reads package names.
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9]*(?:[-.][A-Za-z0-9]+)+|[A-Z][a-z]+(?:[A-Z][a-z0-9]+)+", claim):
+            if token.lower() in subject_tokens or len(token) < 4:
                 continue
-            add(word.replace("-", " ").title())
+            add(token)
         if len(labels) >= limit:
             break
     return labels[:limit]
@@ -1802,7 +2282,7 @@ def generate_research_first(
 
     # 2. RESEARCH
     emit("research", {"subjects": subjects})
-    ledger, assumptions, relationship = _research(
+    ledger, assumptions, relationship, all_anchors = _research(
         subjects, evidence_dir, requirement, judge_client, emit=emit
     )
     # GENERIC RULE (user): subjects[] and the classified relationship are outputs
@@ -1812,8 +2292,12 @@ def generate_research_first(
     sections = _ensure_relationship_section(sections, subjects, relationship)
 
     # 3. CLAIMS
-    claims = _build_claims(ledger, subjects, client, ws_dir)
+    claims = _build_claims(ledger, subjects, client, ws_dir, all_anchors)
     emit("claims", {"sources": sum(len(v) for v in ledger.values()), "claims": len(claims)})
+    claims = _coverage_gate(
+        claims, subjects, relationship, all_anchors, evidence_dir, requirement,
+        client, judge_client, ws_dir, emit=emit,
+    )
 
     # 4. WRITE
     emit("write", {"sections": [s for s in sections if s.lower() not in _SKIP_WRITE]})
@@ -1823,7 +2307,7 @@ def generate_research_first(
     # table (no integration artifact); independent no cross-subject artifact at
     # all. Per-subject diagrams ship for every kind.
     multi = len(subjects) >= 2
-    wants_integration = multi and relationship.kind in ("cooperates", "extends", "unknown")
+    wants_integration = multi and relationship.kind in _INTEGRATION_KINDS
     wants_comparison = multi and relationship.kind in ("competes", "alternative")
     # The integration diagram lands in the dedicated relationship section; N=1
     # (and non-integration kinds) get per-subject diagrams only, placed below.

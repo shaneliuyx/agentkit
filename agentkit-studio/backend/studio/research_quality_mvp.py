@@ -109,7 +109,10 @@ def _summary_mechanism_words(artifact: str, subjects: list[str]) -> set[str]:
     words: set[str] = set()
     for sentence in re.split(r"(?<=[.!?])\s+", body):
         low = sentence.casefold()
-        if sum(1 for subject in subject_keys if subject in low) < 2:
+        # Whole-word subject match, not substring: 'pi' is a substring of 'apis',
+        # which wrongly counted a single-subject sentence as a 2-subject
+        # relationship sentence and harvested its words as ungrounded mechanism.
+        if sum(1 for subject in subject_keys if re.search(r"\b" + re.escape(subject) + r"\b", low)) < 2:
             continue
         words.update(
             word

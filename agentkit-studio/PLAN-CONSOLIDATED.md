@@ -208,6 +208,34 @@ Effort: S ≤ ½ day · M ≈ 1–2 days · L ≈ 3–5 days. Every landed item 
   not silently drop the integration diagram). Word-count depth (old 1.1) is deprioritised — 1546
   words already clears the bar.
 
+### Part 1.4-GS — Gold-standard gap analysis (2026-07-09)
+
+Method (user-directed, AI-leveraged): a human researcher (Claude) did the SAME task by hand, wrote a
+reference report (`scratchpad/gold_report_pi_craft.md`), and gap-analysed studio's run `s_7c3236cf4ad0`
+against it. Target: **studio produces reports of similar quality to the hand-researched gold standard.**
+This is the eval that drives quality parity — re-run it whenever the pipeline changes.
+
+Gaps found (studio vs gold), each mapped to a work item and status:
+
+| # | Gap | Evidence (studio run) | Fix / plan item | Status |
+|---|-----|-----------------------|-----------------|--------|
+| G1 | **Joint grounding** — no integration diagram; relationship section ungrounded | joint=0; only 2 subject diagrams | Anchor-confirmed page identity + within-page collision guard (`_subject_present`/`_page_subjects`/`_tag_claim`/`_mentions_subject`) + targeted relationship extraction (`_extract_relationship_claim`) | **◐ anti-fabrication DONE, real-integration OPEN.** 4 live iterations closed 4 fabrication paths (primary/recovery/targeted/same-page-collision); `inflection`=0, no false integration diagram. But real Pi↔Craft joint STILL 0 — see G1-deep. |
+| G1-deep | **Was mis-diagnosed as reader-model recall — VERIFIED (script, not inference) to be CONTENT-WINDOWING + FETCH QUALITY.** `verify_extraction.py` ran the pipeline's own extraction on the real source-007 (121,671 chars) with gemma AND haiku: the old `content[:8000]` window was pure GitHub nav chrome (chars 0–8k); the architecture sentence "uses the Pi SDK side by side" is at char 93,139. gemma extracted "6.5k stars" — because that chrome was all it saw. **haiku extracted the same chrome → reader model is NOT the constraint.** | `verify_extraction.py` on `s_fa2816b1e000/source-007` | **PARTIALLY DONE:** `_extraction_window` (relevance-scored paragraph selection over the WHOLE file, honouring the "moving window / never head-truncate" principle) replaces the blind head cut. Post-fix, gemma + haiku both now extract a REAL `['Craft','Pi']` joint claim (no Inflection). Live run would ground a real integration diagram. | ◐ window fix DONE |
+| G1-fetch | **Root cause was head-truncation of a long page (not fetch quality per se).** `_CLAIM_SOURCE_CHARS=8000` on a 121k-char rendered page = extraction saw only nav chrome; the architecture sentence is at char ~93k (para 39 of 229). | `verify_extraction.py` + para-index diagnostic | **✅ DONE — READ THE FULL FILE (user directive).** `_extraction_window` (relevance select) → then `_content_windows` **moving window** over the WHOLE boilerplate-stripped file (overlapping, bounded, dbg-logged cap). Live proof run `s_dec853a62198`: **joint 7 (was 0), 3 diagrams incl. a real integration diagram**, authoritative claim landed: *"utilizes both the Claude Agent SDK and the Pi SDK simultaneously."* + `_strip_boilerplate` drops nav chrome generically. | ✅ DONE + live-verified |
+| G1-noise | **Residual collision when the LLM paraphrases the qualifier away.** Moving-window now reads provider-list sections too; the LLM rephrases "Inflection Pi" → bare "Pi is one of the compatible models", so `_mentions_subject` (which keys on the compound proper noun) can't catch it → a few noisy joint claims + `inflection`=5 in the artifact. | run `s_dec853a62198`: 7 joint incl. "Pi is one of the many compatible models…" | **NEW — semantic guard**: the collision guard is lexical (compound-noun); a paraphrase defeats it. Options: (a) judge-verify each JOINT claim ("does this assert a real A–B relationship, or a coincidental co-mention?") on the strong reader; (b) drop joint claims whose quote's subject token is a compound-proper-noun even if the claim paraphrases it (check the QUOTE, which is verbatim, not just the claim). | ⬜ TODO |
+| G-pdf | **PDF sources were unreadable** — `web_fetch` returns binary garbage for a PDF; no PDF lib installed → a PDF source produced no usable text. | user-flagged; confirmed no PDF path in `tools.py`/`web_toolkit` | **✅ DONE — `_fetch_pdf_text`** (pypdf) in `studio/tools.py::_fetch_page`: `.pdf` suffix OR arXiv `/pdf/<id>` path → download (25 MB cap), verify `%PDF` magic, join per-page text; falls through to HTML if not actually a PDF; fail-open on any error. Then the moving window reads it like a README. Verified live on a real arXiv PDF (39,625 chars) + 4 unit tests. | ✅ DONE + verified |
+| G2 | **Diagram labels are prose glue** | `Pi→Designed/Harness/Users/Adapt` | Identifier-shaped component harvest (hyphenated/dotted/CamelCase + all-caps acronyms), drop bare prose words; stop rejecting real sub-components that contain the subject token (`pi-ai`) | ✅ DONE 2026-07-09 (`_subject_feature_labels`) |
+| G3 | **Source authority** — cites an aggregator (`hotools.com`) + the WRONG product (`www.craft.do` doc editor, not the agent app); misses every primary repo/README/PR | 7 refs, ~3 low-value/wrong | **NEW — source-selection authority pass**: prefer official repos/READMEs/vendor docs; de-rank aggregators + same-name-wrong-product; ground selection in disambiguation anchors | ⬜ TODO |
+| G4 | **Citation stuffing** — same URL repeated after every sentence | `pi.dev/docs/latest` ×N | **NEW — citation diversity/dedup**: distinct source per claim; cap repeats of one URL | ⬜ TODO |
+| G5 | **Architectural depth** — generic prose, no package/layer structure | "minimal harness, extensible" vs gold's pi-ai→pi-agent-core→pi-coding-agent table | Ties to known **shallowness root cause** (findings.py one-sentence contract); component/layer extraction from claims | ◐ partial (G2 helps; depth ceiling still open) |
+| G6 | **Heading leak** — content bullets promoted to H2, breaks ToC | 5 leaked H2s ("Initialize the open-source interface…") | **Phase 2.1 AST swallowed-content lint** (markdown-it-py) | ⬜ TODO (already scheduled) |
+| G7 | **Example code is generic**, not grounded in the real API surface | 2 generic blocks vs gold's real `Agent` hooks/SDK/RPC | **Phase 3 writer** — code grounded in fetched SDK docs, not invented | ⬜ TODO |
+
+**⇒ Phase 1.5 (new, after acceptance closes): quality-parity pass** — G3 (source authority) + G4
+(citation diversity) are the highest-leverage un-done gaps (they cap *credibility*, which the scorer's
+source-quality + citation-integrity rows measure directly). Do them right after Phase 1's live-verify.
+G5/G7 fold into the existing shallowness/writer tracks; G6 into Phase 2.1.
+
 **Phase 1 — Close acceptance (visible outcome). [M–L] — THE priority.**
 Scope set by the Phase-0 readout: the deterministic failure is `c` (integration diagram absent)
 caused by **0 joint claims + Pi under-coverage (2 vs 12)**. Attack coverage, not word-depth.
