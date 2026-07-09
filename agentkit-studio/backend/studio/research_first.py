@@ -2127,7 +2127,11 @@ def _splice_relationship_table(
     and cap heads/targets/rows so the strongest architecture story leads instead of an
     alphabetical grab-bag. De-dups by (source, target); fail-opens to unchanged text
     (no grounded fan-out, or a splice that would introduce a new lint issue)."""
-    by_head: dict[str, list[tuple[str, str]]] = {}  # source -> [(relation, target)]
+    # Bucket on a CASEFOLDED source key (keeping the first-seen display casing) so a
+    # source spelled two ways across claim blocks ("Pi"/"pi") is ONE fan-out, not two
+    # fragmented buckets that mis-trip the >=2 gate — reviewer MEDIUM. `seen` dedups on
+    # the same lowered key, so both stay consistent.
+    by_head: dict[str, tuple[str, list[tuple[str, str]]]] = {}  # keyfold -> (display, [(rel,tail)])
     seen: set[tuple[str, str]] = set()
     for c in claims:
         for r in (c.get("relations") or []):
@@ -2136,15 +2140,16 @@ def _splice_relationship_table(
                 continue
             if not _head_is_subject_grounded(head, subjects, all_anchors):
                 continue
-            key = (head.lower(), tail.lower())
+            key = (head.casefold(), tail.casefold())
             if key in seen:
                 continue
             seen.add(key)
-            by_head.setdefault(head, []).append((rel, tail))
-    fanned = {h: rt for h, rt in by_head.items() if len(rt) >= 2}
+            _display, rts = by_head.setdefault(head.casefold(), (head, []))
+            rts.append((rel, tail))
+    fanned = {hk: v for hk, v in by_head.items() if len(v[1]) >= 2}
     if not fanned:
         return text  # no grounded fan-out — not table-worthy
-    ranked = sorted(fanned.items(), key=lambda kv: (-len(kv[1]), kv[0].lower()))
+    ranked = sorted(fanned.values(), key=lambda v: (-len(v[1]), v[0].lower()))
     lines = ["| Source | Relationship | Target |", "| --- | --- | --- |"]
     rows = 0
     for head, rt in ranked[:_MAX_RELATION_HEADS]:

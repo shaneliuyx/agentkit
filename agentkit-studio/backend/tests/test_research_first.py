@@ -1853,6 +1853,23 @@ def test_splice_relationship_table_tabulates_subject_grounded_fanout() -> None:
     assert "extensions" not in out            # ungrounded source dropped
 
 
+def test_splice_relationship_table_merges_case_variant_source() -> None:
+    # Reviewer MEDIUM: a source spelled two ways across claims ("Pi SDK"/"pi sdk") must
+    # be ONE fan-out bucket, not two fragmented buckets that mis-trip the >=2 gate.
+    # Here each casing contributes ONE target; merged they form a 2-target fan-out and
+    # the table renders one source (first-seen display casing).
+    subjects = ["Pi"]
+    anchors = {"Pi": ["pi-ai", "pi-coding-agent"]}
+    claims = [
+        {"claim": "a", "relations": [{"head": "Pi SDK", "rel": "uses", "tail": "pi-ai"}]},
+        {"claim": "b", "relations": [{"head": "pi sdk", "rel": "uses", "tail": "pi-coding-agent"}]},
+    ]
+    out = rf._splice_relationship_table("Body.", subjects, anchors, claims)
+    assert "| Source | Relationship | Target |" in out          # merged bucket -> fan-out fires
+    assert out.count("| Pi SDK |") == 2                          # both targets under first-seen casing
+    assert "| pi sdk |" not in out                              # no fragmented second bucket
+
+
 def test_splice_relationship_table_fail_open_without_grounded_fanout() -> None:
     subjects = ["Pi", "Craft"]
     anchors = {"Pi": ["pi-ai"], "Craft": []}
