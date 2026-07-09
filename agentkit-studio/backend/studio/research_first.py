@@ -2214,6 +2214,37 @@ def _find_duplicate_headings(text: str) -> list[str]:
     return [h for h, n in counts.items() if n > 1]
 
 
+#: An H1 line (``# Heading``) — exactly one ``#`` then whitespace (``## `` never matches).
+_H1_LINE_RE = re.compile(r"^#[^\S\n]+(.*)$")
+
+
+def _demote_stray_h1(text: str) -> str:
+    """ToC guarantee (G6): a document has exactly ONE H1 — its title. Keep the first
+    H1 (the title) and demote every LATER ``# `` line to ``### `` (a leaked body
+    heading the writer promoted to title level breaks the ToC). Fence-aware, so a
+    ``#`` comment inside a code block is never touched. Artifact-wide backstop to the
+    per-section ``_sanitize_section_headings`` — it also covers headings introduced
+    AFTER section writing (splices/edits), which the per-section pass cannot see."""
+    seen_title = False
+    out: list[str] = []
+    for i, seg in enumerate(_FENCE_SPLIT_RE.split(text)):
+        if i % 2:  # a ```...``` fence — leave verbatim (code comments, mermaid)
+            out.append(seg)
+            continue
+        lines: list[str] = []
+        for ln in seg.split("\n"):
+            m = _H1_LINE_RE.match(ln)
+            if not m:
+                lines.append(ln)
+            elif not seen_title:
+                seen_title = True  # the first H1 is the legitimate title
+                lines.append(ln)
+            else:
+                lines.append(f"### {m.group(1)}")  # a later H1 is a leak → demote
+        out.append("\n".join(lines))
+    return "".join(out)
+
+
 #: Trailing site-brand tails a fetched ``<title>`` carries ("... · GitHub",
 #: "... | DeepWiki", "... - GitHub") — noise once the URL already names the host.
 #: Structural (separator + short brand token), not a per-site allowlist, so it
@@ -2300,10 +2331,12 @@ def _citation_index(claims: list[dict[str, Any]]) -> dict[str, int]:
 
 
 #: Inline-citation forms the writer emits (it is told to cite a claim's URL inline,
-#: copied verbatim): a markdown link, a parenthesised URL, or a bare URL.
+#: copied verbatim): a markdown link, a parenthesised URL, or a bare URL. The paren
+#: and bare forms eat a leading horizontal space so a STRIP (non-claim URL) leaves no
+#: orphan space; a claim URL re-adds one before its marker.
 _CIT_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
-_CIT_PAREN_URL_RE = re.compile(r"\(\s*(https?://[^)\s]+?)\s*\)")
-_CIT_BARE_URL_RE = re.compile(r"https?://[^\s)\]]+")
+_CIT_PAREN_URL_RE = re.compile(r"[^\S\n]*\(\s*(https?://[^)\s]+?)\s*\)")
+_CIT_BARE_URL_RE = re.compile(r"[^\S\n]*(https?://[^\s)\]]+)")
 #: Trailing punctuation to strip before an index lookup (and preserve after the marker).
 _CIT_TRAILING = ".,;:!?)]}\"'"
 
@@ -2313,26 +2346,31 @@ def _cit_lookup(url: str, index: dict[str, int]) -> int | None:
 
 
 def _mark_citation_segment(seg: str, index: dict[str, int]) -> str:
-    """Replace every inline URL in a NON-fenced prose segment with its ``[N]`` marker."""
+    """Render inline URLs in a NON-fenced prose segment. A claim URL becomes its ``[N]``
+    marker; a URL that is NOT an exact claim URL is a fabricated citation (the writer
+    hallucinated a plausible same-domain path domain-grounding can't catch, e.g.
+    ``pi.dev/packages/pi-agent-workflows`` when only ``…/pi-agents`` was fetched) — it is
+    STRIPPED, never mapped to a guessed marker and never left dangling. The sentence
+    prose stays (it is domain-grounded); only the bad URL token goes."""
     def _md(mo: "re.Match[str]") -> str:
         n = _cit_lookup(mo.group(2), index)
-        return f"{mo.group(1)} [{n}]" if n else mo.group(0)
+        return f"{mo.group(1)} [{n}]" if n else mo.group(1)  # non-claim → keep label, drop link
 
     def _paren(mo: "re.Match[str]") -> str:
         n = _cit_lookup(mo.group(1), index)
-        return f"[{n}]" if n else mo.group(0)
+        return f" [{n}]" if n else ""  # non-claim → strip the whole "(url)" incl. its leading space
 
     def _bare(mo: "re.Match[str]") -> str:
-        url = mo.group(0)
+        url = mo.group(1)
         n = _cit_lookup(url, index)
-        if not n:
-            return url
-        trail = url[len(url.rstrip(_CIT_TRAILING)):]  # keep sentence punctuation
-        return f"[{n}]{trail}"
+        trail = url[len(url.rstrip(_CIT_TRAILING)):]  # sentence punctuation attached to the URL
+        return f" [{n}]{trail}" if n else trail  # non-claim → keep only the trailing punctuation
 
-    seg = _CIT_MD_LINK_RE.sub(_md, seg)   # [label](url) -> label [N]   (before bare)
-    seg = _CIT_PAREN_URL_RE.sub(_paren, seg)  # (url) -> [N]
-    seg = _CIT_BARE_URL_RE.sub(_bare, seg)    # url -> [N]
+    seg = _CIT_MD_LINK_RE.sub(_md, seg)   # [label](url) -> "label [N]" | "label"
+    seg = _CIT_PAREN_URL_RE.sub(_paren, seg)  # (url) -> " [N]" | ""
+    seg = _CIT_BARE_URL_RE.sub(_bare, seg)    # url -> " [N]" | ""
+    seg = re.sub(r"[^\S\n]+([.,;:!?])", r"\1", seg)  # heal " ." left by a strip
+    seg = re.sub(r"[^\S\n]{2,}", " ", seg)           # collapse double spaces (not newlines)
     # Over-cite collapse (v1): adjacent duplicate markers "[3][3]" / "[3] [3]" -> "[3]".
     return re.sub(r"(\[\d+\])(?:\s*\1)+", r"\1", seg)
 
@@ -2536,6 +2574,8 @@ def generate_research_first(
     _dupes = _find_duplicate_headings(text)
     if _dupes:
         dbg(f"research_first ASSEMBLE: duplicate headings {_dupes!r} — construction guarantee violated")
+    # ToC guarantee (G6): exactly one H1 (the title); demote any leaked body H1 to H3.
+    text = _demote_stray_h1(text)
     if any(s.lower() == "references" for s in sections):
         text = _rebuild_references_from_claims(text, claims, _url_title_map(evidence_dir))
     text, _ = _repair_fence_contamination(text)

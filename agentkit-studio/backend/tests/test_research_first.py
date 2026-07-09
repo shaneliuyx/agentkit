@@ -1979,7 +1979,9 @@ def test_citation_markers_map_inline_urls_to_reference_numbers() -> None:
     assert "Pi ships a CLI [1]." in body            # (url) -> [N]
     assert "Craft uses the SDK [2]." in body         # [label](url) -> label [N]
     assert "See [1] too." in body                    # bare url -> [N]
-    assert "https://c.example/ stays raw" in body    # non-claim url untouched (no wrong marker)
+    # non-claim URL is a fabricated citation → STRIPPED (never a wrong marker), prose kept
+    assert "A non-claim url stays raw." in body
+    assert "c.example" not in body
     assert "# https://a.example/ inside a fence stays raw" in out  # fence untouched
     assert "1. [A](https://a.example/)" in out       # References section untouched
     # every [N] in body maps to a real reference (<= max ref)
@@ -1992,3 +1994,24 @@ def test_citation_markers_collapse_adjacent_duplicates() -> None:
     text = "## B\n\nX (https://a.example/) (https://a.example/).\n\n## References\n\n1. [A](https://a.example/)\n"
     out = rf._apply_citation_markers(text, claims)
     assert "X [1]." in out and "[1][1]" not in out and "[1] [1]" not in out
+
+
+def test_demote_stray_h1_keeps_title_demotes_leaks_skips_fences() -> None:
+    """Exactly one H1 (title) survives; a later body H1 (a leaked heading) demotes to
+    H3; a `#` comment inside a code fence is never touched; `##` sections stay."""
+    text = (
+        "# Report Title\n\n## Section A\n\nBody.\n\n"
+        "# To run the project\n\nSteps.\n\n"          # leaked body H1 -> ###
+        "## Section B\n\n"                             # H2 section stays
+        "```python\n# this is a code comment\n```\n\n"  # fence H1 untouched
+        "# Minimal example\n\nCode below.\n"           # another leaked H1 -> ###
+    )
+    out = rf._demote_stray_h1(text)
+    # exactly one H1 OUTSIDE fences (the title); the fence's `# comment` is not an H1
+    non_fence = "".join(s for i, s in enumerate(rf._FENCE_SPLIT_RE.split(out)) if not i % 2)
+    assert len(re.findall(r"(?m)^#[^\S\n]+", non_fence)) == 1
+    assert "# Report Title" in out and out.index("# Report Title") == 0
+    assert "### To run the project" in out
+    assert "### Minimal example" in out
+    assert "## Section A" in out and "## Section B" in out  # sections untouched
+    assert "# this is a code comment" in out               # fence untouched
