@@ -2584,8 +2584,58 @@ def _find_duplicate_headings(text: str) -> list[str]:
     return [h for h, n in counts.items() if n > 1]
 
 
-def _rebuild_references_from_claims(text: str, claims: list[dict[str, Any]]) -> str:
-    """Replace the References section with the deduped set of claim URLs —
+#: Trailing site-brand tails a fetched ``<title>`` carries ("... · GitHub",
+#: "... | DeepWiki", "... - GitHub") — noise once the URL already names the host.
+#: Structural (separator + short brand token), not a per-site allowlist, so it
+#: generalises to any source without task/domain literals.
+_TITLE_TAIL_RE = re.compile(r"\s*[|·\-–—]\s*(?:GitHub|GitLab|DeepWiki|Wikipedia|npm|PyPI|Medium)\s*$", re.IGNORECASE)
+_MAX_TITLE_LEN = 110
+
+
+def _clean_source_title(raw: str) -> str:
+    """A fetched page ``<title>`` → a compact reference label: collapse whitespace,
+    strip a trailing site-brand tail, cap length. Generic — no per-source rules."""
+    title = re.sub(r"\s+", " ", raw).strip()
+    prev = None
+    while prev != title:  # a title can carry two brand tails ("... | X · GitHub")
+        prev = title
+        title = _TITLE_TAIL_RE.sub("", title).strip()
+    if len(title) > _MAX_TITLE_LEN:
+        title = title[: _MAX_TITLE_LEN - 1].rstrip() + "…"
+    return title
+
+
+def _url_title_map(evidence_dir: Path | None) -> dict[str, str]:
+    """``{url: page-title}`` harvested from the fetched evidence files. Each
+    ``source-*.md`` starts with ``URL: <url>`` (line 1) then the page ``<title>``
+    (line 3) — the fetch layer's fixed header. Fail-open to ``{}`` (bare-URL
+    references) when the dir is absent/unreadable or a file lacks the header."""
+    titles: dict[str, str] = {}
+    if not evidence_dir or not evidence_dir.exists():
+        return titles
+    for path in sorted(evidence_dir.glob("source-*.md")):
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace").splitlines()[:3]
+        except OSError:
+            continue
+        if not head or not head[0].startswith("URL: "):
+            continue
+        url = head[0][len("URL: "):].strip()
+        title = _clean_source_title(head[2]) if len(head) >= 3 else ""
+        if url and title:
+            titles[url] = title
+    return titles
+
+
+def _rebuild_references_from_claims(
+    text: str, claims: list[dict[str, Any]], titles: dict[str, str] | None = None
+) -> str:
+    """Replace the References section with the deduped set of claim URLs, rendered
+    as a NUMBERED, TITLED list (``1. [<page title>](<url>)``) so a reader can tell
+    what each source is — and so the number is a stable citation anchor. The title
+    comes from the fetched-evidence header map (``titles``); a URL with no known
+    title falls back to a bare-URL bullet, never an invented title.
+
     claims.jsonl is the ground truth of what was actually cited, so building
     References from it (instead of re-harvesting the rendered body text, as
     ``rebuild_references_section`` does for the old pipeline) means a link
@@ -2597,10 +2647,15 @@ def _rebuild_references_from_claims(text: str, claims: list[dict[str, Any]]) -> 
     m = _REFERENCES_HEADING_RE.search(text)
     if not m or not claims:
         return text
+    titles = titles or {}
     nxt = re.compile(r"(?m)^##\s").search(text, m.end())
     refs_end = nxt.start() if nxt else len(text)
     urls = list(dict.fromkeys(c["url"] for c in claims if c.get("url")))
-    entries = "\n".join(f"- {u}" for u in urls)
+    lines = []
+    for i, u in enumerate(urls, 1):
+        title = titles.get(u)
+        lines.append(f"{i}. [{title}]({u})" if title else f"{i}. {u}")
+    entries = "\n".join(lines)
     rebuilt = f"{m.group(0)}\n\n{entries}\n"
     tail = text[refs_end:]
     return text[: m.start()] + rebuilt + ("\n" + tail.lstrip("\n") if tail.strip() else "")
@@ -2785,7 +2840,7 @@ def generate_research_first(
     if _dupes:
         dbg(f"research_first ASSEMBLE: duplicate headings {_dupes!r} — construction guarantee violated")
     if any(s.lower() == "references" for s in sections):
-        text = _rebuild_references_from_claims(text, claims)
+        text = _rebuild_references_from_claims(text, claims, _url_title_map(evidence_dir))
     text, _ = _repair_fence_contamination(text)
     text, _ = _repair_doubled_citations(text)
     # SCOPE NOTE 1 (team-lead): the URL⊆claims invariant applied per-section

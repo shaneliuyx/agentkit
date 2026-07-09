@@ -19,6 +19,19 @@ def _client(text: str) -> SimpleNamespace:
     return SimpleNamespace(chat=lambda messages, tools=None: SimpleNamespace(text=text))
 
 
+def _ref_urls(refs_block: str) -> set[str]:
+    """URLs from a rendered References block, format-agnostic: handles both the
+    numbered-titled ``N. [title](url)`` and bare ``N. url`` / ``- url`` shapes."""
+    urls: set[str] = set()
+    for ln in refs_block.strip().splitlines():
+        if not ln.strip():
+            continue
+        m = re.search(r"\((https?://[^)]+)\)", ln) or re.search(r"(https?://\S+)", ln)
+        if m:
+            urls.add(m.group(1))
+    return urls
+
+
 def _rel(
     kind: str = "cooperates",
     descriptor: str = "Integration",
@@ -1473,7 +1486,7 @@ def test_rebuild_references_from_claims_ignores_body_scraped_links() -> None:
     assert "wikimedia.org" not in refs
     assert "wikipedia.org" not in refs
     assert "placeholder" not in refs
-    entries = {ln.removeprefix("- ") for ln in refs.strip().splitlines()}
+    entries = _ref_urls(refs)
     assert entries == {"https://pi.dev/", "https://agents.craft.do/"}
 
 
@@ -1507,7 +1520,7 @@ def test_references_url_set_never_exceeds_claims() -> None:
     )
     out = rf._rebuild_references_from_claims(text, claims)
     refs = out.rsplit("## References", 1)[1]
-    ref_urls = {ln.removeprefix("- ").strip() for ln in refs.strip().splitlines() if ln.strip()}
+    ref_urls = _ref_urls(refs)
     assert ref_urls == {c["url"] for c in claims}
 
 
@@ -1913,3 +1926,32 @@ def test_base_client_unwraps_tool_augmented_for_deterministic_renders() -> None:
     assert base_client(inner) is inner
     # double-wrap unwinds fully
     assert base_client(ToolAugmentedClient(wrapped, search_fn=lambda *a, **k: [])) is inner
+
+
+def test_references_are_numbered_titled_entries() -> None:
+    """References render as a NUMBERED, TITLED list from the fetched-evidence title
+    map; a URL with no known title falls back to a bare-URL bullet (never invented)."""
+    titles = {  # clean titles (as _url_title_map already produced them)
+        "https://github.com/earendil-works/pi": "GitHub - earendil-works/pi: agent toolkit",
+        "https://pi.dev/": "Pi Coding Agent",
+    }
+    claims = [
+        {"claim": "a", "quote": "q", "url": "https://github.com/earendil-works/pi", "subjects": ["Pi"]},
+        {"claim": "b", "quote": "q", "url": "https://pi.dev/", "subjects": ["Pi"]},
+        {"claim": "c", "quote": "q", "url": "https://untitled.example/x", "subjects": ["Pi"]},
+        {"claim": "d", "quote": "q", "url": "https://github.com/earendil-works/pi", "subjects": ["Pi"]},  # dup URL
+    ]
+    out = rf._rebuild_references_from_claims("## References\n\n- old\n", claims, titles)
+    # numbered, titled, brand-tail stripped, deduped, bare fallback for the untitled URL
+    assert "1. [GitHub - earendil-works/pi: agent toolkit](https://github.com/earendil-works/pi)" in out
+    assert "2. [Pi Coding Agent](https://pi.dev/)" in out
+    assert "3. https://untitled.example/x" in out  # no title → bare, not invented
+    assert "4." not in out  # dup URL collapsed
+
+
+def test_clean_source_title_strips_brand_tails_and_caps_length() -> None:
+    assert rf._clean_source_title("pi-agent-core: Agent Framework | badlogic/pi-mono | DeepWiki") == \
+        "pi-agent-core: Agent Framework | badlogic/pi-mono"
+    assert rf._clean_source_title("Repo desc · GitHub") == "Repo desc"
+    assert rf._clean_source_title("  a   b\n c ") == "a b c"
+    assert rf._clean_source_title("x" * 200).endswith("…") and len(rf._clean_source_title("x" * 200)) <= rf._MAX_TITLE_LEN
