@@ -11,8 +11,9 @@
 **Date:** 2026-07-05
 **Trigger (user):** "we always patch original code — review the whole codebase, reduce
 hierarchy/layers, improve efficiency, do not downgrade original features."
-**Status:** PLANNED — audit done (evidence below); execution starts AFTER the attempt-4
-cold run records (refactoring during a measurement run muddies both).
+**Status:** (origin banner, 2026-07-05) PLANNED — audit done (evidence below); execution starts AFTER
+the attempt-4 cold run records. **SUPERSEDED 2026-07-09: the program executed through ACCEPTANCE**
+(research_first rebuild, deterministic 0.92–1.0); live axis status = Part 1.4-GS4.
 
 ### 0.2 Authority order
 
@@ -93,8 +94,9 @@ or memory files written before this restructure.
 | 6.5 | Unified execution order | ACTIVE tracker — slices 1–4 committed; current work = §14 slate (now Part 2.3) |
 | 3.1 | Execution log | living log — one row per committed fix with measured result |
 | 2.3 (slate) / 4.2–4.3 (narrative) | Attempt-8 results + attempt-9 slate | items 1–4 ✅ committed (item 1 = BOTH erasers: A `27beff6` synth fence guard, B `d4e84a9` duplicate-section birth fix + fold-merges; 925 passed) · items 5–8 queued behind §15 re-prioritization (now Part 2.1) |
-| 2.1 (body) / 1.3 (success check) | Outcome-first re-prioritization | ACTIVE — A+B bundle ✅ committed · attempt 10 ✅ MEASURED (v7 0.5923, erasers verified dead; gaps = coverage not erasure) · P1-core actor + depth relaxation + 8b next (or superseded by rebuild wire-in) · success check (Part 1.3) = attempt-11 artifact (≥1 Craft source, fuller sections, Pi+Craft diagram) |
-| 2.2 | Rebuild track: research_first.py | 🟢 attempt-11 rerun failure rediagnosed with proof: saved lineage artifacts reproduced marker leaks and filler diagram labels; marker publish gate + generic component-token filtering are implemented and internally reviewed (COMMENT/WATCH); next step is controlled acceptance rerun only after this slice is committed |
+| 2.1 (body) / 1.3 (success check) | Outcome-first re-prioritization | ✅ SUCCESS CHECK MET via the research_first rebuild (row 2.2): deterministic acceptance 0.92–1.0, Craft cited, fuller sections, grounded Pi+Craft integration diagram (`686d7b0`). The old hub/spoke P1-core/depth/8b items are moot (superseded by §16). Now closing GS4 gold-parity axes. |
+| 2.2 | Rebuild track: research_first.py | 🟢 ACCEPTANCE REACHED — live deterministic runs hold 0.92–1.0 (task_hash `492bae60177b`). Now closing the GS3 gold-parity axes one at a time (see Part 1.4-GS4): Code ✅ `0bf8c69` · Diagram edge ✅ `686d7b0` (live v80, `Craft→Pi "utilizes"`; RCA reversal = client-provenance, not wrong module) · References A (titled numbered) ◐ on disk, live-verify pending · References B (inline `[N]`) + Sections (heading leaks) + Detail ⬜ · diagram_render hygiene ⬜ starting |
+| 1.4-GS4 | Gold-parity axis tracker | ◐ ACTIVE — 5-axis status table (Detail/Sections/References/Diagrams + Code); acceptance = live-run artifact per axis, not score |
 | 1.2 (backlog) / 7.1–7.4 (matrix/negatives/disposition) | Master ledger (merged PLAN-CONSOLIDATED) | ✅ merged 2026-07-05 night — §17.3 (now Part 1.2) = THE unified backlog · matrix delta §17.1 (now Part 7.1) · +4 settled negatives (Part 7.3) · CONSOLIDATED now a stub |
 
 ### 1.2 Unified backlog
@@ -118,15 +120,13 @@ or memory files written before this restructure.
    (prior attempt under-delivered — REBUILD-LESSONS).
 4. **8b requirement-conditioned diagram** — build_components_prompt receives
    requirement branch + subject list (full value only after Craft content exists).
-5. **Rebuild track (§16)** — USER DECIDED: REPLACE hub/spoke. Wiring + R1/R2
-   rebuild fixes BUILT. Attempt-11 recovery now has proof-backed RCA for whole-task
-   subject extraction, source-selection boundary leakage, internal marker leaks,
-   and filler diagram labels. Current uncommitted slice promotes marker leakage
-   into publish readiness and tightens generic component-token filtering; internal
-   review final status COMMENT/WATCH after tests. Next: commit current slice, then
-   one controlled acceptance rerun.
-6. **Attempt 11 vs success check** — full Part 1.3 bar (a–e). Miss =
-   rediagnose, not re-patch.
+5. **Rebuild track (§16)** — ✅ ACCEPTED. USER DECIDED: REPLACE hub/spoke. The
+   attempt-11 recovery RCAs (whole-task subject extraction, source-selection leakage,
+   marker leaks, filler diagram labels) are all resolved; deterministic acceptance
+   reached (0.92–1.0). No rerun pending.
+6. **Success check (Part 1.3 a–e)** — ✅ MET live. Now closing GS4 gold-parity axes:
+   Code ✅ `0bf8c69` · Diagram edge ✅ `686d7b0` · References-A ✅ `030ffba` · remaining =
+   References-B inline `[N]` + G4 cap + G6 heading-leak + detail residue + diagram_render hygiene.
 
 **FROZEN until the report visibly changes** (internal-quality, from §14/§12):
 verdict memoization per text-hash · AST swallowed-content lint (markdown-it-py) ·
@@ -196,7 +196,7 @@ Effort: S ≤ ½ day · M ≈ 1–2 days · L ≈ 3–5 days. Every landed item 
   there is no run-to-run variance to average out; there is a fixed CEILING.
 - **Deterministic a–e result: 5/6 every run.** Pass 5/5: a (craft-agents-oss cited), b (1546 >
   1468 words), d (2 code blocks), e (relationship section "Integrated Agentic Workflow"),
-  fmt (References last, ⊆ claims). **Sole failure: c (three diagrams) — only 2 render.**
+  fmt (References last, ⊆ claims). **Sole failure: c (three diagrams) — only 2 render.** *(Superseded: 3 diagrams incl. a grounded integration diagram now render live; c passes.)*
 - **Root cause (claims.jsonl, run 1): research COVERAGE imbalance, not depth-of-prose or model.**
   14 claims total = **Pi 2 · Craft 12 · joint 0**. ZERO joint claims → the integration diagram
   cannot ground (correct no-fabricate) → that IS the entire `c` miss. Pi under-covered (2 vs 12)
@@ -219,22 +219,23 @@ Gaps found (studio vs gold), each mapped to a work item and status:
 
 | # | Gap | Evidence (studio run) | Fix / plan item | Status |
 |---|-----|-----------------------|-----------------|--------|
-| G1 | **Joint grounding** — no integration diagram; relationship section ungrounded | joint=0; only 2 subject diagrams | Anchor-confirmed page identity + within-page collision guard (`_subject_present`/`_page_subjects`/`_tag_claim`/`_mentions_subject`) + targeted relationship extraction (`_extract_relationship_claim`) | **◐ anti-fabrication DONE, real-integration OPEN.** 4 live iterations closed 4 fabrication paths (primary/recovery/targeted/same-page-collision); `inflection`=0, no false integration diagram. But real Pi↔Craft joint STILL 0 — see G1-deep. |
+| G1 | **Joint grounding** — no integration diagram; relationship section ungrounded | joint=0; only 2 subject diagrams | Anchor-confirmed page identity + within-page collision guard (`_subject_present`/`_page_subjects`/`_tag_claim`/`_mentions_subject`) + targeted relationship extraction (`_extract_relationship_claim`) | **◐ anti-fabrication DONE, real-integration OPEN.** 4 live iterations closed 4 fabrication paths (primary/recovery/targeted/same-page-collision); `inflection`=0, no false integration diagram. But real Pi↔Craft joint STILL 0 — see G1-deep. **✅ SUPERSEDED by G1-fetch (joint 7 live) + diagram fix `686d7b0`: real integration diagram now grounds `Craft→Pi "utilizes"`.** |
 | G1-deep | **Was mis-diagnosed as reader-model recall — VERIFIED (script, not inference) to be CONTENT-WINDOWING + FETCH QUALITY.** `verify_extraction.py` ran the pipeline's own extraction on the real source-007 (121,671 chars) with gemma AND haiku: the old `content[:8000]` window was pure GitHub nav chrome (chars 0–8k); the architecture sentence "uses the Pi SDK side by side" is at char 93,139. gemma extracted "6.5k stars" — because that chrome was all it saw. **haiku extracted the same chrome → reader model is NOT the constraint.** | `verify_extraction.py` on `s_fa2816b1e000/source-007` | **PARTIALLY DONE:** `_extraction_window` (relevance-scored paragraph selection over the WHOLE file, honouring the "moving window / never head-truncate" principle) replaces the blind head cut. Post-fix, gemma + haiku both now extract a REAL `['Craft','Pi']` joint claim (no Inflection). Live run would ground a real integration diagram. | ◐ window fix DONE |
 | G1-fetch | **Root cause was head-truncation of a long page (not fetch quality per se).** `_CLAIM_SOURCE_CHARS=8000` on a 121k-char rendered page = extraction saw only nav chrome; the architecture sentence is at char ~93k (para 39 of 229). | `verify_extraction.py` + para-index diagnostic | **✅ DONE — READ THE FULL FILE (user directive).** `_extraction_window` (relevance select) → then `_content_windows` **moving window** over the WHOLE boilerplate-stripped file (overlapping, bounded, dbg-logged cap). Live proof run `s_dec853a62198`: **joint 7 (was 0), 3 diagrams incl. a real integration diagram**, authoritative claim landed: *"utilizes both the Claude Agent SDK and the Pi SDK simultaneously."* + `_strip_boilerplate` drops nav chrome generically. | ✅ DONE + live-verified |
 | G1-noise | **Residual collision when the LLM paraphrases the qualifier away.** Moving-window now reads provider-list sections too; the LLM rephrases "Inflection Pi" → bare "Pi is one of the compatible models", so `_mentions_subject` (which keys on the compound proper noun) can't catch it → a few noisy joint claims + `inflection`=5 in the artifact. | run `s_dec853a62198`: 7 joint incl. "Pi is one of the many compatible models…" | **NEW — semantic guard**: the collision guard is lexical (compound-noun); a paraphrase defeats it. Options: (a) judge-verify each JOINT claim ("does this assert a real A–B relationship, or a coincidental co-mention?") on the strong reader; (b) drop joint claims whose quote's subject token is a compound-proper-noun even if the claim paraphrases it (check the QUOTE, which is verbatim, not just the claim). | ⬜ TODO |
 | G-pdf | **PDF sources were unreadable** — `web_fetch` returns binary garbage for a PDF; no PDF lib installed → a PDF source produced no usable text. | user-flagged; confirmed no PDF path in `tools.py`/`web_toolkit` | **✅ DONE — `_fetch_pdf_text`** (pypdf) in `studio/tools.py::_fetch_page`: `.pdf` suffix OR arXiv `/pdf/<id>` path → download (25 MB cap), verify `%PDF` magic, join per-page text; falls through to HTML if not actually a PDF; fail-open on any error. Then the moving window reads it like a README. Verified live on a real arXiv PDF (39,625 chars) + 4 unit tests. | ✅ DONE + verified |
 | G2 | **Diagram labels are prose glue** | `Pi→Designed/Harness/Users/Adapt` | Identifier-shaped component harvest (hyphenated/dotted/CamelCase + all-caps acronyms), drop bare prose words; stop rejecting real sub-components that contain the subject token (`pi-ai`) | ✅ DONE 2026-07-09 (`_subject_feature_labels`) |
-| G3 | **Source authority** — cites an aggregator (`hotools.com`) + the WRONG product (`www.craft.do` doc editor, not the agent app); misses every primary repo/README/PR | 7 refs, ~3 low-value/wrong | **NEW — source-selection authority pass**: prefer official repos/READMEs/vendor docs; de-rank aggregators + same-name-wrong-product; ground selection in disambiguation anchors | ⬜ TODO |
-| G4 | **Citation stuffing** — same URL repeated after every sentence | `pi.dev/docs/latest` ×N | **NEW — citation diversity/dedup**: distinct source per claim; cap repeats of one URL | ⬜ TODO |
-| G5 | **Architectural depth** — generic prose, no package/layer structure | "minimal harness, extensible" vs gold's pi-ai→pi-agent-core→pi-coding-agent table | Ties to known **shallowness root cause** (findings.py one-sentence contract); component/layer extraction from claims | ◐ partial (G2 helps; depth ceiling still open) |
+| G3 | **Source authority** — cites an aggregator (`hotools.com`) + the WRONG product (`www.craft.do` doc editor, not the agent app); misses every primary repo/README/PR | 7 refs, ~3 low-value/wrong | **NEW — source-selection authority pass**: prefer official repos/READMEs/vendor docs; de-rank aggregators + same-name-wrong-product; ground selection in disambiguation anchors | ◐ PARTIAL — primary-content selection CLOSED by the query-directed extraction fix (GS2 result: names pi-ai/pi-agent-core/pi-coding-agent from the README, not deepwiki); titled-numbered references landed `030ffba`. Residual = aggregator/mirror **de-rank** in the References list (hotools/deepwiki still appear) |
+| G4 | **Citation stuffing** — same URL repeated after every sentence | `pi.dev/docs/latest` ×N | **NEW — citation diversity/dedup**: distinct source per claim; cap repeats of one URL | ⬜ TODO — bundled with References-B (inline `[N]`) |
+| G5 | **Architectural depth** — generic prose, no package/layer structure | "minimal harness, extensible" vs gold's pi-ai→pi-agent-core→pi-coding-agent table | Ties to known **shallowness root cause** (findings.py one-sentence contract); component/layer extraction from claims | ◐ largely closed by query-directed extraction (names the 3 packages live); residual = layered DEPENDENCY order + pi-tui + provider-routing table |
 | G6 | **Heading leak** — content bullets promoted to H2, breaks ToC | 5 leaked H2s ("Initialize the open-source interface…") | **Phase 2.1 AST swallowed-content lint** (markdown-it-py) | ⬜ TODO (already scheduled) |
-| G7 | **Example code is generic**, not grounded in the real API surface | 2 generic blocks vs gold's real `Agent` hooks/SDK/RPC | **Phase 3 writer** — code grounded in fetched SDK docs, not invented | ⬜ TODO |
+| G7 | **Example code is generic**, not grounded in the real API surface | 2 generic blocks vs gold's real `Agent` hooks/SDK/RPC | **Phase 3 writer** — code grounded in fetched SDK docs, not invented | ✅ DONE `0bf8c69` — example code grounded in real evidence + invented-SDK guard; live 0.92, fabricated `from craft_agents import` gone |
 
-**⇒ Phase 1.5 (new, after acceptance closes): quality-parity pass** — G3 (source authority) + G4
-(citation diversity) are the highest-leverage un-done gaps (they cap *credibility*, which the scorer's
-source-quality + citation-integrity rows measure directly). Do them right after Phase 1's live-verify.
-G5/G7 fold into the existing shallowness/writer tracks; G6 into Phase 2.1.
+**⇒ Phase 1.5 — quality-parity pass (UPDATED 2026-07-09 PM).** Acceptance closed (0.92–1.0 live).
+G3 primary-content selection CLOSED by extraction; G7 DONE `0bf8c69`; diagram edge DONE `686d7b0`;
+References-A titled entries DONE `030ffba`. Remaining un-done: **G4 (per-URL cap) + References-B inline
+`[N]`** (codex design = writer-proposes/code-verifies), aggregator de-rank, G6 heading-leak lint, and
+detail residue (dependency order + pi-tui + provider routing). See Part 1.4-GS4 for the live axis tracker.
 
 ### Part 1.4-GS2 — Refreshed gap analysis (2026-07-09, POST synthesis + refs-last fix)
 
@@ -252,6 +253,12 @@ Anthropic + third-party). The four axes the user named:
 | **Sections** | 9 flat H2 (Exec/Scope/Background/Findings/Evidence/Implications/Limitations/Refs/Integration); distinct now (synthesis fix landed) | Same skeleton **+ H3 sub-sections** (F1–F4, per-architecture, per-example) | **NARROWED + small new gap G8.** Section coverage now matches; gold's H3 granularity aids depth/readability. |
 | **Reference docs** | 7 refs incl. **`deepwiki.com/badlogic/pi-mono`** (secondary mirror), **`hotools.com`** (aggregator), `pi.dev/packages/pi-agents` (unverified); MISSES every primary README + the "two backends" source | 8 refs, all primary/authoritative (repo READMEs, SDK docs, Craft OSS README, PR) | **GAP — G3, now the #1 lever.** Studio's *deep content came from deepwiki, not the README* → this is the master cause of the detail + diagram gaps below. |
 | **Diagram quality** | 3 mermaid, but: (1) Craft diagram has a **`Inflection Pi`** node (wrong-Pi collision leaked into label harvest); (2) integration diagram draws a **fabricated `AgentHarness --MCP--> Craft MCP servers` bridge** — NOT the real "Craft runs the Pi SDK as one of two backends"; (3) Pi diagram uses deepwiki's `AgentHarness` vocab, not the 4-package stack | 3 correct purpose-built: Pi layered dependency, Craft two-backend selector, Craft-embeds-Pi provider routing | **GAP — G1-diagram + G2-residual.** Joint claims now exist, but the diagram *edges* are invented, and the integration is mis-drawn as an MCP link. |
+
+> **⚠ SUPERSEDED (2026-07-09 PM) — the GS2 "Refreshed gap analysis" below is historical.** Its
+> master-finding (G3 source-authority as the root lever) and 4-item priority were largely resolved by
+> the query-directed **extraction fix** (Part 1.4-GS2 result: 0.5706→0.92, names the 3 primary packages
+> from the README not deepwiki) and the **diagram fix** (`686d7b0`, live v80). Kept for history; the live
+> axis status is Part 1.4-GS4.
 
 **Master finding (new): source authority (G3) is the root lever, not a peer gap.** Studio grounded its
 deep content in `deepwiki` (a secondary Pi-mono mirror) and `hotools.com` (an aggregator). That single
@@ -283,6 +290,10 @@ references-last (`assemble_artifact_from_sections`).
 Redone against `s_dd5d05c27ae6` (score 0.92, the post-extraction-fix output), on the four axes the
 user named. Gold baseline = primary-README-sourced reference report.
 
+> **STATUS (2026-07-09 PM): the parity table below is the STARTING point; live status is Part 1.4-GS4.**
+> Code axis DONE `0bf8c69`; Diagrams edge DONE `686d7b0` (live v80, no longer "~40%/WEAKEST"); References
+> A (titled numbered) DONE `030ffba` (no longer bare-URL "~60%"). Ranked items 1–2 below are COMPLETE.
+
 | Axis | Studio 0.92 | Gap to gold | Parity |
 |------|-------------|-------------|--------|
 | **Detail** | Names pi-ai/pi-agent-core/pi-coding-agent + the correct "Claude Agent SDK and Pi SDK side by side" integration (gold-parity on core facts) | Misses layered DEPENDENCY order, omits pi-tui, no provider-routing table; theme repetition across 4 sections | ~80% |
@@ -290,22 +301,36 @@ user named. Gold baseline = primary-README-sourced reference report.
 | **References** | 7 refs | Still cites deepwiki (secondary), hotools.com (aggregator), dead `pi.dev/packages/*`; citation stuffing (`agents.craft.do` ×13, `earendil-works/pi` ×9) (G3-residual + G4) | ~60% |
 | **Diagrams** | 3 present | WEAKEST. D1 deepwiki vocab (AgentHarness/AgentLoop/AgentInstance), only 2 packages; D2 circular+empty (`Craft→Craft Agents`), misses two-backend; D3 integration EDGE wrong (`coding-agent-CLI → "specialized task-execution layer" → Craft`), Craft subgraph empty (G1-diagram + G2-residual) | ~40% |
 
-**NEW serious finding — fabricated example code (G7).** The Craft code block invents a Python SDK that
+**NEW serious finding — fabricated example code (G7). ✅ RESOLVED `0bf8c69`** (example code grounded in
+real fetched evidence; a synthesized programming-language block that imports a package is dropped as an
+unverified SDK; live: `from craft_agents import` gone, Craft shown via its real NL interface). Original
+finding kept below for context. The Craft code block invents a Python SDK that
 exists in NO fetched source: `from craft_agents import Agent`, `agent.connect_model()`,
 `agent.navigate_to()`. Craft is an Electron/Bun app driven by natural language + `craft-cli` — no Python
 API. This is fabrication in the deliverable: the anti-fabrication contract (verbatim quote per CLAIM)
 does NOT cover generated CODE, so `_splice_code`/`_splice_integration_code` can hallucinate an API.
 
 **Ranked remaining work to gold-parity (updates the priority list above):**
-1. **Diagram grounding (G1-diagram / G2-residual)** — diagram nodes+edges must come from the claims'
-   asserted structure (the two-backend relationship; the pi-ai→pi-agent-core→pi-coding-agent stack),
-   not deepwiki internals or a generic default edge; drop empty/circular subgraphs.
-2. **Code grounding (G7)** — example code must be grounded in a fetched API surface (Pi's real TS SDK)
-   or the actual CLI (`craft-cli run …`); never invent an SDK. A code-fabrication guard.
-3. **Reference quality (G3-residual + G4)** — drop secondary-mirror/aggregator URLs from the References
-   list; cap repeats of one URL.
+1. ~~**Diagram grounding (G1-diagram / G2-residual)**~~ ✅ DONE `686d7b0` — integration edge grounded from
+   the directional triple (`Craft→Pi "utilizes"`), live v80; endpoint-pick nit remains.
+2. ~~**Code grounding (G7)**~~ ✅ DONE `0bf8c69` — example code grounded in real evidence; invented-SDK guard.
+3. **Reference quality (G3-residual + G4)** — titled numbered entries DONE `030ffba`; still to do: drop
+   secondary-mirror/aggregator URLs from the References list; cap repeats of one URL; inline `[N]` (B).
 4. **Heading-leak lint (G6)** — AST pass to demote H1s that leaked inside a section/code comment.
 5. **Detail residue** — dependency order + pi-tui + provider routing; trim theme repetition.
+
+### Part 1.4-GS4 — Axis status (2026-07-09 PM, live-verified)
+
+Working the GS3 list one axis at a time; acceptance = live-run artifact, not score.
+
+| Axis | Status | Evidence |
+|------|--------|----------|
+| **Code (G7 fabrication)** | ✅ DONE | commit `0bf8c69` — example code grounded in real evidence, invented-SDK guard; live 0.92, fabricated import gone |
+| **Diagrams (G1/G2 edge)** | ✅ DONE | commit `686d7b0` — integration edge was `Pi.LLM APIs →"craft agents"→ Craft` (reversed + node-name label); now `Craft.Claude Agent SDK →"utilizes"→ Pi` (grounded directional triple). **RCA reversal:** the wrong edge shipped from `research_first` (subgraph fingerprint), NOT `diagram_render` — the "consolidate to fix wrong module" premise was false; real cause was **client provenance** (tool-augmented client degraded the deterministic triple sub-prompt; fixed via `tools.base_client()` unwrap). Live v80, edge correct, score 1.0. Endpoint pick still imperfect (ideal `Craft Agents → Pi SDK`) = open nit. |
+| **References (G3/G4)** | ◐ IN PROGRESS | **A (titled numbered entries): DONE on disk** — `_url_title_map(evidence_dir)` + `_rebuild_references_from_claims` render `N. [page-title](url)`; junk becomes visible, only cited URLs appear. Pending: live-verify + commit. **B (inline `[N]` citations): NOT STARTED** — needs codex design (reliable claim→marker mapping) + web validation. G4 (per-URL repeat cap) still open. |
+| **Diagrams — hygiene** | ⬜ STARTING | consolidate duplicated diagram helpers into `diagram_render` as single authority (codex plan from run `bqas7p4pc`: two named entries `render_grounded_diagram` + `render_subject_cluster_diagram`, move pure helpers via shims, keep `Relationship` out). Behavior-preserving refactor (outcome already fixed); optional hygiene, not on critical path. |
+| **Sections (G6 heading leaks)** | ⬜ PENDING | ~90%; H1-inside-body demote lint still to do |
+| **Detail** | ⬜ PENDING | ~80%; dependency order + pi-tui + provider routing |
 
 ### Part 1.4-GS2 result
 
@@ -324,8 +349,13 @@ citation dedup, G6 heading-leak lint. The one-sentence contract was NOT relaxed 
 the depth came from reading the source better, not from longer claims — the contract stays load-bearing
 for anti-fabrication).
 
-**Phase 1 — Close acceptance (visible outcome). [M–L] — THE priority.**
-Scope set by the Phase-0 readout: the deterministic failure is `c` (integration diagram absent)
+**Phase 1 — Close acceptance (visible outcome). [M–L] — ✅ DONE (2026-07-09).**
+Acceptance reached: deterministic live runs hold 0.92–1.0, a–e clears (3 diagrams incl. a grounded
+integration diagram, real labels). The Phase-0 `c` failure (0 joint claims + Pi under-coverage) was
+fixed by the query-directed extraction + moving-window fetch (joint 0→7, G1-fetch DONE) and the diagram
+edge fix `686d7b0`. Items 1.1/1.2 satisfied; 1.3 summary-grounding is the only minor residual. Phase 2
+(+ the GS4 gold-parity axes) is now the active work.
+Scope set by the Phase-0 readout: the deterministic failure was `c` (integration diagram absent)
 caused by **0 joint claims + Pi under-coverage (2 vs 12)**. Attack coverage, not word-depth.
 - 1.1 **Coverage gate before WRITE — per-subject floor AND joint-claim coverage** (Part 8 #1 /
   #37 P1-core, was PARTIAL; now PRIMARY). Before WRITE, require each subject ≥ a small claim
@@ -414,9 +444,11 @@ no-reload server + confirm process start-time > commit before trusting any live 
 (old §15 body; OUTCOME-FIRST RE-PRIORITIZATION, 2026-07-05 night, user-directed:
 "need to see different outcome")
 
-Six runs of honest scores (0.145→0.30→0.66→0.43→0.41→0.49) say the machinery half
-is fixed but the READ REPORT hasn't changed character: no Craft, shallow sections,
-generic diagram. Re-ranked by visible outcome delta:
+Six runs of honest scores (0.145→0.30→0.66→0.43→0.41→0.49) said the machinery half
+was fixed but the READ REPORT hadn't changed character: no Craft, shallow sections,
+generic diagram. *(Dated 2026-07-05 — no longer true: the research_first rebuild reached
+acceptance 0.92–1.0 with Craft cited, fuller sections, and a grounded integration diagram.)*
+Re-ranked by visible outcome delta:
 
 1. **P1-core coverage actor** (was slice 5, now immediate): deterministic
    zero-sources check per covers-X subject (evidence/ + cache scan for subject
@@ -516,8 +548,8 @@ LESSONS COMPLIANCE section). No hardcoding — subject handling is generic
 | ⚠ USER SCREENSHOTS round 3 (4 imgs) — fence-PARITY corruption live in v36/v37; lead-verified in recorded artifact | 🔴 dispatched, diagnose-first; blocks acceptance | Recorded result.md (s_5afa87bea5fb/s_ed3122139651): 14 fence marks = COUNT-balanced (count-based eraser-A guard passed) but **2 bare language lines ("typescript"/"python" as prose)** — one detached opener flips parity for the REST of the document: ## Implications/## Limitations/## References render INSIDE boxes; code renders OUTSIDE unfenced → `def **init**(self)` (markdown ate __init__); caption divorced from code; `_(to be completed)_` placeholder visible; ## Pi and Craft Integration after References inside box. ONE root cause, all 4 screenshots. Prime suspect: post_gate_finalize (readability-refine LLM and/or normalize_artifact) — its accept gate checks fence COUNT only, structurally blind to tag detachment. Also: DB result_text 19809 vs result.md 20027 (218-char delta) may localize the mutating stage. Fix ordered by construction: (1) rewrite-pass accept gates upgraded COUNT→STRUCTURE (language-tagged openers, strict alternation, zero bare-lang lines, zero headings inside fences; reject-don't-repair) (2) deterministic final-artifact checks: no bare lang lines / no ## inside fences / tagged openers / no placeholder text. Pre-reviewer list now: this + ruling-(c) sanitization + claims-fed _subject_components_prompt + row-1558 delete |
 | Resume pass: pre-reviewer list closed + fence structure accept gate | ✅ code-level checks green; full suite green | Verified row 1558 is already deleted (`SELECT ... WHERE id=1558` returned no rows). Verified existing resumed fixes on disk: ruling-(c) source heading sanitization, claims-fed `_subject_components_prompt`, rebuild-aware `_pick_scored_source`, materialize overwrite/write-early defenses. Added `_artifact_structure_ok` in `finalize.py` and gated `_pass_post_gate_finalize` so rewrite candidates with detached language tag lines, unclosed/malformed fences, `##` headings inside fences, or known placeholders are rejected (keeps prior clean text; reject-don't-repair). Plain untagged markdown fences remain valid and are regression-tested. Tightened two sanitizer tests to exact-line assertions (`"## X"` is a substring of `"### X"`). Evidence: targeted `test_finalize.py` → 11 passed; `test_research_first.py` → 91 passed; runner/routing/session/HIGH slice → 163 passed; structural producer → 10 passed. Comparable full suite (`cd backend && .venv/bin/python -m pytest tests/ -q`) → 1017 passed, 4 deselected. Validation drift vs handoff's 1007 green: +10 passing tests, no comparable failures; root-level system-Python run failed only because `mdformat` is missing outside the backend venv. |
 | Full-slice internal review gate | ✅ non-blocking COMMENT (code-reviewer APPROVE + architect WATCH) | Required `$code-review` skill lanes ran via native subagents after validation. Fixes from review: opted-in `research_first` failures are fail-visible (no silent `_run_phase_loop` fallback; routing regression asserts `ErrorEvent`, empty terminal `done`, and no legacy success row); `_integration_label` now excludes tokenized subject-name tokens before corroborating mechanism labels (multi-word subject regression); nullable finalize streak annotation and integration-home test typing cleaned; touched production comments genericized (`Pi|Craft` grep in `research_first.py`/`runner.py` = 0). Evidence: changed-code slice → 109 passed; comparable full suite → 1018 passed, 4 deselected (+1 expected regression-test drift); `git diff --check c85bbc6` clean. Final code-reviewer: APPROVE, 0 issues. Final architect: WATCH, not BLOCK — `post_gate_finalize` remains a secondary artifact writeback owner for rebuild-generated runs; follow-up debt, not an Attempt 11 blocker. |
-| R3 SPEC (USER, 2026-07-06): What/Why/How/Where report framework — relationship must CLASSIFY, not presume | ⬜ queued AFTER attempt 11 (current task's evidence supports cooperate → acceptance bar unchanged) | User framework: **What** = what are these objects (FRAME disambiguation ✅ covers) · **Why** = why do they appear together — relate how: can they work together or do they COMPETE? (GAP: `_resolve_relationship` presumes cooperation — "which surface of A could drive/host/call B" — no compete branch) · **How** = if compete: how + pros/cons; if cooperate: mechanism + pros/cons (GAP: only the cooperate flow exists — integration section/diagram/code; compete branch needs comparison axes + pros/cons table instead) · **Where** = boundaries: scope, limitation, budget, effort (Scope+Limitations ✅; effort/budget angle thin). Design: relationship step returns a CLASSIFICATION {cooperates / competes / independent / unknown} grounded in joint evidence, fail-open to unknown; ALL downstream relationship flows (section, diagram, code/comparison, summary conclusion) branch on it. Never force-fit an integration story onto competing subjects |
-| Attempt 11 (final acceptance run, after R1+R2) | 🔴 FAILED + one allowed rerun used | Original attempt 11 (`s_fa2816b1e000`, score 0.7644) improved substance but missed acceptance: only 2 Mermaid diagrams, raw metadata leaked, malformed integration/code/prose. Focused hardening shipped as `85c5999` after validation (`99` focused tests; `116` regression slice; full suite `1025 passed, 4 deselected`) and internal `$code-review` skill gate (code-reviewer APPROVE, architect WATCH → final COMMENT). Single allowed rerun `s_86350e8b9b76` completed without runtime error but failed acceptance harder: score 72.58, `task_success=false`, 1148 words, 1 Mermaid, no craft-agents-oss citation, no integration section, no relationship summary, generic agentic-AI sources only. Metadata leak fix held (`ARTICLE_TITLE`/`PATCH_TARGET` absent; `SEARCH` only inside `RESEARCH_FINDING`). Stop condition: no further rerun until research/source-selection regression is re-diagnosed. |
+| R3 SPEC (USER, 2026-07-06): What/Why/How/Where report framework — relationship must CLASSIFY, not presume | ✅ DELIVERED via MVP-8 (see row below): `_classify_relationship` returns {cooperates/competes/alternative/independent/unknown}; competes/alternative branch → `_splice_comparison_table` instead of the integration diagram | User framework: **What** = what are these objects (FRAME disambiguation ✅ covers) · **Why** = why do they appear together — relate how: can they work together or do they COMPETE? (GAP: `_resolve_relationship` presumes cooperation — "which surface of A could drive/host/call B" — no compete branch) · **How** = if compete: how + pros/cons; if cooperate: mechanism + pros/cons (GAP: only the cooperate flow exists — integration section/diagram/code; compete branch needs comparison axes + pros/cons table instead) · **Where** = boundaries: scope, limitation, budget, effort (Scope+Limitations ✅; effort/budget angle thin). Design: relationship step returns a CLASSIFICATION {cooperates / competes / independent / unknown} grounded in joint evidence, fail-open to unknown; ALL downstream relationship flows (section, diagram, code/comparison, summary conclusion) branch on it. Never force-fit an integration story onto competing subjects |
+| Attempt 11 (final acceptance run, after R1+R2) | 🔴 FAILED + one allowed rerun used | Original attempt 11 (`s_fa2816b1e000`, score 0.7644) improved substance but missed acceptance: only 2 Mermaid diagrams, raw metadata leaked, malformed integration/code/prose. Focused hardening shipped as `85c5999` after validation (`99` focused tests; `116` regression slice; full suite `1025 passed, 4 deselected`) and internal `$code-review` skill gate (code-reviewer APPROVE, architect WATCH → final COMMENT). Single allowed rerun `s_86350e8b9b76` completed without runtime error but failed acceptance harder: score 72.58, `task_success=false`, 1148 words, 1 Mermaid, no craft-agents-oss citation, no integration section, no relationship summary, generic agentic-AI sources only. Metadata leak fix held (`ARTICLE_TITLE`/`PATCH_TARGET` absent; `SEARCH` only inside `RESEARCH_FINDING`). Stop condition: no further rerun until research/source-selection regression is re-diagnosed. **✅ RESOLVED 2026-07-09 — stop condition lifted: the regression was re-diagnosed (query-directed extraction + moving-window fetch) and acceptance reached (0.92–1.0); see Part 1.4-GS2 result + GS4.** |
 | Blocker-removal MVP sequence (2026-07-08, user-approved full-auto) — MVP-0..4 CLOSED offline | ✅ recovery slice committed; B1–B4 fixes verified by replay; stop condition LIFTED (RCA proof-backed + fixes replay-verified) | MVP-0: suite 1054 passed/4 deselected → recovery slice landed as 5 logical commits (marker publish gate / glue-label drop / RESEARCH_FINDING heading strip + component-label gate / offline MVP harness / PLAN docs). MVP-1 (B1): committed whole-task guard had a HOLE — only-covers-branch case fell back to `[title]` = whole-task-shaped subject (verified: title == 'Study how to use Pi and Craft…'); fixed by `_subjects_from_requirement` LLM fallback with deterministic validation (verbatim-substring + ≤4 words + ≠whole-task + compound-split AFTER whole-task check), TDD 4 tests, module 108 passed. MVP-2 (B2): replay v40/v41 result.md → `_strip_patch_metadata_lines` kills `### RESEARCH_FINDING` at source (0 left) AND `evaluate_publish_readiness` rejects both (ready=False, marker issue named). MVP-3 (B3): replay observed filler labels (The/Repository/Contains/Over/Various/Including) → all dropped, real labels (pi-agent-core/MCP servers/Agent Harness/API) all kept; NEW residual found+fixed: corroborated hypothesis SENTENCE shipped verbatim as v40 cross-edge label → `_integration_label` caps at ≤6 words, reduces to interface word / corroborated verify term (touched-module slice 163 passed). MVP-4 (B4): offline probe on saved v38 claims (Pi=7/Craft=12/joint=2) with real gemma client → 3/3 diagrams BOTH repeats, zero sentence labels (`scratchpad/diag_probe_mvp4.py`). Acceptance checker `scratchpad/accept_check.py` validated against v38 (fails on exactly its 5 documented defects). Next: MVP-5 live probe (s_f46ecd2d066b in flight) → review lanes → acceptance. |
 
 | MVP-5b/5c + acceptance run v44 (2026-07-08) — formal a–e CLEARED, 2 real residuals found by verification | ✅ a–e pass live; ⚠ ordering defect + domain-hardcoding surfaced | Two deeper defects fixed past B1–B4: (5b) diagram glue-word labels — prompt-hardening (generic proper-component naming rule in all 3 diagram prompts, no blocklist) took Pi diagram from `Commits/Branch/Designed` → real `pi-agent-core/Agent Loop/AgentContext/AgentHarness` (v43 0.6688); (5c) integration code shipped 0/4 → **4/4** after root-cause: prompt was seeded with the ungrounded FRAME hypothesis (`SDK`), so gemma wrote `import pi_sdk` and the grounding gate correctly rejected every sample — fixed by steering the code prompt to CLAIM-documented interfaces (`_grounded_interface_words`), single-sourced `_INTERFACE_WORD_ALT`. Separate-lane code-review: **APPROVE-WITH-FIXES** (0 crit/high; dbg-log gap fixed, stopword-dedup deferred into MVP-8). **Acceptance run v44 (`s_65f50e596ddb`, id 1577, 0.5984): formal Part 1.3 a–e ALL PASS** — craft-agents-oss cited, 2637 words, 3 diagrams w/ grounded cross-edge, **integration code + Proposed-usage caption present**, integration section present (FIRST run in lineage to clear the full a–e bar). VERIFICATION (per "verify don't trust") found: (i) References ⊆ claims holds byte-exact (my accept_check references-subset FAIL was a checker false-positive — grabbed in-prose URLs after the heading); (ii) **REAL DEFECT: two sections render AFTER `## References`** (a model-emitted "Concrete Implementation Risks…" section + the "Pi and Craft Integration" section) — References must be last; e exists but is misplaced. Not acceptance-clean despite a–e greps passing. |
@@ -537,7 +569,7 @@ as blockquotes (`> ` per line — verbatim text preserved, structure can't leak)
 → ✅ CLOSED 2026-07-06: quote-neutralize addendum built + v10 live run passed the
 mechanical check (heading count 9 == skeleton exact; see status-log row above).
 
-### 2.3 Current attempt slate (in-flight)
+### 2.3 Attempt slate (HISTORICAL — old §14 hub/spoke; superseded by the research_first rebuild)
 
 (old §14, "Attempt-9 fix slate (ordered)" list; the diagnosis that produced this
 slate is in Part 4.2–4.3, and its committed measured results are logged in
@@ -597,7 +629,7 @@ append new rows here going forward)
 
 (old §13 tail, verbatim)
 
-**Lineage scoreboard** (task 492bae60177b, honest cold chain): v1 0.145 → v2 0.304 (guards+salvage) → v3 0.657 (L0 code fence) → v4 0.433 (attempt 7 — no crash, fence survived, zero junk, but ZERO web searches issued: run rode inherited evidence, so the covers-Craft loop was never exercised; score dip is one epoch of synthesis rejects on a seeded run) → v5 0.41 (attempt 8 — eraser trace armed) → v6 0.4949 (attempt 9 — first diagram ever recorded; both erasers named) → **v7 0.5923 (attempt 10, run 1540 — erasers VERIFIED dead: code block + diagram + all fences survived end-to-end for the first time; coverage gaps remain)**.
+**Lineage scoreboard** (task 492bae60177b, honest cold chain): v1 0.145 → v2 0.304 (guards+salvage) → v3 0.657 (L0 code fence) → v4 0.433 (attempt 7 — no crash, fence survived, zero junk, but ZERO web searches issued: run rode inherited evidence, so the covers-Craft loop was never exercised; score dip is one epoch of synthesis rejects on a seeded run) → v5 0.41 (attempt 8 — eraser trace armed) → v6 0.4949 (attempt 9 — first diagram ever recorded; both erasers named) → **v7 0.5923 (attempt 10, run 1540 — erasers VERIFIED dead: code block + diagram + all fences survived end-to-end for the first time; coverage gaps remain)**. **Post-rebuild (research_first, §16) tail: acceptance reached — deterministic v-runs hold 0.92–1.0 through ~v80 (extraction fix 0.57→0.92; code-fabrication guard `0bf8c69`; diagram edge `686d7b0` live v80; titled references `030ffba`).**
 
 ## Part 4 — Findings & attempt history
 
@@ -1255,9 +1287,9 @@ Legend: ✅ fulfilled (code-verified) · 🟡 partial · ❌ unfulfilled
 | Structural content survives to recorded artifact | 🟡→verify | L0 producer ✅ (v3 code fence, v6 first diagram ever) · BOTH erasers fixed (A `27beff6`, B `d4e84a9`) · attempt 10 IN FLIGHT is the proof run |
 | Duplicate-section disease | ✅ fixed | birth: `_synthesize_windowed` heading double-prepend; spread: 3 keep-longest merges → fold-merge; 925 tests |
 | Junk-source pipeline | ✅ | density floor + gray-zone judge + memoization; π-Wikipedia/dictionary pages dropped every run since |
-| Craft coverage in the artifact | ❌ **headline** | 0 Craft searches across all runs — verdicts exist, actor doesn't (P1-core) · rebuild covers by construction (§16) |
-| Report depth proven good live | ❌ **headline** | lineage 0.145→0.30→0.66→0.43→0.41→0.49 = oscillation; depth ceiling = findings one-sentence contract + density cap (§15 item 2) |
-| Pi+Craft integration diagram | ❌ | v6 diagram is generic component sketch; needs requirement-branch conditioning (8b) + Craft content upstream |
+| Craft coverage in the artifact | ✅ (rebuild) | research_first covers Craft by construction; craft-agents-oss + agents.craft.do cited in the acceptance runs (0.92–1.0) |
+| Report depth proven good live | ✅ (rebuild) | deterministic acceptance 0.92–1.0 live (task_hash 492bae60177b); the pre-rebuild oscillation was hub/spoke, replaced by §16 |
+| Pi+Craft integration diagram | ✅ `686d7b0` | grounded directional edge live v80: `Craft.Claude Agent SDK →"utilizes"→ Pi` (endpoint-pick nit remains) |
 
 ### 7.2 Corrected stale designs
 
