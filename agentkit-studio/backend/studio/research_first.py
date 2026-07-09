@@ -2291,6 +2291,73 @@ def _rebuild_references_from_claims(
     return text[: m.start()] + rebuilt + ("\n" + tail.lstrip("\n") if tail.strip() else "")
 
 
+def _citation_index(claims: list[dict[str, Any]]) -> dict[str, int]:
+    """``{url: ref_num}`` in the SAME dedup order ``_rebuild_references_from_claims``
+    numbers the References list — so an inline ``[N]`` marker points at reference N
+    by construction (no dangling marker is possible)."""
+    urls = dict.fromkeys(c["url"] for c in claims if c.get("url"))
+    return {u: i for i, u in enumerate(urls, 1)}
+
+
+#: Inline-citation forms the writer emits (it is told to cite a claim's URL inline,
+#: copied verbatim): a markdown link, a parenthesised URL, or a bare URL.
+_CIT_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+_CIT_PAREN_URL_RE = re.compile(r"\(\s*(https?://[^)\s]+?)\s*\)")
+_CIT_BARE_URL_RE = re.compile(r"https?://[^\s)\]]+")
+#: Trailing punctuation to strip before an index lookup (and preserve after the marker).
+_CIT_TRAILING = ".,;:!?)]}\"'"
+
+
+def _cit_lookup(url: str, index: dict[str, int]) -> int | None:
+    return index.get(url) or index.get(url.rstrip(_CIT_TRAILING))
+
+
+def _mark_citation_segment(seg: str, index: dict[str, int]) -> str:
+    """Replace every inline URL in a NON-fenced prose segment with its ``[N]`` marker."""
+    def _md(mo: "re.Match[str]") -> str:
+        n = _cit_lookup(mo.group(2), index)
+        return f"{mo.group(1)} [{n}]" if n else mo.group(0)
+
+    def _paren(mo: "re.Match[str]") -> str:
+        n = _cit_lookup(mo.group(1), index)
+        return f"[{n}]" if n else mo.group(0)
+
+    def _bare(mo: "re.Match[str]") -> str:
+        url = mo.group(0)
+        n = _cit_lookup(url, index)
+        if not n:
+            return url
+        trail = url[len(url.rstrip(_CIT_TRAILING)):]  # keep sentence punctuation
+        return f"[{n}]{trail}"
+
+    seg = _CIT_MD_LINK_RE.sub(_md, seg)   # [label](url) -> label [N]   (before bare)
+    seg = _CIT_PAREN_URL_RE.sub(_paren, seg)  # (url) -> [N]
+    seg = _CIT_BARE_URL_RE.sub(_bare, seg)    # url -> [N]
+    # Over-cite collapse (v1): adjacent duplicate markers "[3][3]" / "[3] [3]" -> "[3]".
+    return re.sub(r"(\[\d+\])(?:\s*\1)+", r"\1", seg)
+
+
+def _apply_citation_markers(text: str, claims: list[dict[str, Any]]) -> str:
+    """Render the writer's inline URL citations as numbered markers ``[N]`` pointing
+    at the References list. Deterministic and reliable BECAUSE the writer already
+    cited each source explicitly by URL (copied verbatim from a claim) — so this is
+    a render of a declared citation, not an attribution guess (no false-attribution
+    risk), and it also de-stuffs the raw-URL clutter (G4). Runs AFTER grounding drops
+    (only grounded URLs remain). Never rewrites the References section or a fenced
+    (code/mermaid) block. Fail-open: a URL absent from the index is left untouched;
+    every emitted ``[N]`` has a matching reference by construction (shared index)."""
+    index = _citation_index(claims)
+    if not index:
+        return text
+    m = _REFERENCES_HEADING_RE.search(text)
+    body, refs = (text[: m.start()], text[m.start():]) if m else (text, "")
+    parts = _FENCE_SPLIT_RE.split(body)  # odd segments are ```...``` fences — leave verbatim
+    marked = "".join(
+        seg if i % 2 else _mark_citation_segment(seg, index) for i, seg in enumerate(parts)
+    )
+    return marked + refs
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -2479,6 +2546,10 @@ def generate_research_first(
     # ran) would be missed. One final, fence-aware sweep over the WHOLE
     # assembled document closes that gap.
     text = _drop_ungrounded_sentences_artifact_wide(text, claims)
+    # Render the writer's inline URL citations as numbered [N] markers pointing at the
+    # References list — AFTER grounding drops (only grounded URLs remain) so a stripped
+    # sentence never leaves a dangling marker. De-stuffs raw-URL clutter (G4).
+    text = _apply_citation_markers(text, claims)
     lints = lint_artifact(text)
     dbg(
         f"research_first ASSEMBLE: words={len(text.split())} "

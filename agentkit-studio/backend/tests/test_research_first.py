@@ -1955,3 +1955,40 @@ def test_clean_source_title_strips_brand_tails_and_caps_length() -> None:
     assert rf._clean_source_title("Repo desc · GitHub") == "Repo desc"
     assert rf._clean_source_title("  a   b\n c ") == "a b c"
     assert rf._clean_source_title("x" * 200).endswith("…") and len(rf._clean_source_title("x" * 200)) <= rf._MAX_TITLE_LEN
+
+
+def test_citation_markers_map_inline_urls_to_reference_numbers() -> None:
+    """The writer cites claim URLs inline; ASSEMBLE renders each as its numbered
+    [N] marker (N = that URL's reference position). Deterministic — a marker points
+    at reference N by construction; a non-claim URL is left untouched (never a wrong
+    marker); code fences and the References section are never rewritten."""
+    claims = [
+        {"claim": "a", "quote": "q", "url": "https://a.example/", "subjects": ["Pi"]},
+        {"claim": "b", "quote": "q", "url": "https://b.example/x", "subjects": ["Craft"]},
+    ]
+    text = (
+        "## Body\n\n"
+        "Pi ships a CLI (https://a.example/). Craft uses [the SDK](https://b.example/x). "
+        "See https://a.example/ too.\n"
+        "A non-claim url https://c.example/ stays raw.\n\n"
+        "```python\n# https://a.example/ inside a fence stays raw\n```\n\n"
+        "## References\n\n1. [A](https://a.example/)\n2. [B](https://b.example/x)\n"
+    )
+    out = rf._apply_citation_markers(text, claims)
+    body = out.split("## References")[0]
+    assert "Pi ships a CLI [1]." in body            # (url) -> [N]
+    assert "Craft uses the SDK [2]." in body         # [label](url) -> label [N]
+    assert "See [1] too." in body                    # bare url -> [N]
+    assert "https://c.example/ stays raw" in body    # non-claim url untouched (no wrong marker)
+    assert "# https://a.example/ inside a fence stays raw" in out  # fence untouched
+    assert "1. [A](https://a.example/)" in out       # References section untouched
+    # every [N] in body maps to a real reference (<= max ref)
+    import re as _re
+    assert all(int(n) <= 2 for n in _re.findall(r"\[(\d+)\]", body))
+
+
+def test_citation_markers_collapse_adjacent_duplicates() -> None:
+    claims = [{"claim": "a", "quote": "q", "url": "https://a.example/", "subjects": ["Pi"]}]
+    text = "## B\n\nX (https://a.example/) (https://a.example/).\n\n## References\n\n1. [A](https://a.example/)\n"
+    out = rf._apply_citation_markers(text, claims)
+    assert "X [1]." in out and "[1][1]" not in out and "[1] [1]" not in out
