@@ -1774,6 +1774,22 @@ def test_build_claims_targeted_extraction_rejects_same_page_collision(tmp_path) 
     assert [c for c in claims if len(c["subjects"]) >= 2] == []  # no fabricated joint
 
 
+def test_sanitize_section_headings_preserves_h3_subheadings() -> None:
+    # Task 3 (H3 sub-structure): _write_section now licenses `###` sub-topics. The G6
+    # heading-leak guards must keep them — they demote only leaked `#`/`##`, never a
+    # legitimate level-3 subheading. Without this, the prompt change would be silently
+    # defeated by the sanitizer.
+    body = (
+        "Intro paragraph.\n\n"
+        "### Architecture\nPi has packages.\n\n"
+        "### Usage\nInstall and run.\n\n"
+        "## Leaked H2\nx\n"
+    )
+    out = rf._demote_stray_h1(rf._sanitize_section_headings(body, ["Overview", "Findings"]))
+    assert "### Architecture" in out and "### Usage" in out  # intentional H3 kept
+    assert "\n## " not in out and not out.startswith("## ")   # leaked H2 demoted
+
+
 def test_parse_relation_triples_grounds_endpoints_in_quote() -> None:
     # KGGen shape (task 2 / provider-routing): the model may name the relation verb
     # freely, but BOTH endpoints must appear in the verbatim quote — a fabricated tail
