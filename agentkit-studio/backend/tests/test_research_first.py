@@ -1978,7 +1978,7 @@ def test_citation_markers_map_inline_urls_to_reference_numbers() -> None:
     body = out.split("## References")[0]
     assert "Pi ships a CLI [1]." in body            # (url) -> [N]
     assert "Craft uses the SDK [2]." in body         # [label](url) -> label [N]
-    assert "See [1] too." in body                    # bare url -> [N]
+    assert "See too." in body                        # bare url -> [N], deduped within paragraph (G4)
     # non-claim URL is a fabricated citation → STRIPPED (never a wrong marker), prose kept
     assert "A non-claim url stays raw." in body
     assert "c.example" not in body
@@ -1994,6 +1994,22 @@ def test_citation_markers_collapse_adjacent_duplicates() -> None:
     text = "## B\n\nX (https://a.example/) (https://a.example/).\n\n## References\n\n1. [A](https://a.example/)\n"
     out = rf._apply_citation_markers(text, claims)
     assert "X [1]." in out and "[1][1]" not in out and "[1] [1]" not in out
+
+
+def test_citation_markers_dedup_is_paragraph_scoped() -> None:
+    """G4 caps over-citation per paragraph: a same-paragraph re-cite of [1] is
+    dropped, but a blank line resets the seen-set so a later paragraph may cite
+    [1] again (each paragraph carries its own attribution)."""
+    claims = [{"claim": "a", "quote": "q", "url": "https://a.example/", "subjects": ["Pi"]}]
+    text = (
+        "## B\n\n"
+        "One (https://a.example/) two https://a.example/ done.\n\n"  # same para -> second dropped
+        "Fresh paragraph (https://a.example/) here.\n\n"             # new para -> [1] survives
+        "## References\n\n1. [A](https://a.example/)\n"
+    )
+    body = rf._apply_citation_markers(text, claims).split("## References")[0]
+    assert "One [1] two done." in body           # in-paragraph repeat collapsed, no orphan space
+    assert "Fresh paragraph [1] here." in body   # blank line reset -> marker re-emitted
 
 
 def test_demote_stray_h1_keeps_title_demotes_leaks_skips_fences() -> None:

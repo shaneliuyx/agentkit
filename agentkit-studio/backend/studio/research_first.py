@@ -2339,10 +2339,38 @@ _CIT_PAREN_URL_RE = re.compile(r"[^\S\n]*\(\s*(https?://[^)\s]+?)\s*\)")
 _CIT_BARE_URL_RE = re.compile(r"[^\S\n]*(https?://[^\s)\]]+)")
 #: Trailing punctuation to strip before an index lookup (and preserve after the marker).
 _CIT_TRAILING = ".,;:!?)]}\"'"
+#: Blank-line paragraph boundary (captured so split() keeps it verbatim for rejoin).
+#: ``[^\S\n]`` is horizontal whitespace only, so a soft (single-\n) wrap stays one paragraph.
+_PARA_BREAK_RE = re.compile(r"(\n[^\S\n]*\n)")
 
 
 def _cit_lookup(url: str, index: dict[str, int]) -> int | None:
     return index.get(url) or index.get(url.rstrip(_CIT_TRAILING))
+
+
+def _dedup_markers_per_paragraph(seg: str, valid_refs: set[int]) -> str:
+    """Over-cite collapse (G4): within each paragraph (blank line resets), keep the
+    first ``[N]`` and drop later repeats of the SAME marker, consuming the leading
+    horizontal space so no orphan/double space is left. Subsumes the v1 adjacent
+    ``[3][3]``/``[3] [3]`` case; the marker still resolves to reference N.
+
+    Only a ``[N]`` whose number is an actual reference (``valid_refs`` = the citation
+    index values) is treated as a marker — a bracketed integer that is NOT a citation
+    (a year ``[2024]``, an out-of-range index) is left untouched (codex review)."""
+    def _para(text: str) -> str:
+        seen: set[str] = set()
+        def _one(mo: "re.Match[str]") -> str:
+            if int(mo.group(1)) not in valid_refs:
+                return mo.group(0)  # not a citation marker → leave verbatim
+            if mo.group(1) in seen:
+                return ""  # drop repeat + its leading space
+            seen.add(mo.group(1))
+            return mo.group(0)  # first occurrence keeps its original spacing
+        return re.sub(r"[^\S\n]*\[(\d+)\]", _one, text)
+
+    return "".join(
+        part if i % 2 else _para(part) for i, part in enumerate(_PARA_BREAK_RE.split(seg))
+    )
 
 
 def _mark_citation_segment(seg: str, index: dict[str, int]) -> str:
@@ -2371,8 +2399,7 @@ def _mark_citation_segment(seg: str, index: dict[str, int]) -> str:
     seg = _CIT_BARE_URL_RE.sub(_bare, seg)    # url -> " [N]" | ""
     seg = re.sub(r"[^\S\n]+([.,;:!?])", r"\1", seg)  # heal " ." left by a strip
     seg = re.sub(r"[^\S\n]{2,}", " ", seg)           # collapse double spaces (not newlines)
-    # Over-cite collapse (v1): adjacent duplicate markers "[3][3]" / "[3] [3]" -> "[3]".
-    return re.sub(r"(\[\d+\])(?:\s*\1)+", r"\1", seg)
+    return _dedup_markers_per_paragraph(seg, set(index.values()))  # over-cite collapse (G4), paragraph-scoped
 
 
 def _apply_citation_markers(text: str, claims: list[dict[str, Any]]) -> str:

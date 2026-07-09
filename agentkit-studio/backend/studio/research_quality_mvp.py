@@ -198,10 +198,11 @@ def evaluate(*, artifact: str, claims_jsonl: str, subjects: list[str]) -> dict[s
     )
 
     mechanism_words = _summary_mechanism_words(artifact, subjects)
-    relationship_claims = [
-        claim for claim in claims if len(_claim_subjects(claim) & set(folded.values())) > 1 and _has_url(claim)
-    ]
-    grounded_words = _claim_words(relationship_claims, subjects)
+    # Ground summary mechanism vocabulary against the whole cited corpus, not only
+    # joint-subject claims: relationship EXISTENCE is already enforced by
+    # relationship_evidence above, so a mechanism word attested by a single-subject
+    # cited claim (woven into a 2-subject summary sentence) is grounded, not a leak.
+    grounded_words = _claim_words([claim for claim in claims if _has_url(claim)], subjects)
     checks.append(
         _check(
             "summary_mechanism_grounding",
@@ -311,6 +312,22 @@ def _canaries() -> list[dict[str, Any]]:
             ),
             "subjects": ["Alpha", "Beta"],
             "expect_failed": "summary_mechanism_grounding",
+        },
+        {
+            # Guard against the too-strict flip: a 2-subject summary sentence uses a
+            # mechanism word ("sidecar") attested only by a single-subject cited claim.
+            # Fails under the old joint-claims-only grounding, passes now.
+            "name": "mechanism_grounded_in_single_subject_claim",
+            "artifact": "## Executive Summary\n\nAlpha and Beta integrate through a sidecar.",
+            "claims_jsonl": _jsonl(
+                [
+                    {"claim": "Alpha runs a sidecar proxy.", "subjects": ["Alpha"], "url": "https://example.com/a"},
+                    {"claim": "Beta accepts requests.", "subjects": ["Beta"], "url": "https://example.com/b"},
+                    {"claim": "Alpha and Beta integrate.", "subjects": ["Alpha", "Beta"], "url": "https://example.com/ab"},
+                ]
+            ),
+            "subjects": ["Alpha", "Beta"],
+            "expect_passed": True,
         },
         {
             "name": "uncited_diagram_edge_label",
