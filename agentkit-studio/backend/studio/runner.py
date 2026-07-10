@@ -173,6 +173,11 @@ def _publish_revision_regressed(
             reasons.append("shrink-words")
         if len(rev.encode("utf-8")) < 0.9 * len(pre.encode("utf-8")):
             reasons.append("shrink-bytes")
+        # S3: deliberately NOT migrated to guards.urls_preserved. This is a COUNT
+        # comparison over a NARROW regex; unifying onto the broad norm_urls set would
+        # both widen capture and switch count→set — flipping the verdict on a URL-SWAP
+        # revision (drop A, add B: equal count today, lost-A under sets). Kept as-is to
+        # preserve behavior; it is one signal in a multi-reason regression gate.
         pre_urls = {u.rstrip(".,;:)") for u in _PUB_REV_URL_RE.findall(pre)}
         rev_urls = {u.rstrip(".,;:)") for u in _PUB_REV_URL_RE.findall(rev)}
         if len(rev_urls) < len(pre_urls):
@@ -585,7 +590,7 @@ def _final_evidence_dossier(
             except OSError:
                 pass
         excerpt = " ".join(content.split())
-        if len(excerpt) > 2500:
+        if not _length_ratio_ok(excerpt, max_chars=2500):  # cap only; action = truncate
             excerpt = excerpt[:2500].rstrip() + " [truncated]"
         block = f"SOURCE: {url}\nEXCERPT: {excerpt}"
         if len(block) > remaining:
@@ -752,6 +757,7 @@ def _pick_scored_source(
 # structural_producer.py to dodge a circular import back to this module — kept as
 # a thin alias so every existing `from studio.runner import _dbg` keeps working.
 from studio.textutil import dbg as _dbg
+from studio.guards import length_ratio_ok as _length_ratio_ok
 
 
 def _build_template_skeleton(
@@ -3949,7 +3955,9 @@ class Runner:
                         res = base_client.chat([{"role": "user", "content": prompt}])
                         out = (getattr(res, "text", "") or "").strip()
                         # Reject truncated/empty refinements: keep the clean merge.
-                        if len(out) >= int(len(merged_text) * 0.8):
+                        # length_ratio_ok is >=-accept polarity here (the accept side of
+                        # the same int()-floor the artifact_text reject sites use).
+                        if _length_ratio_ok(out, merged_text, min_ratio=0.8):
                             return out
                         return merged_text
 

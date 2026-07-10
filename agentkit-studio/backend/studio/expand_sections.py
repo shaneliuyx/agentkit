@@ -24,6 +24,7 @@ from collections.abc import Callable
 # S1: moved to studio.textutil.extract_urls (aliased so both call sites below —
 # _source_primary_url's "first URL" and body_urls' occurrence-COUNTING — keep
 # their un-deduplicated list, unchanged).
+from studio.guards import urls_preserved as _urls_preserved
 from studio.textutil import extract_urls as _urls
 
 
@@ -122,7 +123,7 @@ def expand_underdeveloped_sections(
         return text, stats
 
     # Whole-expansion guards — any failure reverts to the input (no-op success).
-    if set(_urls(text)) - set(_urls(doc)):
+    if not _urls_preserved(text, doc):  # lost-only: expansion may add source URLs
         stats["rejected_reason"] = "de-cite"
         return text, stats
     if _prose_per_url(doc) < ppu_before * 0.95:

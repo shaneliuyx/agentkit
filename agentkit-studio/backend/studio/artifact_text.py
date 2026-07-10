@@ -12,6 +12,9 @@ from __future__ import annotations
 import re as _re
 from typing import TYPE_CHECKING
 
+from studio.guards import invented_headings as _invented_headings
+from studio.guards import length_ratio_ok as _length_ratio_ok
+from studio.guards import urls_preserved as _urls_preserved
 from studio.textutil import dbg as _dbg
 from studio.textutil import FENCE_LINE_RE as _FENCE_LINE_RE
 from studio.textutil import fence_rest_contaminated as _fence_rest_contaminated
@@ -232,7 +235,10 @@ def _synthesize_block(
     # Reject regressions: a dropped citation (always), or shrinking below ``min_ratio`` of the
     # block. Analysis ADDS (ratio 0.9); the readability/summarize pass CONDENSES repeated quotes
     # (ratio ~0.4) — so it may come back shorter, but every URL must survive.
-    if not urls_before <= urls_after or not urls_after <= urls_before:
+    # allow_new=False: synthesis rejects a DROPPED citation AND a fabricated new one
+    # (the bidirectional/anti-hallucination copy — the readability/insertion sites
+    # allow gained URLs). urls_before/after kept for the diagnostic below.
+    if not _urls_preserved(src, out, allow_new=False):
         _dbg(f"synth[{_tag}]: REJECT urls lost={len(urls_before - urls_after)} "
              f"gained={len(urls_after - urls_before)}")
         return src, False
@@ -245,7 +251,7 @@ def _synthesize_block(
     if _fences_after < _fences_before:
         _dbg(f"synth[{_tag}]: REJECT fence lost {_fences_before}→{_fences_after}")
         return src, False
-    if len(out) < int(min_ratio * len(src)):
+    if not _length_ratio_ok(out, src, min_ratio=min_ratio):
         _dbg(f"synth[{_tag}]: REJECT length ratio={len(out) / max(1, len(src)):.2f} "
              f"< min_ratio={min_ratio}")
         return src, False
@@ -259,9 +265,9 @@ def _synthesize_block(
     # Probe 2026-07-05: scan CODE-MASKED text — a `# comment` inside a fenced
     # example gemma legitimately added matched the heading regex and killed the
     # rewrite (one reason code fences never survived synthesis).
-    from studio.rubric import mask_fenced_code as _mask
-    headings_before = set(_re.findall(r"(?m)^#{1,3}\s.*$", _mask(src)))
-    _invented = set(_re.findall(r"(?m)^#{1,3}\s.*$", _mask(out))) - headings_before
+    # S3: max_level=3 + mask=True reproduce this site's prior H1-3 + code-masked scan
+    # exactly (findings' reject copy keeps H1-6/unmasked at its own call).
+    _invented = _invented_headings(src, out, max_level=3, mask=True)
     if _invented:
         _dbg(f"synth[{_tag}]: REJECT invented-headings={sorted(_invented)[:3]}")
         return src, False
@@ -341,11 +347,12 @@ def _synthesize_windowed(
     # where an embedder is wired.
     rebuilt = _dedup_paragraphs(rebuilt)
     # Final whole-doc guard: never return something that dropped a URL or shrank overall.
-    urls_before = _norm_urls(src)
-    urls_after = _norm_urls(rebuilt)
-    if not urls_before <= urls_after or not urls_after <= urls_before:
+    # allow_new=False mirrors the per-block synthesis check (no fabricated URL). The
+    # min(min_ratio, 0.80) clamp is this reassembly path's own looser floor (dedup
+    # legitimately shrinks the whole doc), kept at the call site.
+    if not _urls_preserved(src, rebuilt, allow_new=False):
         return src, False
-    if len(rebuilt) < int(min(min_ratio, 0.80) * len(src)):
+    if not _length_ratio_ok(rebuilt, src, min_ratio=min(min_ratio, 0.80)):
         return src, False
     return rebuilt, True
 
@@ -389,7 +396,8 @@ def _refine_readability(
     if not any_changed:
         return src, False
     rebuilt = _dedup_paragraphs("\n\n".join(out_parts))
-    if not _norm_urls(src) <= _norm_urls(rebuilt):
+    # Lost-only (allow_new default True): the readability pass MAY gain URLs.
+    if not _urls_preserved(src, rebuilt):
         return src, False
     return rebuilt, True
 

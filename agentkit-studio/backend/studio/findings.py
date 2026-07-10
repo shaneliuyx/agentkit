@@ -10,18 +10,25 @@ patch-conversion, ranking, and reducer-closure logic is cohesive and stateless
 
 from __future__ import annotations
 
-import hashlib as _hashlib
 import json as _json
 import re as _re
 import time
 
 from studio.prompts import _today_note
 
-# ponytail: Module-level cache for offtopic verdicts. Gray-zone URLs that need
-# judge evaluation are expensive (full LLM round-trip per call). Pages and
-# requirement are fixed within a run, so verdicts are safely cacheable by
-# (normalized_url, sha256_hash_of_requirement). Cap at 512 entries; clear on overflow.
-_OFFTOPIC_VERDICT_CACHE: dict[tuple[str, str], bool] = {}
+# S1: content_word_stems is the shared content-word stemmer (studio.textutil,
+# same 8-word `_MIN_CONTENT_WORDS` threshold); aliased to this module's old name.
+from studio.textutil import content_word_stems as _req_content_words
+
+# S3: the topical-URL oracle plus its density thresholds, verdict regex, and memo
+# cache moved verbatim to studio.guards. Re-exported under the original names so
+# every `from studio.findings import _offtopic_url / _OFFTOPIC_VERDICT_CACHE`
+# (runner's cache-clear at runner.py:2046, research_first._is_offtopic, the codex
+# tests) keeps resolving — and monkeypatching `studio.findings._offtopic_url` still
+# swaps what this module's callers use (they read the module global at call time).
+from studio.guards import invented_headings, length_ratio_ok
+from studio.guards import topical_verdict as _offtopic_url
+from studio.guards import _OFFTOPIC_VERDICT_CACHE  # noqa: F401 — re-export for runner/tests
 
 
 def _weakness_score(
@@ -443,7 +450,7 @@ def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = 
             continue
         if op == "insert_after" and headings and anchor not in headings:
             continue
-        if not content.strip() or len(content) > 2500:
+        if not content.strip() or not length_ratio_ok(content, max_chars=2500):
             continue
         urls = {
             _normalize_url(u.rstrip(".,);]"))
@@ -467,7 +474,11 @@ def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = 
             if any(_offtopic_url(u.rstrip(".,);]"), req_words, requirement, judge) is True
                    for u in raw_urls):
                 continue
-        if _re.search(r"(?m)^#{1,6}\s+", content):
+        # S3: absolute heading ban (before="" → any heading is invented). UNMASKED
+        # (mask=False), H1-6 — reproduces this site's prior `_re.search` exactly; the
+        # artifact_text reject site keeps its own H1-3 + masked args. findings' copy won
+        # the level axis, artifact_text's the masking axis — each preserved at its call.
+        if invented_headings("", content, max_level=6, mask=False):
             continue
         if _re.search(r"(?i)_\((?:pending|to be completed)\s*[-—][^)]*\)_", content):
             continue
@@ -477,94 +488,6 @@ def _sanitize_llm_patches(artifact_text: str, patches: list, requirement: str = 
     return out
 
 
-#: Topical floor calibration (2026-07-05, .web_cache.json of the live Pi/Craft
-#: task — 40 real pages). SET-OVERLAP of requirement words is BROKEN for this:
-#: the 23K-token π-Wikipedia page incidentally hits 8/13 common requirement
-#: words (0.62 — above many genuine pages). What separates junk is DENSITY:
-#: occurrences of requirement-word stems per page token.
-#:   junk:    π-Wikipedia 0.0019, dictionary/use 0.0067, dictionary/limitation 0.0136
-#:   genuine: 0.0124 (a nav page) … 0.32; bulk ≥ 0.018
-#: The bands overlap in [0.010, 0.030], so that gray zone goes to a binary LLM
-#: verdict on the page excerpt (same lesson as studio.relevance: lexical
-#: metrics saturate; a constrained binary classification does not).
-_OFFTOPIC_HARD_DENSITY = 0.010   # below → drop deterministically
-_OFFTOPIC_CLEAR_DENSITY = 0.030  # above → keep deterministically
-_OFFTOPIC_VERDICT_RE = _re.compile(r"\b(IRRELEVANT|RELEVANT)\b", _re.IGNORECASE)
-
-# S1: moved to studio.textutil.content_word_stems (same 8-word threshold, now
-# named `_MIN_CONTENT_WORDS` there); aliased under this module's original name.
-from studio.textutil import content_word_stems as _req_content_words
-
-
-def _offtopic_url(url: str, req_words: set[str], requirement: str = "",
-                  judge=None) -> bool | None:
-    """Judge a cited URL by its CACHED PAGE: True = off-topic, False = on-topic,
-    None = unknown (never cached → cannot judge; the grounding oracle owns
-    fabrication). Density two-tier + LLM gray zone (see calibration above).
-    Fail-open: gray zone without a judge, or a judge error, keeps the URL."""
-    from studio.tools import _page_for_url
-
-    page = _page_for_url(url)
-    if not page:
-        return None
-    from studio.runner import _dbg
-
-    toks = _re.findall(r"[a-z]{4,}", page.lower())
-    if not toks:
-        return None
-    density = sum(1 for t in toks if t.rstrip("s") in req_words) / len(toks)
-    if density < _OFFTOPIC_HARD_DENSITY:
-        _dbg(f"offtopic[{url[:60]}]: DROP density={density:.4f} (hard band)")
-        return True
-    if density > _OFFTOPIC_CLEAR_DENSITY:
-        return False
-    if judge is None:
-        _dbg(f"offtopic[{url[:60]}]: KEEP density={density:.4f} (gray, no judge)")
-        return False
-
-    # Gray zone: check memoization cache before calling judge.
-    norm_url = url.strip().rstrip('/').lower()
-    req_hash = _hashlib.sha256(requirement.encode()).hexdigest()[:12]
-    cache_key = (norm_url, req_hash)
-
-    if cache_key in _OFFTOPIC_VERDICT_CACHE:
-        verdict = _OFFTOPIC_VERDICT_CACHE[cache_key]
-        _dbg(f"offtopic[{url[:60]}]: {'DROP' if verdict else 'KEEP'} "
-             f"density={density:.4f} (gray, judge=CACHED)")
-        return verdict
-
-    try:
-        reply = judge.chat([{"role": "user", "content": (
-            "You judge whether a fetched SOURCE PAGE is about the SPECIFIC "
-            "subject of a task, or merely shares common words with it.\n\n"
-            "IRRELEVANT includes a source that merely DEFINES a word the task "
-            "happens to use (a dictionary-style entry) or covers a DIFFERENT "
-            "subject that shares a name with something in the task (a homonym). "
-            "Sharing vocabulary is not relevance; addressing the task's actual "
-            "subject is.\n\n"
-            f"TASK: {requirement[:400]}\n\n"
-            f"SOURCE PAGE EXCERPT (from {url}):\n{page[:2000]}\n\n"
-            "Answer on the last line with exactly one word: RELEVANT or IRRELEVANT."
-        )}])
-        matches = _OFFTOPIC_VERDICT_RE.findall(getattr(reply, "text", "") or "")
-        verdict = matches[-1].upper() == "IRRELEVANT" if matches else False
-
-        # Cache the verdict before returning.
-        if len(_OFFTOPIC_VERDICT_CACHE) >= 512:
-            _OFFTOPIC_VERDICT_CACHE.clear()
-        _OFFTOPIC_VERDICT_CACHE[cache_key] = verdict
-
-        _dbg(f"offtopic[{url[:60]}]: {'DROP' if verdict else 'KEEP'} "
-             f"density={density:.4f} (gray, judge={'IRRELEVANT' if verdict else 'RELEVANT/unparsed'})")
-        return verdict
-    except Exception as exc:  # noqa: BLE001 — relevance judging is best-effort; keep on failure
-        # Do NOT cache a failure: only a computed verdict may be memoized. A cached
-        # ``None`` was previously returned as-is by the lookup above (line ~534),
-        # inconsistent with this except's own ``return False`` for the SAME failure —
-        # a transient judge error on the first call could silently flip a later
-        # call's return type/value. A failed judge call should simply be retried.
-        _dbg(f"offtopic[{url[:60]}]: KEEP density={density:.4f} (gray, judge error {type(exc).__name__})")
-        return False
 
 
 def _drop_offtopic_findings(findings: list, requirement: str, judge=None) -> tuple[list, int]:

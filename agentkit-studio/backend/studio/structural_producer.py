@@ -28,8 +28,8 @@ from studio.requirement_compliance import (
     _MERMAID_BLOCK_RE,
     _has_code_fence,
 )
+from studio.guards import urls_preserved as _urls_preserved
 from studio.textutil import dbg as _dbg
-from studio.textutil import norm_urls as _norm_urls
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ def _accept(before: str, after: str) -> bool:
     if not _fences_balanced(after):
         _dbg("structural_producer._accept: REJECT — fences unbalanced after insertion")
         return False
-    if not _norm_urls(before) <= _norm_urls(after):
+    if not _urls_preserved(before, after):  # lost-only: insertion may add URLs
         _dbg("structural_producer._accept: REJECT — citation URL lost by insertion")
         return False
     from studio.artifact_lint import lint_artifact
