@@ -1159,11 +1159,16 @@ conditions preserved verbatim.
 **Kills:** most of the 83 ad-hoc excepts; every future pass gets observability for free
 (no more silent-dead passes — the editor-pass and depth-pass blindness were both this).
 
-### S3 — guard primitives (`studio/guards.py`) (MEDIUM RISK) — ⬜ PENDING (next after attempt 8)
-`urls_preserved(before, after)`, `length_ratio_ok`, `no_invented_headings(masked)`,
-`topical_verdict(url, req, judge)` — synthesis guards, `_sanitize_llm_patches`, and
-expand guards COMPOSE these instead of re-implementing. Per-guard unit tests move to
-one file.
+### S3 — guard primitives (`studio/guards.py`) (MEDIUM RISK) — ✅ DONE (committed 2026-07-10)
+`urls_preserved(before, after, *, allow_new)`, `length_ratio_ok(after, before, *, min_ratio, max_chars)`,
+`invented_headings(before, after, *, max_level, mask)`, `topical_verdict(url, req_words, requirement, judge)`
+— synthesis guards, `_sanitize_llm_patches`, expand guards, structural_producer, and runner COMPOSE these
+instead of re-implementing. All fail-open (cannot raise). Per-guard tests in `tests/test_guards.py` pin every
+verbatim threshold. Divergences reconciled EXPLICITLY (no behavior change): count-vs-set left in
+`runner._publish_revision_regressed`; per-site heading level/mask args; caller-supplied topical `req_words`.
+The behavior-improving fixes (close H4-6 heading hole, mask findings headings, unify req_words to base) are
+now a clean opt-in — decoupled from the refactor. Verify: 1131 passed; ruff + F821 clean; import smoke OK;
+2 adversarial reviewers (behavior-drift + fail-open-drift) APPROVE.
 
 ### S4 — delete/move stale scripts — RESOLVED AS NO-OP (2026-07-05)
 Verified: all probe/demo scripts live under `backend/tmp/` which is gitignored — the
@@ -1222,7 +1227,7 @@ Order (each step: suite green → reviewer pass → commit; cold E2E where marke
 | 4 | L3 | lineage immune system: seed-eligibility gate (lint + ≥1 citation + score floor + NOT crashed) | next after S2 commits |
 | 5 | P1+P3+P4+D2+D3 | subject ledger slice: coverage ledger, disambiguation probe, not-found honesty, search-step critic, assumption channel | one slice — all ride the ledger |
 | 6 | L1 (=E-wiring) | editorial pass: wire existing E1/E4/E6/E11 + new E2/E5 + crashed-status rule + judge-model scorer | cold E2E after |
-| 7 | S3 | guard primitives module | |
+| 7 | S3 | guard primitives module | ✅ DONE (committed 2026-07-10) |
 | 8 | E7 | dyn-section birth certificate + requirement-conditioned check | |
 | 9 | L4 | repeat-weakness escalation (uses S2 pass ledger + L1 row evidence) | |
 | 10 | D1 | claims-with-provenance layer | major slice |
