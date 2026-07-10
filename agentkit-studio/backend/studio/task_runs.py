@@ -572,8 +572,23 @@ def _seed_ineligible_reason(run: TaskRun, median: float | None) -> str | None:
     allowlist — the exact hardcoded-exemption-list pattern already rejected once
     during this feature's review as gaming a specific failing test.
     """
-    if run.status != "completed":
+    if run.status in ("failed_partial", "unverified"):
+        # Salvage-eligible latest work, exempt from the completed-only checks below:
+        #  * failed_partial — mid-flight crash, partial artifact is the carry-forward
+        #    win (entry 166);
+        #  * unverified (L1) — the JUDGE was down / could-not-verify, but the artifact
+        #    itself is a real, scored, latest-work document. The judge outage does not
+        #    make the artifact bad, so (like failed_partial) it beats reverting to an
+        #    older seed. It is ALREADY excluded from every improvement signal by the
+        #    ``status='completed'`` filters (completed_runs / similar_runs /
+        #    latest_config), so it seeds without polluting stats.
         return None
+    if run.status == "rejected":
+        # L1: E4 grounding residue — the artifact carries ungrounded citations, a
+        # genuinely bad seed. Recorded for visibility, never carried forward.
+        return "status=rejected — grounding-rejected artifact, seed-excluded (L1)"
+    if run.status != "completed":
+        return f"status={run.status!r} — non-completed, seed-excluded (L1)"
     if run.score <= 0.0:
         return "score<=0.0 (crashed-run signature until status tracks it — PLAN §12 L1)"
     if not URL_RE.search(run.result_text or ""):

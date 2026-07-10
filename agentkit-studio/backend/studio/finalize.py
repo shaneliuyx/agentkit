@@ -955,9 +955,14 @@ def _pass_requirement_compliance(state: FinalizeState) -> FinalizeState:
     runner._epoch_compliance_penalty = 0.0
     runner._epoch_compliance_issues = []
     runner._epoch_quality_opportunities = []
+    # L1: distinguishes "verified: nothing found" from "could NOT verify" (judge
+    # outage). Only the latter degrades the recorded run to status="unverified" so a
+    # blip drops seed-eligibility instead of faking a clean `completed`.
+    runner._epoch_compliance_unavailable = False
     if state.base_client is not None:
         try:
             from studio.requirement_compliance import (
+                ComplianceCheckUnavailable,
                 extract_requirements,
                 requirement_compliance_issues,
             )
@@ -965,18 +970,34 @@ def _pass_requirement_compliance(state: FinalizeState) -> FinalizeState:
                 runner._task_requirements = extract_requirements(
                     state.base_client, state.original_requirement
                 )
-            comp_pen, comp_issues, comp_opps = requirement_compliance_issues(
-                state.base_client,
-                runner._task_requirements,
-                state.scored_text or state.result_output or "",
-            )
-            runner._epoch_compliance_penalty = comp_pen
-            runner._epoch_compliance_issues = comp_issues
-            # OR-sibling opportunities NEVER touch the penalty/hard-issue list — they
-            # only ride into the editor as optional polish.
-            runner._epoch_quality_opportunities = comp_opps
-        except Exception:  # noqa: BLE001 — compliance check is best-effort
-            pass
+            # No extracted requirements ⇒ nothing checkable — NOT an outage. Skip the
+            # strict call so a requirement-free task never reads as "could-not-verify".
+            if runner._task_requirements:
+                try:
+                    comp_pen, comp_issues, comp_opps = requirement_compliance_issues(
+                        state.base_client,
+                        runner._task_requirements,
+                        state.scored_text or state.result_output or "",
+                        strict=True,
+                    )
+                except ComplianceCheckUnavailable as exc:
+                    # Judge down / unparseable reply: dock SKIPPED (score stays the
+                    # deterministic rubric), status carries the "unverified" flag.
+                    runner._epoch_compliance_unavailable = True
+                    _dbg(
+                        "compliance: could-not-verify (judge down: "
+                        f"{exc}) — dock skipped, status→unverified"
+                    )
+                    return state
+                runner._epoch_compliance_penalty = comp_pen
+                runner._epoch_compliance_issues = comp_issues
+                # OR-sibling opportunities NEVER touch the penalty/hard-issue list —
+                # they only ride into the editor as optional polish.
+                runner._epoch_quality_opportunities = comp_opps
+        except Exception as exc:  # noqa: BLE001 — a code bug here is NOT a judge
+            # outage: fail open (dock skipped) but do NOT flag unverified. Log so a
+            # genuinely broken compliance path leaves a trace (no silent swallow).
+            _dbg(f"compliance: non-outage exception (fail-open, status unchanged): {exc!r}")
     return state
 
 
@@ -1077,6 +1098,248 @@ def _pass_evidence_export(state: FinalizeState) -> FinalizeState:
     return state
 
 
+# --------------------------------------------------------------------------- #
+# L1 unified editorial gate (§5.2.4) — a READ-ONLY pass that emits per-row
+# verdicts + evidence and NEVER mutates content. MINOR/MAJOR "fixes" are the
+# existing deterministic passes / next-epoch weakness seeds; REJECT rides status.
+# The row-computing core is a pure function (no Runner / FinalizeState) so the
+# offline probe (backend/tmp/editorial_probe.py) can drive it directly.
+# --------------------------------------------------------------------------- #
+
+_CITE_MARKER_RE = re.compile(r"\[([1-9]\d*)\]")  # citation markers start at [1]; [0] is code indexing
+#: A References-list entry: `[1] ...`, `1. ...`, or `- [1] ...` at line start.
+_REF_ENTRY_RE = re.compile(r"(?m)^\s*(?:-\s*)?(?:\[(\d+)\]|(\d+)\.)\s+\S")
+
+
+def _references_marker_diff(text: str) -> dict[str, list[int]] | None:
+    """Both-ways consistency between References-list entry numbers and the inline
+    ``[N]`` citation markers in the body. ``None`` when there is no References
+    section (caller ⇒ could_not_verify, never a false fail). Number-based because
+    research_first's ASSEMBLE renders inline URLs as ``[N]`` markers (raw URLs are
+    de-stuffed), so a raw-URL compare would false-fail every real artifact."""
+    from studio.artifact_text import _REFERENCES_HEADING_RE
+    m = _REFERENCES_HEADING_RE.search(text or "")
+    if not m:
+        return None
+    from studio.textutil import mask_fenced_code
+    # Mask fenced code in the body before scanning for markers: `arr[0]`/`list[2]`
+    # inside a code block are indexing, not citations, and would false-fail E5.
+    body, refs = mask_fenced_code(text[: m.start()]), text[m.start():]
+    ref_nums = {int(a or b) for a, b in _REF_ENTRY_RE.findall(refs)}
+    body_nums = {int(n) for n in _CITE_MARKER_RE.findall(body)}
+    return {
+        "orphan": sorted(ref_nums - body_nums),      # listed, never cited
+        "dangling": sorted(body_nums - ref_nums),    # cited marker, no entry
+    }
+
+
+def _row(name: str, verdict: str, evidence: str, *, required: bool = False) -> dict[str, Any]:
+    return {"row": name, "verdict": verdict, "evidence": evidence, "required": required}
+
+
+def compute_editorial_rows(
+    *,
+    text: str,
+    required_sections: list[str] | None,
+    coverage: dict | None,
+    rebuild_generated: bool,
+) -> list[dict[str, Any]]:
+    """Pure editorial gate: return one ``{row, verdict, evidence, required}`` per
+    check. ``verdict`` ∈ {"pass","fail","could_not_verify"}. Every row body is
+    wrapped so a raised check degrades to ``could_not_verify`` — a broken check
+    NEVER records a pass and NEVER breaks the run. ``coverage=None`` means the
+    coverage ledger is absent (E3 ⇒ could_not_verify). Generic over any task."""
+    from studio.artifact_lint import lint_artifact
+    from studio.rubric import sections_present
+    from studio.artifact_lint import _stub_section_issues
+
+    rows: list[dict[str, Any]] = []
+    txt = text or ""
+    lints: list[str] = []
+    lint_ok = True  # False ⇒ lint_artifact RAISED; empty `lints` then means
+    # "could not verify", NOT "clean" — E6/E11 must not read it as a pass.
+    try:
+        lints = lint_artifact(txt)
+    except Exception as exc:  # noqa: BLE001
+        lint_ok = False
+        _dbg(f"editorial[lint]: EXCEPTION {exc!r}")
+
+    # E1 — required sections present (deterministic, full-text).
+    try:
+        req = [s for s in (required_sections or []) if s and s.strip()]
+        if not req:
+            rows.append(_row("E1", "pass", "no required sections specified"))
+        else:
+            present = set(sections_present(txt, req))
+            missing = [s for s in req if s not in present]
+            rows.append(_row("E1", "pass" if not missing else "fail",
+                             "all sections present" if not missing
+                             else f"missing sections: {missing}"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E1]: EXCEPTION {exc!r}")
+        rows.append(_row("E1", "could_not_verify", f"exception: {exc!r}"))
+
+    # E2 — no stub sections (thin non-structural bodies).
+    try:
+        stubs = _stub_section_issues(txt)
+        rows.append(_row("E2", "pass" if not stubs else "fail",
+                         "no stub sections" if not stubs else f"stubs: {stubs}"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E2]: EXCEPTION {exc!r}")
+        rows.append(_row("E2", "could_not_verify", f"exception: {exc!r}"))
+
+    # E3 — every subject cited-in-artifact OR declared not-found. Reads the P1
+    # coverage ledger. Missing/empty ledger ⇒ could_not_verify (never a pass).
+    # Required for status ONLY on a research_first run, where coverage.json is a
+    # write contract, so its absence is a real verification gap (not legacy-path).
+    try:
+        if not coverage:
+            rows.append(_row("E3", "could_not_verify", "coverage.json missing/empty",
+                             required=rebuild_generated))
+        else:
+            residual = [
+                s for s, r in coverage.items()
+                if s != "__joint__" and isinstance(r, dict)
+                and int(r.get("cited_in_artifact", 0) or 0) <= 0
+                and int(r.get("sources_fetched", 0) or 0) > 0
+            ]
+            rows.append(_row("E3", "pass" if not residual else "fail",
+                             "all subjects cited-or-declared" if not residual
+                             else f"uncited subjects with sources: {residual}"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E3]: EXCEPTION {exc!r}")
+        rows.append(_row("E3", "could_not_verify", f"exception: {exc!r}"))
+
+    # E4 — citations resolve (grounding). research_first ASSEMBLE unconditionally
+    # runs the artifact-wide ungrounded-sentence drop before returning, so a
+    # rebuild_generated artifact is grounded BY CONSTRUCTION (that code path
+    # provably executed). Absent that construction guarantee ⇒ could_not_verify
+    # (claims set is not available here to re-detect). REJECT residue is enforced
+    # upstream at ASSEMBLE; a "fail" here would ride status→rejected (P1b).
+    try:
+        if rebuild_generated:
+            rows.append(_row("E4", "pass",
+                             "grounded-by-construction (ASSEMBLE artifact-wide drop)"))
+        else:
+            rows.append(_row("E4", "could_not_verify",
+                             "no grounding construction guarantee (non-research_first path)"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E4]: EXCEPTION {exc!r}")
+        rows.append(_row("E4", "could_not_verify", f"exception: {exc!r}"))
+
+    # E5 — References set-consistent both ways (orphan + dangling markers).
+    try:
+        diff = _references_marker_diff(txt)
+        if diff is None:
+            rows.append(_row("E5", "could_not_verify", "no References section"))
+        elif not diff["orphan"] and not diff["dangling"]:
+            rows.append(_row("E5", "pass", "references match body citations both ways"))
+        else:
+            rows.append(_row("E5", "fail",
+                             f"orphan refs {diff['orphan']}, dangling markers {diff['dangling']}"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E5]: EXCEPTION {exc!r}")
+        rows.append(_row("E5", "could_not_verify", f"exception: {exc!r}"))
+
+    # E6 — structural validity (mermaid / table / fence). Subset of the lint list.
+    # Gated on lint_ok: a raised lint check leaves lints=[] (indistinguishable from
+    # clean), so record could_not_verify rather than a false pass.
+    try:
+        if not lint_ok:
+            rows.append(_row("E6", "could_not_verify",
+                             "lint check raised — structural validity unverifiable"))
+        else:
+            struct = [w for w in lints
+                      if any(k in w.lower() for k in ("mermaid", "table", "fence", "code"))]
+            rows.append(_row("E6", "pass" if not struct else "fail",
+                             "structural blocks valid" if not struct else f"structural lints: {struct}"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E6]: EXCEPTION {exc!r}")
+        rows.append(_row("E6", "could_not_verify", f"exception: {exc!r}"))
+
+    # E11 — lint clean (the full deterministic content-validity list). Same lint_ok
+    # gate: no pass when the check could not run.
+    if not lint_ok:
+        rows.append(_row("E11", "could_not_verify",
+                         "lint check raised — content validity unverifiable"))
+    else:
+        rows.append(_row("E11", "pass" if not lints else "fail",
+                         "lint clean" if not lints else f"lint: {lints}"))
+    return rows
+
+
+def _editorial_run_status(rows: list[dict[str, Any]], compliance_unavailable: bool) -> str:
+    """Verdict router → recorded run status. REJECT (E4 residue) → "rejected";
+    a judge outage OR a required row that could-not-verify → "unverified"; else
+    "completed" (MINOR/MAJOR fails still record completed — the fix is the
+    next-epoch weakness seed, never a faked pass and never a 0.0).
+
+    Empty ``rows`` means the gate itself could-not-run (crashed before emitting any
+    row) — that is an UNVERIFIED run, never a silent "completed" with a full score
+    (which would be seed-eligible and poison the lineage median)."""
+    if not rows:
+        return "unverified"
+    # NOTE: E4-fail→"rejected" is currently unreachable (compute_editorial_rows E4
+    # only emits pass/could_not_verify; residue-REJECT is enforced upstream at
+    # ASSEMBLE). If E4-fail is ever wired here, ensure an all-rejected lineage cannot
+    # cold-start latest_with_content past the keep/discard anti-regression gate
+    # (task_runs seed-exclusion of "rejected" must keep at least one servable ancestor).
+    if any(r.get("row") == "E4" and r.get("verdict") == "fail" for r in rows):
+        return "rejected"
+    if compliance_unavailable:
+        return "unverified"
+    if any(r.get("verdict") == "could_not_verify" and r.get("required") for r in rows):
+        return "unverified"
+    return "completed"
+
+
+def _editorial_fail_weaknesses(rows: list[dict[str, Any]]) -> list[str]:
+    """Fail-row evidence as weakness strings → the existing next-epoch seed path."""
+    return [f"[editorial:{r['row']}] {r['evidence']}"
+            for r in rows if r.get("verdict") == "fail"]
+
+
+def _pass_editorial_gate(state: FinalizeState) -> FinalizeState:
+    """L1 read-only editorial gate. Computes per-row verdicts against the FINAL
+    artifact + coverage ledger, stashes them on the runner for the record pass
+    (status + weakness seed), and durably emits ``editorial_rows.json`` beside
+    coverage.json. Never mutates content; fail-open as a whole."""
+    runner = state.runner
+    runner._editorial_rows = []
+    try:
+        import json
+        ws_dir = state.effective_ws_root / state.session.session_id
+        coverage: dict | None = None
+        cov_path = ws_dir / "coverage.json"
+        if cov_path.exists():
+            try:
+                parsed = json.loads(cov_path.read_text(encoding="utf-8"))
+                coverage = parsed if isinstance(parsed, dict) else None
+            except Exception as exc:  # noqa: BLE001
+                _dbg(f"editorial: coverage.json unreadable {exc!r}")
+        rows = compute_editorial_rows(
+            text=state.scored_text or state.result_output or "",
+            required_sections=_scoring_template(state.session),
+            coverage=coverage,
+            rebuild_generated=state.rebuild_generated,
+        )
+        runner._editorial_rows = rows
+        status = _editorial_run_status(
+            rows, getattr(runner, "_epoch_compliance_unavailable", False)
+        )
+        verdict = {r["row"]: r["verdict"] for r in rows}
+        _dbg(f"editorial_gate: status={status} rows={verdict}")
+        try:
+            ws_dir.joinpath("editorial_rows.json").write_text(
+                json.dumps({"status": status, "rows": rows}, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:  # noqa: BLE001 — durable emit is best-effort
+            _dbg(f"editorial_gate: rows.json write fail-open {exc!r}")
+    except Exception as exc:  # noqa: BLE001 — a bad gate must never break the run
+        _dbg(f"editorial_gate: EXCEPTION {exc!r}")
+    return state
+
+
 def _pass_score_scorecard_and_record(state: FinalizeState) -> FinalizeState:
     """Recorded score = deterministic RUBRIC over the FINAL (post-gate) artifact —
     the metric that actually tracks quality (DESIGN §14.2). Computed from the clean
@@ -1156,6 +1419,15 @@ def _pass_score_scorecard_and_record(state: FinalizeState) -> FinalizeState:
     # recorded score to the FINAL weaknesses so an open defect can never read as a
     # perfect score, and a doc with fewer/less-severe weaknesses scores higher.
     score = adjusted_score(rubric_base, weaknesses)
+    # L1: editorial fail rows seed the NEXT epoch (they ride the same weakness list
+    # as compliance/relevance above) WITHOUT re-docking THIS recorded score —
+    # verifiability rides `status`, never the number. Appended after adjusted_score
+    # so the deterministic rubric stays the recorded value.
+    editorial_rows = getattr(runner, "_editorial_rows", None) or []
+    ed_fails = _editorial_fail_weaknesses(editorial_rows)
+    if ed_fails:
+        seen_ew = set(weaknesses)
+        weaknesses = weaknesses + [w for w in ed_fails if w not in seen_ew]
     state.weaknesses = weaknesses
     # Remaining weaknesses are surfaced BELOW the report in the result view via the
     # HillClimbEvent.weaknesses emitted below (the frontend renders them) — they
@@ -1164,12 +1436,20 @@ def _pass_score_scorecard_and_record(state: FinalizeState) -> FinalizeState:
     # the report clean and keeps the next-run seed uncontaminated.
     # Atomic allocate+insert (finding 3): next_version()+record() as two calls let
     # two concurrent runs of this task claim the same version.
+    # L1: run lifecycle status — REJECT(E4)→rejected, judge-outage / required
+    # could-not-verify → unverified, else completed. Non-completed rows are
+    # auto seed-excluded (task_runs._seed_ineligible_reason), so a blip degrades
+    # seed-eligibility, never the recorded number (no 0.0 poisons the lineage).
+    run_status = _editorial_run_status(
+        editorial_rows, getattr(runner, "_epoch_compliance_unavailable", False)
+    )
     version = state.store.record_versioned(
         TaskRun(
             task_hash=state.thash,
             session_id=state.session.session_id,
             version=0,  # allocated atomically inside record_versioned
             score=score,
+            status=run_status,
             weaknesses=weaknesses,
             artifact_path=state.art_path,
             requirement=state.original_requirement,
@@ -1262,6 +1542,7 @@ PASSES: list[tuple[str, PassFn]] = [
     ("prune_resolved_weaknesses", _pass_prune_resolved_weaknesses),
     ("requirement_compliance", _pass_requirement_compliance),
     ("editor", _pass_editor),
+    ("editorial_gate", _pass_editorial_gate),
     ("evidence_export", _pass_evidence_export),
     ("score_scorecard_and_record", _pass_score_scorecard_and_record),
 ]

@@ -185,6 +185,42 @@ def _citation_free_section_issues(text: str) -> list[str]:
     return issues
 
 
+#: E2 (L1): a non-structural section shorter than this many body words is a stub —
+#: a heading with no substantive content behind it. Module const, never per-task.
+_STUB_WORD_FLOOR = 25
+
+
+def _stub_section_issues(text: str, floor: int = _STUB_WORD_FLOOR) -> list[str]:
+    """Sections whose body is a thin stub (< ``floor`` words). Structural sections
+    (code / mermaid fence or a table) are exempt — their content is not prose words.
+    Reference/appendix/glossary/contents headings are skipped (legitimately short).
+    ``split_sections`` returns the heading INSIDE the body, so strip it before the
+    word count. Fail-open to ``[]``. ponytail: an entirely EMPTY heading is tolerated
+    as a container; E1/E11 cover other structure defects."""
+    try:
+        from agentkit.artifacts.sections import split_sections
+    except Exception:  # noqa: BLE001
+        return []
+    issues: list[str] = []
+    for heading, body in split_sections(text or ""):
+        hlow = heading.lower()
+        if any(skip in hlow for skip in
+               ("reference", "appendix", "glossary", "title", "contents")):
+            continue
+        b = body or ""
+        if "```" in b or "\n|" in b:  # code / mermaid / table → structural content
+            continue
+        b = re.sub(r"^#{1,6}\s+.*\n?", "", b, count=1)      # drop the heading echo
+        b = re.sub(r"https?://\S+", " ", b)                  # URLs aren't prose
+        words = re.findall(r"\w+", b)
+        if 0 < len(words) < floor:
+            issues.append(
+                f"[{heading.lstrip('# ').strip()}] Section is a stub "
+                f"({len(words)} words < {floor} floor); needs substantive content."
+            )
+    return issues
+
+
 def _fenced_blocks(text: str) -> list[tuple[str, str, int, int]]:
     lines = (text or "").splitlines()
     blocks: list[tuple[str, str, int, int]] = []
@@ -400,4 +436,9 @@ if __name__ == "__main__":  # pragma: no cover — runnable self-check
     assert lint_artifact(good) == [], lint_artifact(good)
     # odd fences → unbalanced
     assert any("Unbalanced" in w for w in lint_artifact("```python\nx = 1\n"))
+    # E2 stub floor: a thin non-structural section is flagged; a code-dense one is not.
+    stub_doc = "## Analysis\n\nToo short.\n\n## Details\n\n```python\n" + "x = 1\n" * 40 + "```\n"
+    stubs = _stub_section_issues(stub_doc)
+    assert any("Analysis" in w for w in stubs), stubs
+    assert not any("Details" in w for w in stubs), stubs
     print("artifact_lint self-check OK")
