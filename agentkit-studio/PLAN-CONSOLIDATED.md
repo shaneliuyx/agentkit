@@ -1175,14 +1175,25 @@ Verified: all probe/demo scripts live under `backend/tmp/` which is gitignored �
 REPO is already clean; the audit's Pyright sweep saw local disk, not tracked files.
 Local probes are kept deliberately (L6 probe-before-wire values them). No action.
 
-### S5 — measured efficiency wins (ONLY with numbers) — ◐ PARTIAL (offtopic-verdict memoization DONE; rest pending timing numbers)
-- Memoize `rubric_score`/`score_breakdown` per text-hash within a run (called from
-  editor recount loops many times per epoch on identical text). Measure call count via
-  diag before/after.
-- `_page_for_url` / `_url_in_cache` scan the whole cache per lookup — build one
-  normalized-key index per reduce call.
-- NOT speculative async/caching beyond these two; anything else needs a timing number
-  first (T1 stage timings are the instrument).
+### S5 — measured efficiency wins (ONLY with numbers) — ✅ DONE by MEASUREMENT (2026-07-10): both candidates NULL, no code shipped
+- **Offtopic-verdict memoization** — done earlier (kept; relocated into `guards.topical_verdict` by S3).
+- **rubric_score / score_breakdown memo — MEASURED NOT WORTH IT.** Env-gated diag (`STUDIO_S5_DIAG`)
+  on a live research_first run (`s_bf63191ab773`, v89, score 0.6479, 15.8KB artifact, lineage 492bae60177b):
+  `score_breakdown` called **3×/run**, all on identical text (dup=2). A memo saves 2 regex-scans of a 16KB
+  string per **13-min run** ≈ microseconds. The plan's premise — "called many times per epoch from editor
+  recount loops (`_editor_scored_issues`)" — is DEAD on the research_first architecture: the linear
+  FRAME→RESEARCH→CLAIMS→WRITE→ASSEMBLE pipeline scores its artifact a fixed ~3× (assemble + gate new/prior),
+  not dozens. The recount loop that made rubric hot was replaced by §16.
+- **`_page_for_url` / `_url_in_cache` normalized-key index — MEASURED NOT WORTH IT.** Same run: **40 lookups,
+  scan_units=364, max cache_size=16.** ~364 substring-compares total over the whole run — an O(n) scan over a
+  ~16-entry cache is trivial. Worse, the lookup is TOLERANT CONTAINMENT (`u in ck or ck in u`), not exact-key,
+  so a `{norm_url: page}` dict would CHANGE matching semantics — the index would have to be an exact fast-path
+  with fallback to the linear scan, i.e. risk for zero measured gain.
+- **CAVEAT (honest, not overclaimed):** measured on the research_first pipeline (task_hash 492bae60177b), the
+  canonical path. The legacy runner editor-recount path still exists; if it is ever re-exercised as the primary
+  loop, re-measure `rubric_score` hotness there before concluding the memo is dead for THAT path too.
+- Diag instrument was throwaway scaffolding (env-gated, text-only key, no-op when unset) — reverted after
+  capture; not committed. NOT speculative async/caching beyond these; the gate held (null result recorded).
 
 ### Explicit non-goals
 - No behavior changes, no guard-threshold changes, no prompt changes.
@@ -1233,7 +1244,7 @@ Order (each step: suite green → reviewer pass → commit; cold E2E where marke
 | 10 | D1 | claims-with-provenance layer | major slice |
 | 11 | D4 + E8/E9 | write-order DAG (summary-last) + consistency judges | D4 prevents, E8 detects |
 | 12 | P2 | question-first planning | after L1 changes what verify checks |
-| 13 | L5+S5 | economics: verdict memoization (done), rubric memo, cache index, per-run cost line | needs timing numbers |
+| 13 | L5+S5 | economics: verdict memoization (done); rubric memo + cache index MEASURED NULL 2026-07-10 (S5 ✅ no code); per-run cost line still open (L5) | S5 done; L5 cost-line pending |
 | 14 | D5 | belief/uncertainty state | north star, last |
 
 Standing rules unchanged: no hardcoding (test-enforced), no behavior change inside
