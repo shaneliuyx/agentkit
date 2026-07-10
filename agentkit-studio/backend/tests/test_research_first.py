@@ -2366,3 +2366,41 @@ def test_research_zero_source_stays_zero_when_reformulation_empty(monkeypatch, t
     ledger, _a, _r, _anchors, coverage = rf._research(["Solo"], tmp_path, "study Solo", judge, emit=None)
     assert ledger["Solo"] == []
     assert coverage["Solo"]["queries_issued"] == rf._MAX_QUERIES_PER_SUBJECT  # + 0 reformulations
+
+
+# --------------------------------------------------------------------------- #
+# Coverage-ledger: cited_in_artifact counts BODY citations, not References
+# (codex HIGH#1, 2026-07-10). References is rebuilt from EVERY claim URL, so
+# counting presence there would make E3 subject-coverage always pass.
+# --------------------------------------------------------------------------- #
+def test_body_cited_excludes_references_only_url():
+    text = (
+        "## Findings\n\nThe planner is central [1].\n\n"
+        "## References\n\n[1] https://a.test/x\n[2] https://b.test/y\n"
+    )
+    # [1]'s marker is in the body; [2] appears ONLY in References -> not body-cited.
+    assert rf._body_cited_urls({"https://a.test/x", "https://b.test/y"}, text) == {"https://a.test/x"}
+
+
+def test_body_cited_counts_raw_inline_url():
+    text = "See https://a.test/x directly.\n\n## References\n\n[1] https://a.test/x\n"
+    assert rf._body_cited_urls({"https://a.test/x"}, text) == {"https://a.test/x"}
+
+
+def test_body_cited_no_references_scans_whole_text():
+    assert rf._body_cited_urls({"https://a.test/x"}, "Body cites https://a.test/x here.") == {"https://a.test/x"}
+
+
+def test_coverage_cited_uncited_subject_scores_zero():
+    # A subject whose only URL is References-listed but never body-cited must show 0.
+    claims = [
+        {"url": "https://a.test/x", "subjects": ["Alpha"]},
+        {"url": "https://b.test/y", "subjects": ["Beta"]},
+    ]
+    text = (
+        "## Findings\n\nAlpha's planner [1].\n\n"
+        "## References\n\n[1] https://a.test/x\n[2] https://b.test/y\n"
+    )
+    cited = rf._coverage_cited(claims, text)
+    assert cited.get("Alpha") == 1
+    assert cited.get("Beta", 0) == 0  # Beta only in References -> not cited

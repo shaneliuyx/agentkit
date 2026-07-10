@@ -1064,8 +1064,8 @@ def _pass_editor(state: FinalizeState) -> FinalizeState:
         # already produced.
         if editor_weaknesses is not None:
             state.weaknesses = editor_weaknesses
-    except Exception:  # noqa: BLE001 — editor pass must never crash recording
-        pass
+    except Exception as exc:  # noqa: BLE001 — editor pass must never crash recording
+        _dbg(f"editor pass: fail-open (weaknesses left as pre-editor list): {exc!r}")
     runner._stage_add("editor", t_editor)
     return state
 

@@ -265,15 +265,40 @@ def _artifact_cited_urls(claim_urls: set[str], text: str) -> set[str]:
     return {u for u in claim_urls if re.search(re.escape(u) + r"(?![\w/.\-])", text)}
 
 
+def _body_cited_urls(claim_urls: set[str], text: str) -> set[str]:
+    """URLs cited in the BODY (before the References section). A URL merely LISTED
+    in the rebuilt References is NOT counted — References is rebuilt from EVERY claim
+    URL, so counting presence there makes E3 subject-coverage always pass. Body
+    citations render as ``[N]`` markers (raw URLs de-stuffed at ASSEMBLE), so a URL
+    is body-cited iff its reference number's ``[N]`` marker appears in the body; a
+    raw URL still inlined in the body also counts (pre-de-stuff / no-References)."""
+    txt = text or ""
+    from studio.artifact_text import _REFERENCES_HEADING_RE
+    m = _REFERENCES_HEADING_RE.search(txt)
+    if not m:                                                    # no References — scan all
+        return _artifact_cited_urls(claim_urls, txt)
+    body, refs = txt[: m.start()], txt[m.start():]
+    out = set(_artifact_cited_urls(claim_urls, body))            # raw URL inlined in body
+    body_markers = {int(n) for n in re.findall(r"\[([1-9]\d*)\]", body)}
+    for u in claim_urls - out:                                   # else: cited via its [N] marker
+        rm = re.search(
+            r"(?m)^\s*(?:-\s*)?(?:\[(\d+)\]|(\d+)\.)\s+(?:\[[^\]]*\]\()?" + re.escape(u),
+            refs,
+        )
+        if rm and int(rm.group(1) or rm.group(2)) in body_markers:
+            out.add(u)
+    return out
+
+
 def _coverage_cited(claims: list[dict], text: str) -> dict[str, int]:
-    """Per-subject count of cited URLs in the final artifact. Keys on
+    """Per-subject count of BODY-cited URLs in the final artifact. Keys on
     ``claim['url'] -> claim['subjects']`` tags (anchor-grounded, generic) — NEVER
     substring-matches the subject NAME in text (the 'Inflection Pi' collision
     ``_tag_claim`` guards against). ``"__joint__"`` counts URLs tagged with 2+
     subjects. Fail-open to ``{}``."""
     try:
         url_subjects = {c["url"]: (c.get("subjects") or []) for c in claims if c.get("url")}
-        cited = _artifact_cited_urls(set(url_subjects), text)
+        cited = _body_cited_urls(set(url_subjects), text)
         out: dict[str, int] = {}
         for url in cited:
             subs = url_subjects.get(url, [])
@@ -2827,7 +2852,12 @@ def generate_research_first(
     # sources, so any claim about it is unverified; disclose that in a Limitations
     # section if the task has one. Match-only (no _pick_home fallback): absent
     # section => skip, never pollute an unrelated section.
-    not_found = [s for s in subjects if not ledger.get(s)]
+    # Post-recovery (claims-based, NOT the pre-recovery ledger): _coverage_gate can
+    # recover claims for a subject whose research-stage ledger was empty; declaring
+    # "no sources found" while the report USES those recovered claims is a
+    # contradiction. A subject is not-found only if NO post-recovery claim tags it.
+    _subjects_with_claims = {s for c in claims for s in (c.get("subjects") or [])}
+    not_found = [s for s in subjects if s not in _subjects_with_claims]
     limitations_home = next(
         (s for s in sections if s.lower() not in _SKIP_WRITE and _LIMITATIONS_HOME_RE.search(s)),
         None,
@@ -2981,7 +3011,23 @@ def generate_research_first(
     # url->subjects join on the FINAL text, then persist + stream. Immutable:
     # new rows, coverage rebuilt not mutated. Fail-open (_coverage_cited -> {}).
     cited = _coverage_cited(claims, text)
-    coverage = {s: {**row, "cited_in_artifact": cited.get(s, 0)} for s, row in coverage.items()}
+    # Refresh sources_fetched from the POST-recovery claims (recovery only adds), so a
+    # recovered subject is not left at 0 sources — otherwise E3 would skip it (its
+    # residual gate is sources_fetched>0) despite it now carrying recovered evidence.
+    _urls_by_subject: dict[str, set] = {}
+    for c in claims:
+        if c.get("url"):
+            for s in (c.get("subjects") or []):
+                _urls_by_subject.setdefault(s, set()).add(c["url"])
+    coverage = {
+        s: {
+            **row,
+            "cited_in_artifact": cited.get(s, 0),
+            "sources_fetched": max(int(row.get("sources_fetched", 0) or 0),
+                                   len(_urls_by_subject.get(s, ()))),
+        }
+        for s, row in coverage.items()
+    }
     _write_coverage(ws_dir, coverage)
     emit("coverage", coverage)
     lints = lint_artifact(text)

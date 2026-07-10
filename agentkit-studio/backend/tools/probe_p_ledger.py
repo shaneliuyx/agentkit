@@ -14,7 +14,7 @@ import json
 import sys
 from pathlib import Path
 
-from studio.research_first import _artifact_cited_urls, _coverage_cited
+from studio.research_first import _body_cited_urls, _coverage_cited
 
 
 def main(ws_arg: str) -> None:
@@ -27,7 +27,7 @@ def main(ws_arg: str) -> None:
     assert cited, "join returned nothing — cited-URL/subject wiring is broken"
     assert set(cited) <= subjects | {"__joint__"}, "cited a subject not present in claims"
 
-    cited_urls = _artifact_cited_urls({c["url"] for c in claims if c.get("url")}, text)
+    cited_urls = _body_cited_urls({c["url"] for c in claims if c.get("url")}, text)
     for s, n in cited.items():
         if s == "__joint__":
             continue
