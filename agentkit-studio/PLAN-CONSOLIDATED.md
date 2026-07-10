@@ -764,7 +764,7 @@ Craft sources fetched, report silently one-sided.
 | Disambiguation probe | None; researches whatever the first queries happen to return | **P3 subject disambiguation** |
 | Negative-result honesty | Silent omission (fabrication now blocked by guards, but silence remains) | **P4 explicit not-found contract** |
 
-**P1 — subject coverage ledger (highest leverage, cheapest; do first).**
+**P1 — subject coverage ledger (highest leverage, cheapest; do first).** ✅ DONE (committed 2026-07-10, `0f72b1d`; live-verified v90 s_943063443a1b — coverage.json populated {Pi:q3/s3/c5, Craft:q3/s3/c3, __joint__} with P3 descriptors; SSE `coverage` event + durable sink; `_coverage_cited`/`_artifact_cited_urls` boundary-guarded url→subjects join, NOT name-substring)
 Deterministic dict keyed on extracted subjects (extraction item-5 rule supplies
 "covers <subject>" rows): {subject: queries_issued, sources_fetched, cited_in_artifact}.
 Populated from the existing web-tool call log + fetched-sources.json + citation set.
@@ -779,12 +779,12 @@ Hub planning emits research questions + per-question search plans BEFORE section
 assignment; spokes own questions, reducer owns section placement. Sections stop being
 the unit of research.
 
-**P3 — subject disambiguation probe (small, rides on P1).** ⬜ PENDING (§12 slice 5)
+**P3 — subject disambiguation probe (small, rides on P1).** ✅ DONE via REUSE (`0f72b1d`) — `_disambiguate_subject` already existed; slice wired its (descriptor, anchors) into the P1 ledger rows + Scope. Zero rebuild (discovery caught the plan's stale ⬜).
 Per subject: one cheap discovery search + one LLM call "which interpretation of
 <subject> does this task mean? state it in one line" → recorded into Scope section +
 ledger. Kills the silent wrong-subject/no-subject failure mode.
 
-**P4 — explicit not-found contract (small, rides on P1).** ⬜ PENDING (§12 slice 5)
+**P4 — explicit not-found contract (small, rides on P1).** ✅ DONE (`0f72b1d`) — 0-source subject → auto Limitations line (`_limitations_note`, match-only home so it never splices into a wrong section). Live v90 correctly SILENT (both subjects sourced); 0-source path unit-tested.
 Reducer/finalize contract: a subject whose ledger row is empty after the run gets an
 auto-placed Limitations entry ("No public sources found for <subject> under
 interpretation <I>; coverage is limited to <other subjects>"). Honest asymmetry beats
@@ -970,12 +970,12 @@ judgments. Biggest single design change; most downstream payoff.
 stage, extends P1): after each search, one cheap judgment — "do these results
 answer the question? if not, why, and what query next?" — with 2–3 bounded
 reformulations. Failure diagnosis, not just failure detection. Rides on P1's ledger
-(the 0-source subject triggers it).
+(the 0-source subject triggers it). ✅ DONE (`0f72b1d`) — `_reformulate_queries` (≤3 model-proposed queries, fed descriptor/anchors so a retry never regresses to the bare ambiguous name) + bounded retry sharing the SAME offtopic/anchor/name gates via an extracted `_run_query` closure (byte-identical when no reformulation fires); fail-open [] so a 0-source subject never stalls the run. 0-source path unit-tested (live v90 both subjects sourced → critic idle, as designed).
 
 **D3 — assumption/clarification channel** (fixes D-E, small): unresolvable
 disambiguation → recorded assumption, injected into Scope ("interpreting Craft as
 X"), surfaced in GUI/run record. Optional interactive mode: pause-and-ask when the
-user is present. Cheapest item here, disproportionate payoff.
+user is present. Cheapest item here, disproportionate payoff. ✅ DONE via P1 ride (`0f72b1d`) — the disambiguation descriptor/anchors now persist structurally in `coverage.json` + the SSE `coverage` event (surfaced in run record), on top of the existing Scope prose assumption line. Interactive pause-and-ask mode NOT built (deferred; non-interactive assumption-recording is the shipped scope).
 
 **D4 — write-order DAG** (fixes D-D, medium): Evidence-bearing sections draft first;
 Findings synthesize from claims (D1); Exec Summary generated LAST from the final
