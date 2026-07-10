@@ -248,6 +248,63 @@ _TEMPLATE_SUFFIX_MARKERS = (
     "\n\nUnified scoring requirements for this task:",
 )
 _SCOPE_HOME_RE = re.compile(r"(?i)scope")
+#: P4: a 0-source subject's honest disclaimer lands in whichever of these a task's
+#: sections names; None (skip) when none exists — never falls back to an unrelated
+#: section (unlike _pick_home), so the disclaimer only appears where a reader looks.
+_LIMITATIONS_HOME_RE = re.compile(r"(?i)limitation|caveat|open question|reflection")
+
+
+def _artifact_cited_urls(claim_urls: set[str], text: str) -> set[str]:
+    """Subset of ``claim_urls`` that appear in the FINAL artifact. NOTE: cannot
+    reuse ``findings._cited_urls`` — that scans worker DRAFTS (``URL:`` lines /
+    JSON findings), but the finalized markdown carries URLs inline-parenthesized
+    (``(https://…)``) and in a rebuilt References list, so it returns nothing here
+    (verified empirically). Boundary-guarded: the negative lookahead stops a short
+    URL from matching inside a longer one's path (``https://x.io/`` must not count
+    when only ``https://x.io/pkg`` is present)."""
+    return {u for u in claim_urls if re.search(re.escape(u) + r"(?![\w/.\-])", text)}
+
+
+def _coverage_cited(claims: list[dict], text: str) -> dict[str, int]:
+    """Per-subject count of cited URLs in the final artifact. Keys on
+    ``claim['url'] -> claim['subjects']`` tags (anchor-grounded, generic) — NEVER
+    substring-matches the subject NAME in text (the 'Inflection Pi' collision
+    ``_tag_claim`` guards against). ``"__joint__"`` counts URLs tagged with 2+
+    subjects. Fail-open to ``{}``."""
+    try:
+        url_subjects = {c["url"]: (c.get("subjects") or []) for c in claims if c.get("url")}
+        cited = _artifact_cited_urls(set(url_subjects), text)
+        out: dict[str, int] = {}
+        for url in cited:
+            subs = url_subjects.get(url, [])
+            for s in subs:
+                out[s] = out.get(s, 0) + 1
+            if len(subs) >= 2:
+                out["__joint__"] = out.get("__joint__", 0) + 1
+        return out
+    except Exception as exc:  # noqa: BLE001 — a bad cited-join must never break assembly
+        dbg(f"research_first COVERAGE: cited-join fail-open exc={exc!r}")
+        return {}
+
+
+def _limitations_note(not_found: list[str], coverage: dict) -> str:
+    """P4: fixed-contract disclaimer for every 0-source subject. Both slots are
+    run-data (subject name + its resolved descriptor from the ledger); the message
+    template is the only literal. Generic — no domain terms."""
+    return "\n".join(
+        f'- No public sources were found for "{s}" '
+        f"(interpreted as {coverage.get(s, {}).get('descriptor', s)}); claims for it are unverified."
+        for s in not_found
+    )
+
+
+def _write_coverage(ws_dir: Path, coverage: dict) -> None:
+    """Durable sink for the P-ledger, beside ``claims.jsonl`` in the run workspace.
+    Lazy: no runner plumbing, no TaskRun column. Fail-open with a dbg line."""
+    try:
+        ws_dir.joinpath("coverage.json").write_text(json.dumps(coverage, indent=2), "utf-8")
+    except Exception as exc:  # noqa: BLE001
+        dbg(f"research_first COVERAGE: write fail-open exc={exc!r}")
 
 
 def _base_task_text(requirement: str) -> str:
@@ -382,6 +439,44 @@ def _disambiguate_subject(
     descriptor = dm.group(1).strip() if dm else subject
     anchors = [a.strip() for a in (am.group(1).split(",") if am else []) if a.strip()]
     return descriptor, (anchors or [subject])
+
+
+def _reformulate_queries(
+    requirement: str,
+    failed: list[str],
+    subject: str,
+    descriptor: str,
+    anchors: list[str],
+    judge_client: Any,
+) -> list[str]:
+    """D2: <=3 model-proposed retry queries for a subject that fetched ZERO
+    sources. Feeds the descriptor + distinguishing anchors so a retry never
+    regresses to the bare ambiguous name. Query CONTENT is model-derived (no
+    domain literals). Fail-open ``[]`` on no client / parse miss / exception —
+    a 0-source subject then simply stays 0-source, never stalls the run."""
+    if judge_client is None:
+        return []
+    prompt = (
+        f"TASK: {requirement[:400]}\n\n"
+        f'The subject "{subject}" (interpreted as {descriptor}; distinguishing '
+        f'terms: {", ".join(anchors)}) returned ZERO usable sources for these queries:\n'
+        + "\n".join(f"- {q}" for q in failed)
+        + "\n\nPropose up to 3 BETTER web-search queries that KEEP the descriptor and "
+        "distinguishing terms so results stay on the intended interpretation. "
+        "One query per line, no numbering, no prose."
+    )
+    try:
+        reply = judge_client.chat([{"role": "user", "content": prompt}])
+        text = str(getattr(reply, "text", "") or "")
+    except Exception as exc:  # noqa: BLE001 — a bad reformulation must never stall research
+        dbg(f"research_first RESEARCH: reformulate fail-open exc={exc!r}")
+        return []
+    out: list[str] = []
+    for line in text.splitlines():
+        q = line.strip().lstrip("-*0123456789. ").strip()
+        if q and len(out) < 3:
+            out.append(q)
+    return out
 
 
 #: The relationship kinds the classifier may return. A model answer outside this
@@ -605,7 +700,13 @@ def _research(
     judge_client: Any,
     *,
     emit: EmitFn,
-) -> tuple[dict[str, list[dict[str, str]]], list[str], "Relationship", dict[str, list[str]]]:
+) -> tuple[
+    dict[str, list[dict[str, str]]],
+    list[str],
+    "Relationship",
+    dict[str, list[str]],
+    dict[str, dict],
+]:
     """Per subject: disambiguate FIRST (never search the bare subject name
     alone), then fetch up to ``_MAX_SOURCES_PER_SUBJECT`` distinct-domain,
     on-topic pages using the resolved descriptor+anchors. Once all subjects are
@@ -625,6 +726,7 @@ def _research(
     ledger: dict[str, list[dict[str, str]]] = {}
     resolved: dict[str, str] = {}
     all_anchors: dict[str, list[str]] = {}
+    coverage: dict[str, dict] = {}
     assumptions: list[str] = []
     idx = 0
     for subject in subjects:
@@ -641,9 +743,14 @@ def _research(
         disambiguated = anchors != [subject]  # real judge output, not the fail-open sentinel
         sources: list[dict[str, str]] = []
         seen_domains: set[str] = set()
-        for query in queries[:_MAX_QUERIES_PER_SUBJECT]:
+
+        def _run_query(query: str) -> None:
+            """Search + emit + gated fetch for one query, appending survivors to
+            ``sources``. Shared by the primary queries AND the D2 reformulation
+            retry so both apply the identical offtopic/anchor/name gates."""
+            nonlocal idx
             if len(sources) >= _MAX_SOURCES_PER_SUBJECT:
-                break
+                return
             results = _search(query)
             emit("research_query", {"subject": subject, "query": query, "n_results": len(results)})
             for r in results:
@@ -675,8 +782,32 @@ def _research(
                     continue
                 seen_domains.add(domain)
                 sources.append({"url": url, "content": content})
+
+        primary_queries = queries[:_MAX_QUERIES_PER_SUBJECT]
+        for query in primary_queries:
+            _run_query(query)
+        # D2: a subject that fetched nothing gets ONE bounded round of model-
+        # proposed retry queries (descriptor+anchors kept, so a retry never
+        # regresses to the bare ambiguous name). Fail-open [] => no-op.
+        extra_queries: list[str] = []
+        if not sources:
+            extra_queries = _reformulate_queries(
+                requirement, primary_queries, subject, descriptor, anchors, judge_client
+            )
+            for query in extra_queries:
+                _run_query(query)
         ledger[subject] = sources
-        dbg(f"research_first RESEARCH: subject={subject!r} queries={len(queries[:_MAX_QUERIES_PER_SUBJECT])} fetched={len(sources)}")
+        coverage[subject] = {
+            "queries_issued": len(primary_queries) + len(extra_queries),
+            "sources_fetched": len(sources),
+            "cited_in_artifact": 0,  # patched in ASSEMBLE via the url->subjects join
+            "descriptor": descriptor,
+            "anchors": anchors,
+        }
+        dbg(
+            f"research_first RESEARCH: subject={subject!r} "
+            f"queries={len(primary_queries) + len(extra_queries)} fetched={len(sources)}"
+        )
 
     relationship = Relationship("unknown", _NEUTRAL_RELATIONSHIP_DESCRIPTOR, "", [])
     if len(subjects) >= 2:
@@ -758,8 +889,15 @@ def _research(
                 joint.append({"url": url, "content": content})
                 kept += 1
         ledger["__joint__"] = joint
+        coverage["__joint__"] = {
+            "queries_issued": len(joint_queries[:_MAX_JOINT_QUERIES]),
+            "sources_fetched": len(joint),
+            "cited_in_artifact": 0,  # patched in ASSEMBLE
+            "descriptor": "",
+            "anchors": [],
+        }
         dbg(f"research_first RESEARCH: joint queries={len(joint_queries[:_MAX_JOINT_QUERIES])} fetched={len(joint)}")
-    return ledger, assumptions, relationship, all_anchors
+    return ledger, assumptions, relationship, all_anchors, coverage
 
 
 # ---------------------------------------------------------------------------
@@ -2653,7 +2791,7 @@ def generate_research_first(
 
     # 2. RESEARCH
     emit("research", {"subjects": subjects})
-    ledger, assumptions, relationship, all_anchors = _research(
+    ledger, assumptions, relationship, all_anchors, coverage = _research(
         subjects, evidence_dir, requirement, judge_client, emit=emit
     )
     # GENERIC RULE (user): subjects[] and the classified relationship are outputs
@@ -2685,6 +2823,15 @@ def generate_research_first(
     diagram_home = relationship_home if (diagram_needed and wants_integration) else None
     code_home = _pick_home(sections, _CODE_HOME_RE) if code_needed and not multi else None
     scope_home = _pick_home(sections, _SCOPE_HOME_RE)
+    # P4: structural (never an allowlist) — a subject with an empty ledger got no
+    # sources, so any claim about it is unverified; disclose that in a Limitations
+    # section if the task has one. Match-only (no _pick_home fallback): absent
+    # section => skip, never pollute an unrelated section.
+    not_found = [s for s in subjects if not ledger.get(s)]
+    limitations_home = next(
+        (s for s in sections if s.lower() not in _SKIP_WRITE and _LIMITATIONS_HOME_RE.search(s)),
+        None,
+    )
     # ASSEMBLE-phase diagram renders (integration triple + per-subject diagrams)
     # extract plain structured lines from ALREADY-gathered claims — the tool loop
     # degrades that output (live: the triple prompt returned a self-referential
@@ -2725,6 +2872,10 @@ def generate_research_first(
             # assumption, not a silent guess — surfaced where a reader looks
             # for scope, not buried in a dbg line.
             text = text.rstrip() + "\n\n**Assumptions:**\n" + "\n".join(f"- {a}" for a in assumptions)
+        if name == limitations_home and not_found:
+            # P4: fail-open symmetric with Scope — no Limitations section =>
+            # limitations_home is None => this branch never fires.
+            text = text.rstrip() + "\n\n" + _limitations_note(not_found, coverage)
         # REBUILD-LESSONS §3: repair fence contamination at EVERY write boundary,
         # not only once at final assembly — a per-section defect must not survive
         # into a later section's own fence-balance reasoning.
@@ -2826,6 +2977,13 @@ def generate_research_first(
     # sentence never leaves a dangling marker. De-stuffs raw-URL clutter (G4). Uses the
     # SAME primary-first ordering as the References rebuild so [N] and reference N agree.
     text = _apply_citation_markers(text, ordered_claims)
+    # P1: fill the ledger's ASSEMBLE-only dimension (cited_in_artifact) via the
+    # url->subjects join on the FINAL text, then persist + stream. Immutable:
+    # new rows, coverage rebuilt not mutated. Fail-open (_coverage_cited -> {}).
+    cited = _coverage_cited(claims, text)
+    coverage = {s: {**row, "cited_in_artifact": cited.get(s, 0)} for s, row in coverage.items()}
+    _write_coverage(ws_dir, coverage)
+    emit("coverage", coverage)
     lints = lint_artifact(text)
     dbg(
         f"research_first ASSEMBLE: words={len(text.split())} "

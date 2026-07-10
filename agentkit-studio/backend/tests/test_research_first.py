@@ -316,7 +316,7 @@ def test_research_joint_queries_and_assumptions_derive_from_relationship(monkeyp
         "KIND: cooperates\nDESCRIPTOR: X\nANCHORS: a, b\n"
         "MECHANISM: Pi calls Craft via an MCP server\nTERMS: MCP, plugin"
     )
-    _ledger, assumptions, relationship, _anchors = rf._research(
+    _ledger, assumptions, relationship, _anchors, _coverage = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert relationship.kind == "cooperates"
@@ -332,7 +332,7 @@ def test_research_independent_notes_independence_in_assumptions(monkeypatch, tmp
     # fabricated relationship mechanism.
     monkeypatch.setattr(rf, "_search", lambda query, results=5: [])
     judge = _client("KIND: independent\nDESCRIPTOR: Relationship\nANCHORS: a, b")
-    _ledger, assumptions, relationship, _anchors = rf._research(
+    _ledger, assumptions, relationship, _anchors, _coverage = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert relationship.kind == "independent"
@@ -350,7 +350,7 @@ def test_research_joint_loop_drops_source_matching_no_subject_anchor(monkeypatch
         "DESCRIPTOR: X\nANCHORS: pi-ai, pi-agent-core\n"
         "MECHANISM: Pi calls Craft via an MCP server\nVERIFY: MCP, plugin"
     )
-    ledger, _assumptions, _relationship, _anchors = rf._research(
+    ledger, _assumptions, _relationship, _anchors, _coverage = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert ledger["__joint__"] == []
@@ -369,7 +369,7 @@ def test_research_joint_loop_keeps_source_matching_union_anchor(monkeypatch, tmp
         "DESCRIPTOR: X\nANCHORS: mcp-bridge, tool-calling\n"
         "MECHANISM: A calls B via an MCP server\nVERIFY: MCP, plugin"
     )
-    ledger, _assumptions, _relationship, _anchors = rf._research(
+    ledger, _assumptions, _relationship, _anchors, _coverage = rf._research(
         ["Pi", "Craft"], tmp_path, "study Pi and Craft", judge, emit=None
     )
     assert len(ledger["__joint__"]) > 0
@@ -1666,7 +1666,7 @@ def test_joint_research_finds_integration_evidence_via_per_side_query(monkeypatc
         "QUOTE: connect together via an MCP server\n"
         "SUBJECTS: Alpha, Beta\n"
     )
-    ledger, _assumptions, _relationship, all_anchors = rf._research(
+    ledger, _assumptions, _relationship, all_anchors, _coverage = rf._research(
         [A, B], tmp_path, "compare Alpha and Beta agent frameworks", judge, emit=None
     )
     assert ledger["__joint__"], "per-side query should have surfaced the integration page"
@@ -2225,3 +2225,144 @@ def test_demote_stray_h1_keeps_title_demotes_leaks_skips_fences() -> None:
     assert "### Minimal example" in out
     assert "## Section A" in out and "## Section B" in out  # sections untouched
     assert "# this is a code comment" in out               # fence untouched
+
+
+# ---------------------------------------------------------------------------
+# P-ledger slice (P1 coverage + P3 riders / P4 Limitations / D2 reformulation).
+# Subject names below are ARBITRARY test fixtures — no production branch keys on
+# any literal (coverage is keyed on the runtime subjects list + "__joint__").
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_cited_joins_urls_to_subjects_and_flags_joint() -> None:
+    # url -> subjects join (never subject-name substring match); a 2-subject URL
+    # counts under both subjects AND "__joint__".
+    claims = [
+        {"url": "https://a.test/x", "subjects": ["Alpha"]},
+        {"url": "https://a.test/x", "subjects": ["Alpha"]},  # dup URL -> counted once
+        {"url": "https://b.test/y", "subjects": ["Beta"]},
+        {"url": "https://both.test/z", "subjects": ["Alpha", "Beta"]},
+    ]
+    text = (
+        "Alpha uses X (https://a.test/x). Beta does Y (https://b.test/y). "
+        "They connect (https://both.test/z).\n\n## References\n"
+        "- https://a.test/x\n- https://b.test/y\n- https://both.test/z\n"
+    )
+    cited = rf._coverage_cited(claims, text)
+    assert cited == {"Alpha": 2, "Beta": 2, "__joint__": 1}
+
+
+def test_coverage_cited_boundary_guard_short_url_not_matched_in_longer_path() -> None:
+    # A short URL must NOT be counted as cited merely because it is a prefix of a
+    # longer cited URL's path (the pi.dev/ vs pi.dev/packages collision).
+    claims = [
+        {"url": "https://p.test/", "subjects": ["Short"]},
+        {"url": "https://p.test/packages/lib", "subjects": ["Long"]},
+    ]
+    text = "See the package (https://p.test/packages/lib).\n\n## References\n- https://p.test/packages/lib\n"
+    cited = rf._coverage_cited(claims, text)
+    assert cited == {"Long": 1}  # Short's bare URL never appears standalone
+
+
+def test_coverage_cited_fail_open_on_malformed_claims() -> None:
+    # A claim missing keys must not crash the join — fail-open to {}.
+    assert rf._coverage_cited([{"subjects": ["Z"]}], "no urls here") == {}
+    assert rf._coverage_cited("not a list", "text") == {}  # type: ignore[arg-type]
+
+
+def test_limitations_note_is_fixed_contract_with_run_data_slots() -> None:
+    coverage = {"Ghost": {"descriptor": "a CLI ghosting tool"}}
+    note = rf._limitations_note(["Ghost"], coverage)
+    assert note == (
+        '- No public sources were found for "Ghost" '
+        "(interpreted as a CLI ghosting tool); claims for it are unverified."
+    )
+    assert rf._limitations_note([], coverage) == ""  # nothing to disclose
+
+
+def test_reformulate_queries_parses_lines_and_keeps_at_most_three() -> None:
+    judge = _client("1. better alpha query\n- second alpha query\nthird alpha query\nfourth query")
+    out = rf._reformulate_queries("study Alpha", ['"Alpha"'], "Alpha", "Alpha framework", ["a", "b"], judge)
+    assert out == ["better alpha query", "second alpha query", "third alpha query"]
+
+
+def test_reformulate_queries_fails_open_without_client_or_on_error() -> None:
+    assert rf._reformulate_queries("t", [], "A", "A", [], None) == []
+    boom = SimpleNamespace(chat=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert rf._reformulate_queries("t", [], "A", "A", [], boom) == []
+
+
+def test_research_builds_coverage_rows_per_subject(monkeypatch, tmp_path) -> None:
+    # A subject with sources vs a 0-source subject -> correct ledger rows.
+    good = "https://good.test/home"
+    monkeypatch.setattr(
+        rf, "_search",
+        lambda q, results=5: [SimpleNamespace(url=good)] if "Found" in q else [],
+    )
+    # content names both subjects + an anchor so the subject-name/anchor gates pass.
+    monkeypatch.setattr(rf, "_fetch_and_store", lambda url, ev, idx: "Found Missing subject thing content")
+    monkeypatch.setattr(rf, "_is_offtopic", lambda *a, **k: False)
+
+    def judge_chat(messages, tools=None):
+        prompt = messages[0]["content"]
+        m = re.search(r'interpretation of "([^"]+)"', prompt)
+        subj = m.group(1) if m else "?"
+        # keep anchors == [subject]-free so disambiguated=True path stays generic,
+        # but make the descriptor carry the search discriminator "Found"/"Missing".
+        disc = "Found" if subj == "Found" else "Missing"
+        return SimpleNamespace(text=f"DESCRIPTOR: {disc} thing\nANCHORS: subject, thing")
+
+    judge = SimpleNamespace(chat=judge_chat)
+    ledger, _a, _r, _anchors, coverage = rf._research(
+        ["Found", "Missing"], tmp_path, "study Found and Missing", judge, emit=None
+    )
+    assert coverage["Found"]["sources_fetched"] == 1 == len(ledger["Found"])
+    assert coverage["Missing"]["sources_fetched"] == 0 == len(ledger["Missing"])
+    assert coverage["Found"]["descriptor"] == "Found thing"
+    assert coverage["Found"]["cited_in_artifact"] == 0  # filled only in ASSEMBLE
+    assert "__joint__" in coverage  # 2 subjects -> joint row exists
+
+
+def test_research_d2_reformulation_fires_on_zero_sources(monkeypatch, tmp_path) -> None:
+    # A subject that fetches nothing on its primary queries gets a bounded retry;
+    # queries_issued reflects the reformulations, and a recovered source lands.
+    saved = "https://saved.test/page"
+    calls: list[str] = []
+
+    def fake_search(q, results=5):
+        calls.append(q)
+        return [SimpleNamespace(url=saved)] if "RETRY" in q else []
+
+    monkeypatch.setattr(rf, "_search", fake_search)
+    monkeypatch.setattr(rf, "_fetch_and_store", lambda url, ev, idx: "recovered content mentioning the subject")
+    monkeypatch.setattr(rf, "_is_offtopic", lambda *a, **k: False)
+
+    def judge_chat(messages, tools=None):
+        prompt = messages[0]["content"]
+        if "ZERO usable sources" in prompt:  # the reformulation prompt
+            return SimpleNamespace(text="RETRY query one")
+        return SimpleNamespace(text="DESCRIPTOR: Solo thing\nANCHORS: alpha, beta")
+
+    judge = SimpleNamespace(chat=judge_chat)
+    ledger, _a, _r, _anchors, coverage = rf._research(
+        ["Solo"], tmp_path, "study Solo", judge, emit=None
+    )
+    assert len(ledger["Solo"]) == 1  # D2 recovered the source
+    assert coverage["Solo"]["sources_fetched"] == 1
+    # 3 primary queries + 1 reformulation issued.
+    assert coverage["Solo"]["queries_issued"] == rf._MAX_QUERIES_PER_SUBJECT + 1
+    assert any("RETRY" in q for q in calls)
+
+
+def test_research_zero_source_stays_zero_when_reformulation_empty(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(rf, "_search", lambda q, results=5: [])
+
+    def judge_chat(messages, tools=None):
+        if "ZERO usable sources" in messages[0]["content"]:
+            return SimpleNamespace(text="")  # no reformulations proposed
+        return SimpleNamespace(text="DESCRIPTOR: Solo\nANCHORS: a, b")
+
+    judge = SimpleNamespace(chat=judge_chat)
+    ledger, _a, _r, _anchors, coverage = rf._research(["Solo"], tmp_path, "study Solo", judge, emit=None)
+    assert ledger["Solo"] == []
+    assert coverage["Solo"]["queries_issued"] == rf._MAX_QUERIES_PER_SUBJECT  # + 0 reformulations
