@@ -82,15 +82,15 @@ or memory files written before this restructure.
 | Part | Topic | Status |
 |-----|-------|--------|
 | 6.2 | Audit evidence | ✅ done — drove S1–S5 |
-| 6.3 | S-workstreams | S1 ✅ · S2 ✅ · S3 ⬜ (after attempt 9) · S4 ✅ no-op · S5 ◐ |
+| 6.3 | S-workstreams | S1 ✅ · S2 ✅ · S3 ✅ `601a831` (guards.py, 4 fail-open composites) · S4 ✅ no-op · S5 ✅ MEASURED NULL (live diag: rubric 3×/run, cache 16 entries — memo/index would save microseconds; research_first killed the "hot loop" premise) |
 | 6.4 | Verification protocol | ✅ in force — suite 836→890, reviewer pass per slice, live E2E per behavior change |
 | 6.6 | Sequencing (old) | superseded by §12 (now Part 6.5) |
 | 4.1 | Loop-health diagnosis RC1–5 | ✅ complete — every RC now has live evidence + a workstream |
-| 5.5 | L-workstreams | L1 ⬜ (slice 6) · L2 ✅ · L3 ✅ · L4 ⬜ · L5 ◐ · L6 ✅ adopted |
+| 5.5 | L-workstreams | L1 ✅ `371861f` (editorial gate E1–E11 unifier + verdict router + never-record-unverified) · L2 ✅ · L3 ✅ · L4 ⬜ (repeat-weakness escalation; gated on L1 evidence + S2 ledger) · L5 ◐ (verdict/offtopic memo ✅; economics remainder open) · L6 ✅ adopted |
 | 5.4 | L0 structural producer | ✅ committed — code path verified live (v3 0.657); diagram veto attributed, prose fix in review round |
-| 5.1 | Writer reference process P1–P4 | ⬜ — P1 bundle is next major slice (5); prerequisite covers-X extraction ✅ live |
-| 5.2 | Editorial gate E1–E11 | ◐ ~5/11 rows covered (E1/E4/E6/E11 ✅, E3/E5 partial); L1 unifier not started |
-| 5.3 | Design workstreams D1–D5 | ⬜ — D-B's fractal-critic principle partially delivered via S2 ledger + gate logging |
+| 5.1 | Writer reference process P1–P4 | P1 ✅ `0f72b1d` (coverage ledger; codex HIGH×2 body-cited fix `e8e3da7`) · P2 ⬜ (question-first planning — next in chain) · P3 ✅ REUSE `0f72b1d` · P4 ✅ `0f72b1d` |
+| 5.2 | Editorial gate E1–E11 | ✅ L1 unifier LANDED `371861f` — all E1–E11 rows compute; fail-open never records a pass (reviewer HIGH + codex HIGH×2 fixed); verdict router + seed-eligibility gated |
+| 5.3 | Design workstreams D1–D5 | D2 ✅ `0f72b1d` (question-critic reformulation on 0-source) · D3 ✅ `0f72b1d` (assumption recorded in coverage.json + SSE) · D1/D4/D5 ⬜ (fractal-critic partly via S2 ledger + gate logging) |
 | 6.5 | Unified execution order | ACTIVE tracker — slices 1–4 committed; current work = §14 slate (now Part 2.3) |
 | 3.1 | Execution log | living log — one row per committed fix with measured result |
 | 2.3 (slate) / 4.2–4.3 (narrative) | Attempt-8 results + attempt-9 slate | items 1–4 ✅ committed (item 1 = BOTH erasers: A `27beff6` synth fence guard, B `d4e84a9` duplicate-section birth fix + fold-merges; 925 passed) · items 5–8 queued behind §15 re-prioritization (now Part 2.1) |
@@ -98,6 +98,28 @@ or memory files written before this restructure.
 | 2.2 | Rebuild track: research_first.py | 🟢 ACCEPTANCE REACHED — live deterministic runs hold 0.92–1.0 (task_hash `492bae60177b`). GS3 gold-parity axes (Part 1.4-GS4) ALL CLOSED: Code ✅ `0bf8c69` · Diagram edge ✅ `686d7b0` (client-provenance RCA) · References A titled ✅ `030ffba` + B inline `[N]` ✅ `4fb0240` · Sections heading-leak ✅ `5009d8a` + H3 ✅ `bf32bbe` · Detail (relations table + pi-tui roster + dep-order) ✅ `728e524`/`353a95e`/`f807903` · diagram_render hygiene ✅ `1575cc2` · G3 aggregator/mirror de-rank ✅ `0d034d4`. **ALL gold-parity CLOSED — zero open items** |
 | 1.4-GS4 | Gold-parity axis tracker | ✅ COMPLETE — all 5 axes (Code/Diagram/References/Sections/Detail) live-verified per artifact (not score); see §Part 1.4-GS4 table. G3 aggregator/mirror de-rank also ✅ `0d034d4`. **Zero open gold-parity items.** |
 | 1.2 (backlog) / 7.1–7.4 (matrix/negatives/disposition) | Master ledger (merged PLAN-CONSOLIDATED) | ✅ merged 2026-07-05 night — §17.3 (now Part 1.2) = THE unified backlog · matrix delta §17.1 (now Part 7.1) · +4 settled negatives (Part 7.3) · CONSOLIDATED now a stub |
+
+### 1.1b PENDING TASKS (open, as of 2026-07-10)
+
+Acceptance (Part 1.3 a–e) already MET live on `492bae60177b` (0.92–1.0); all
+gold-parity axes CLOSED. Everything below is *durability / depth hardening*, not
+an acceptance blocker. Branch is 153 commits ahead of origin, unpushed.
+
+**GATE — ✅ CLEARED 2026-07-11 (`49563af`):**
+- ✅ **Codex branch audit** — exhaustive pre-push review of all 26 changed `backend/studio/*.py` (run `bitpog13x`; two prior runs hung on stdin-open + monorepo-path-prefix bugs, both fixed). Result: 24 CLEAN, 2 prior fixes re-confirmed, **2 real HIGH found + fixed** (`49563af`): (a) `_page_for_url` substring→exact match (evidence misattribution); (b) E3 coverage-fail→rejected per user ruling. +3 regression tests, suite 1170, ruff clean.
+
+**Chain — gate cleared, P2 now actionable (`start the L1 workflow, then P2, L4`):**
+1. ✅ **L1** editorial gate — DONE `371861f` (+ codex HIGH-1 hardening `49563af`).
+2. ⬜ **P2 — question-first planning** (deep, prompt-level, medium risk; §12 slice 12) — **NEXT, unblocked**. FRAME emits research questions + per-question search plans BEFORE section assignment; questions own the research, section placement is downstream. Sections stop being the unit of research.
+3. ⬜ **L4 — repeat-weakness escalation** (§12). Uses L1 per-row editorial evidence + S2 pass ledger to escalate a weakness that recurs across epochs. *Gated on P2.*
+
+**Other open workstreams (not in the active chain):**
+- ⬜ **D1 / D4 / D5** design workstreams (§12 slices 5/10/11/14) — fractal-critic only partly delivered via S2 ledger + gate logging.
+- ◐ **L5 remainder** — acceptance economics (per-run verdict cost); memoization half already ✅.
+- ⬜ **G1-noise** (semantic joint-claim guard) — paraphrase defeats the lexical compound-noun collision guard; judge-verify each JOINT claim, or drop joint claims whose verbatim quote subject is a compound proper noun. Low-frequency residual.
+- **quarantined, do NOT reopen unless old pipeline outlives it:** buggy `dedupe_sections` fence-masking at `artifact_text.py:662` (reachable only from old-pipeline `normalize_artifact`; research_first is dedupe-free by construction).
+
+**Decision owed to user (not a task):** whether to PUSH the 153-commit branch, and if so squashed/split or as-is. Codex audit is the pre-push gate; push only on explicit word.
 
 ### 1.2 Unified backlog
 
