@@ -656,6 +656,35 @@ def _contract_evidence(claims: list[dict], subject: str) -> int:
     })
 
 
+def _classify_answerability(question: str, judge_client: Any) -> tuple[str, str]:
+    """Codex Answerability Gate: before recovery burns a search, classify whether a
+    question is plausibly answerable from PUBLIC web sources, or STRUCTURALLY
+    unanswerable (needs private/internal data, a future/unknowable outcome, a paywalled
+    primary source, an unverifiable causal claim, or public data that does not exist).
+    ``unanswerable`` → skip the recovery search churn and disclose a REASONED limitation.
+    Fail-open ``("searchable", "")`` (no judge / parse miss / error) — a classifier miss
+    must never suppress a real recovery. Generic, no domain literals."""
+    if judge_client is None:
+        return "searchable", ""
+    prompt = (
+        f"Question: {question}\n\n"
+        "Can this be answered from PUBLIC web sources, or is it STRUCTURALLY unanswerable "
+        "(requires private/internal company data, a future/unknowable outcome, a paywalled "
+        "primary source, an unverifiable causal claim, or public data that does not exist)? "
+        "Reply on ONE line, exactly:\nSEARCHABLE | reason\nor\nUNANSWERABLE | short reason"
+    )
+    try:
+        reply = judge_client.chat([{"role": "user", "content": prompt}])
+        text = str(getattr(reply, "text", "") or "").strip()
+    except Exception as exc:  # noqa: BLE001 — a bad classification must never suppress recovery
+        dbg(f"research_first ANSWERABILITY: fail-open exc={exc!r}")
+        return "searchable", ""
+    parts = [p.strip() for p in text.split("|", 1)]
+    kind = (parts[0].lower() if parts else "")
+    reason = parts[1] if len(parts) > 1 else ""
+    return ("unanswerable", reason) if kind.startswith("unanswer") else ("searchable", reason)
+
+
 def _recover_underevidenced(
     contracts: list[dict], claims: list[dict], resolved: dict[str, str],
     all_anchors: dict[str, list[str]], evidence_dir: Path, requirement: str,
@@ -682,6 +711,18 @@ def _recover_underevidenced(
             subj, need = c["subject"], int(c["min_evidence"])
             if _contract_evidence(claims + new_claims, subj) >= need:
                 continue  # already satisfied → no recovery search
+            # Answerability Gate (codex): don't burn a search on a STRUCTURALLY
+            # unanswerable question — classify first; unanswerable → skip the search
+            # churn and record a REASONED trace (feeds a reasoned Limitation).
+            kind, reason = _classify_answerability(c["question"], judge_client)
+            if kind == "unanswerable":
+                short = need - _contract_evidence(claims + new_claims, subj)
+                traces.append({"question": c["question"], "subject": subj,
+                               "query": "", "sources_added": 0, "short_by": short,
+                               "kind": "unanswerable", "reason": reason})
+                dbg(f"research_first RECOVERY: skip-unanswerable q={c['question']!r} "
+                    f"subj={subj} reason={reason!r}")
+                continue
             if subj == "__joint__":
                 desc = " ".join(resolved.values())[:80]
                 anchors = [a for v in all_anchors.values() for a in v][:4]
@@ -732,15 +773,21 @@ def _recover_underevidenced(
 
 
 def _question_limitations(traces: list[dict]) -> str:
-    """P2.5: one honest Limitations line per question that FAILED recovery — carries
-    the trace (query tried, sources added) so a declared gap is evidenced, never a
+    """P2.5 + Answerability Gate: one honest Limitations line per unresolved question.
+    A structurally-unanswerable question (gate) carries its REASON; a searched-but-
+    failed one carries its recovery trace. Either way the gap is evidenced, never a
     free escape (codex guard). Empty when nothing failed. Generic, no domain terms."""
-    return "\n".join(
-        f'- The question "{t["question"]}" could not be resolved with public sources '
-        f'(recovery search added {t["sources_added"]} source(s), still short by '
-        f'{t["short_by"]}); treated as a limitation.'
-        for t in traces
-    )
+    lines = []
+    for t in traces:
+        if t.get("kind") == "unanswerable":
+            why = t.get("reason") or "not answerable from public sources"
+            lines.append(f'- The question "{t["question"]}" is not answerable from public '
+                         f"sources ({why}); treated as a limitation.")
+        else:
+            lines.append(f'- The question "{t["question"]}" could not be resolved with public '
+                         f'sources (recovery search added {t["sources_added"]} source(s), still '
+                         f'short by {t["short_by"]}); treated as a limitation.')
+    return "\n".join(lines)
 
 
 def _append_question_limitations(text: str, traces: list[dict]) -> str:

@@ -2577,6 +2577,49 @@ def test_append_question_limitations_reconciled_and_references_last():
     assert rf._append_question_limitations("## Body\n\nx\n", tr) == "## Body\n\nx\n"
 
 
+def test_classify_answerability_parses_and_fails_open():
+    assert rf._classify_answerability("q", None) == ("searchable", "")
+    k, r = rf._classify_answerability("q", _client("UNANSWERABLE | needs private billing data"))
+    assert k == "unanswerable" and r == "needs private billing data"
+    assert rf._classify_answerability("q", _client("SEARCHABLE | public docs exist"))[0] == "searchable"
+    assert rf._classify_answerability("q", _client("garbage no pipe"))[0] == "searchable"  # fail-open
+
+
+def test_answerability_gate_skips_search_on_unanswerable(tmp_path, monkeypatch):
+    # A structurally-unanswerable question must NOT burn a recovery search — skip +
+    # reasoned trace (the gap-run's benchmark/cost churn this eliminates).
+    contracts = [{"question": "what is Pi production cost?", "subject": "Pi",
+                  "answer_form": "claim", "min_evidence": 1}]
+    searched: list[str] = []
+    monkeypatch.setattr(rf, "_search", lambda q, **k: (searched.append(q), [])[1])
+    monkeypatch.setattr(rf, "_classify_answerability", lambda q, jc: ("unanswerable", "private billing data"))
+    new, traces = rf._recover_underevidenced(
+        contracts, [], {"Pi": "the Pi SDK"}, {"Pi": ["pi"]}, tmp_path, "req",
+        _client("x"), _client("x"), emit=None)
+    assert searched == []                              # NO search burned
+    assert len(traces) == 1 and traces[0]["kind"] == "unanswerable"
+    assert traces[0]["reason"] == "private billing data" and traces[0]["short_by"] == 1
+    assert new == []
+
+
+def test_answerability_gate_still_searches_when_searchable(tmp_path, monkeypatch):
+    # Searchable classification → recovery proceeds as before (no suppression).
+    contracts = [{"question": "how does Pi work?", "subject": "Pi", "answer_form": "claim", "min_evidence": 1}]
+    searched: list[str] = []
+    monkeypatch.setattr(rf, "_search", lambda q, **k: (searched.append(q), [])[1])
+    monkeypatch.setattr(rf, "_classify_answerability", lambda q, jc: ("searchable", ""))
+    rf._recover_underevidenced(contracts, [], {"Pi": "the Pi SDK"}, {"Pi": ["pi"]},
+                               tmp_path, "req", _client("x"), _client("x"), emit=None)
+    assert len(searched) == 1                          # search DID fire
+
+
+def test_question_limitations_renders_unanswerable_reason():
+    t = [{"question": "prod cost?", "subject": "Pi", "kind": "unanswerable",
+          "reason": "private billing data", "sources_added": 0, "short_by": 1}]
+    out = rf._question_limitations(t)
+    assert "not answerable from public sources" in out and "private billing data" in out
+
+
 def test_question_limitations_renders_trace_and_empty():
     t = [{"question": "hard q", "subject": "__joint__", "query": "d0 d1 hard q",
           "sources_added": 0, "short_by": 2}]
