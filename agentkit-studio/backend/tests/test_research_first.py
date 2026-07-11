@@ -2503,3 +2503,68 @@ def test_resolve_contracts_code_and_comparison_forms():
 
 def test_resolve_contracts_fails_open_empty():
     assert rf._resolve_question_contracts([], "text", {}) == []
+
+
+# --------------------------------------------------------------------------- #
+# P2.5 Phase C — closed-loop recovery + honest gap
+# --------------------------------------------------------------------------- #
+def test_contract_evidence_counts_distinct_urls_per_subject():
+    claims = [
+        {"url": "u1", "subjects": ["Pi"]},
+        {"url": "u1", "subjects": ["Pi"]},           # dup URL → counts once
+        {"url": "u2", "subjects": ["Pi", "Craft"]},  # joint
+        {"url": "u3", "subjects": ["Craft"]},
+    ]
+    assert rf._contract_evidence(claims, "Pi") == 2        # u1, u2
+    assert rf._contract_evidence(claims, "Craft") == 2     # u2, u3
+    assert rf._contract_evidence(claims, "__joint__") == 1  # u2 (>=2 subjects) only
+
+
+def test_recover_skips_satisfied_and_recovers_short(tmp_path, monkeypatch):
+    # Pi satisfied (1 claim, need 1) → NO search (no waste); Craft short (0, need 1) → recovers.
+    claims = [{"url": "u1", "subjects": ["Pi"]}]
+    contracts = [
+        {"question": "pi q", "subject": "Pi", "answer_form": "claim", "min_evidence": 1},
+        {"question": "craft q", "subject": "Craft", "answer_form": "claim", "min_evidence": 1},
+    ]
+    searched: list[str] = []
+    monkeypatch.setattr(rf, "_search",
+                        lambda q, **k: (searched.append(q), [SimpleNamespace(url="http://c.example/x")])[1])
+    monkeypatch.setattr(rf, "_fetch_and_store", lambda url, d, i: "craft content")
+    monkeypatch.setattr(rf, "_is_offtopic", lambda *a, **k: False)
+    monkeypatch.setattr(rf, "_anchor_hits", lambda *a, **k: 1)
+    monkeypatch.setattr(rf, "_extract_claims_from_source",
+                        lambda url, c, subs, cl, **k: [{"url": url, "subjects": ["Craft"], "claim": "x", "quote": ""}])
+    new, traces = rf._recover_underevidenced(
+        contracts, claims, {"Pi": "the Pi SDK", "Craft": "Craft Agents"},
+        {"Pi": ["pi"], "Craft": ["craft"]}, tmp_path, "study Pi and Craft",
+        _client("x"), _client("x"), emit=None)
+    assert len(searched) == 1 and "craft q" in searched[0]  # only the short Q searched
+    assert len(new) == 1 and new[0]["subjects"] == ["Craft"]
+    assert traces == []                                     # Craft now satisfied
+
+
+def test_recover_traces_unrecoverable_question(tmp_path, monkeypatch):
+    contracts = [{"question": "hard q", "subject": "__joint__", "answer_form": "design", "min_evidence": 2}]
+    monkeypatch.setattr(rf, "_search", lambda q, **k: [])   # nothing found
+    new, traces = rf._recover_underevidenced(
+        contracts, [], {"Pi": "d0", "Craft": "d1"}, {"Pi": ["p"], "Craft": ["c"]},
+        tmp_path, "req", _client("x"), _client("x"), emit=None)
+    assert new == []
+    assert len(traces) == 1
+    assert traces[0]["short_by"] == 2 and traces[0]["sources_added"] == 0
+
+
+def test_recover_fails_open(tmp_path, monkeypatch):
+    monkeypatch.setattr(rf, "_search", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    c = [{"question": "q", "subject": "Pi", "answer_form": "claim", "min_evidence": 1}]
+    assert rf._recover_underevidenced(c, [], {"Pi": "d"}, {"Pi": ["p"]}, tmp_path, "r",
+                                      _client("x"), _client("x"), emit=None) == ([], [])
+
+
+def test_question_limitations_renders_trace_and_empty():
+    t = [{"question": "hard q", "subject": "__joint__", "query": "d0 d1 hard q",
+          "sources_added": 0, "short_by": 2}]
+    out = rf._question_limitations(t)
+    assert "hard q" in out and "could not be resolved" in out and "short by 2" in out
+    assert rf._question_limitations([]) == ""

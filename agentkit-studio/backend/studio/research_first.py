@@ -644,6 +644,105 @@ def _resolve_question_contracts(
         return []
 
 
+def _contract_evidence(claims: list[dict], subject: str) -> int:
+    """Distinct cited-URL count available for a contract's subject (claim-level — the
+    Phase-C recovery TRIGGER, pre-WRITE). ``__joint__`` counts claims tagged >=2
+    subjects; otherwise claims tagged that subject."""
+    return len({
+        c["url"] for c in claims if c.get("url") and (
+            (subject == "__joint__" and len(c.get("subjects") or []) >= 2)
+            or subject in (c.get("subjects") or [])
+        )
+    })
+
+
+def _recover_underevidenced(
+    contracts: list[dict], claims: list[dict], resolved: dict[str, str],
+    all_anchors: dict[str, list[str]], evidence_dir: Path, requirement: str,
+    client: Any, judge_client: Any, *, emit: EmitFn,
+) -> tuple[list[dict], list[dict]]:
+    """P2.5 Phase C — closed-loop recovery. For each contract still short of its
+    ``min_evidence`` (claim-level), ONE targeted recovery search (subject descriptor +
+    the literal question), reusing the SAME module-level offtopic/anchor gates as
+    RESEARCH (no re-implementation — the anti-fabrication scars apply identically).
+    Recovered claims are returned for merge. A contract STILL short after recovery gets
+    a failed-recovery TRACE — the ONLY path to a declared question-limitation, so
+    Limitations is never a free escape (codex guard). Returns ``(new_claims, traces)``.
+    Fail-open ``([], [])`` — recovery never stalls a run; a resolved-on-first-pass
+    question triggers NO search (no wasted work)."""
+    from studio.textutil import content_word_stems
+
+    emit = emit or (lambda *_a: None)
+    try:
+        domain_words = content_word_stems(_base_task_text(requirement))
+        idx = len(list(evidence_dir.glob("source-*.md")))
+        new_claims: list[dict] = []
+        traces: list[dict] = []
+        for c in contracts:
+            subj, need = c["subject"], int(c["min_evidence"])
+            if _contract_evidence(claims + new_claims, subj) >= need:
+                continue  # already satisfied → no recovery search
+            if subj == "__joint__":
+                desc = " ".join(resolved.values())[:80]
+                anchors = [a for v in all_anchors.values() for a in v][:4]
+            else:
+                desc = resolved.get(subj, subj)
+                anchors = all_anchors.get(subj, [])
+            query = f"{desc} {c['question']}".strip()
+            disambiguated = bool(anchors) and anchors != [subj]
+            seen = {_domain(x["url"]) for x in claims + new_claims if x.get("url")}
+            added = 0
+            for r in _search(query):
+                url = str(getattr(r, "url", "") or "").strip()
+                dom = _domain(url)
+                if not url or dom in seen:
+                    continue
+                idx += 1
+                content = _fetch_and_store(url, evidence_dir, idx)
+                if not content:
+                    continue
+                if _is_offtopic(url, domain_words, requirement, judge_client):
+                    _discard_evidence_file(evidence_dir, idx)
+                    continue
+                if disambiguated and _anchor_hits(content, anchors) == 0:
+                    _discard_evidence_file(evidence_dir, idx)
+                    continue
+                got = _extract_claims_from_source(
+                    url, content, list(resolved) or [subj], client,
+                    loop_subject=None if subj == "__joint__" else subj,
+                    all_anchors=all_anchors,
+                )
+                if got:
+                    new_claims.extend(got)
+                    seen.add(dom)
+                    added += len(got)
+            short_by = need - _contract_evidence(claims + new_claims, subj)
+            if short_by > 0:
+                traces.append({"question": c["question"], "subject": subj,
+                               "query": query, "sources_added": added, "short_by": short_by})
+                dbg(f"research_first RECOVERY: unresolved q={c['question']!r} "
+                    f"subj={subj} added={added} short_by={short_by}")
+            else:
+                dbg(f"research_first RECOVERY: resolved q={c['question']!r} subj={subj} added={added}")
+        emit("recovery", {"recovered": len(new_claims), "unresolved": len(traces)})
+        return new_claims, traces
+    except Exception as exc:  # noqa: BLE001 — recovery must never stall a run
+        dbg(f"research_first RECOVERY: fail-open exc={exc!r}")
+        return [], []
+
+
+def _question_limitations(traces: list[dict]) -> str:
+    """P2.5: one honest Limitations line per question that FAILED recovery — carries
+    the trace (query tried, sources added) so a declared gap is evidenced, never a
+    free escape (codex guard). Empty when nothing failed. Generic, no domain terms."""
+    return "\n".join(
+        f'- The question "{t["question"]}" could not be resolved with public sources '
+        f'(recovery search added {t["sources_added"]} source(s), still short by '
+        f'{t["short_by"]}); treated as a limitation.'
+        for t in traces
+    )
+
+
 #: The relationship kinds the classifier may return. A model answer outside this
 #: set is not trusted → "unknown". No kind presumes a SOFTWARE relationship;
 #: "cooperates"/"extends" warrant an integration story, "competes"/"alternative"
@@ -2987,6 +3086,22 @@ def generate_research_first(
         client, judge_client, ws_dir, emit=emit,
     )
 
+    # P2.5 Phase C: close the loop — before WRITE, recover any question still short of
+    # its min_evidence with ONE targeted search; a question that stays short after
+    # recovery yields a traced Limitation (never a free escape). Descriptors come from
+    # the coverage rows (no _research signature change). Fail-open ([], []).
+    q_traces: list[dict] = []
+    if contracts:
+        _resolved = {s: r["descriptor"] for s, r in coverage.items()
+                     if isinstance(r, dict) and r.get("descriptor")}
+        _recovered, q_traces = _recover_underevidenced(
+            contracts, claims, _resolved, all_anchors, evidence_dir, requirement,
+            client, judge_client, emit=emit,
+        )
+        if _recovered:
+            claims = claims + _recovered
+            _persist_claims(claims, ws_dir)
+
     # 4. WRITE
     emit("write", {"sections": [s for s in sections if s.lower() not in _SKIP_WRITE]})
     relationship_home = _pick_relationship_home(sections, relationship)
@@ -3056,10 +3171,16 @@ def generate_research_first(
             # assumption, not a silent guess — surfaced where a reader looks
             # for scope, not buried in a dbg line.
             text = text.rstrip() + "\n\n**Assumptions:**\n" + "\n".join(f"- {a}" for a in assumptions)
-        if name == limitations_home and not_found:
+        if name == limitations_home and (not_found or q_traces):
             # P4: fail-open symmetric with Scope — no Limitations section =>
             # limitations_home is None => this branch never fires.
-            text = text.rstrip() + "\n\n" + _limitations_note(not_found, coverage)
+            # P2.5 Phase C: a question that FAILED recovery is disclosed here too, with
+            # its trace — the only path to a declared question-gap (codex guard).
+            _lim = "\n".join(p for p in (
+                _limitations_note(not_found, coverage) if not_found else "",
+                _question_limitations(q_traces) if q_traces else "",
+            ) if p)
+            text = text.rstrip() + "\n\n" + _lim
         # REBUILD-LESSONS §3: repair fence contamination at EVERY write boundary,
         # not only once at final assembly — a per-section defect must not survive
         # into a later section's own fence-balance reasoning.
@@ -3179,6 +3300,9 @@ def generate_research_first(
     # skips via its isinstance(dict) guard). Fail-open [] → key absent. Merged into the
     # same literal as the per-subject rows so the dict stays heterogeneous.
     q_cov = _resolve_question_contracts(contracts, text, cited)
+    # Record Phase-C failed-recovery traces alongside the resolution dimension so an
+    # honest question-gap is inspectable (not just buried in the Limitations prose).
+    q_recovery = q_traces
     coverage = {
         **{
             s: {
@@ -3190,6 +3314,7 @@ def generate_research_first(
             for s, row in coverage.items()
         },
         **({"__questions__": q_cov} if q_cov else {}),
+        **({"__question_recovery__": q_recovery} if q_recovery else {}),
     }
     _write_coverage(ws_dir, coverage)
     emit("coverage", coverage)
