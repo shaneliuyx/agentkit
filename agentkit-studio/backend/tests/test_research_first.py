@@ -2562,6 +2562,21 @@ def test_recover_fails_open(tmp_path, monkeypatch):
                                       _client("x"), _client("x"), emit=None) == ([], [])
 
 
+def test_append_question_limitations_reconciled_and_references_last():
+    text = "## Body\n\ntext\n\n## Limitations\n\nexisting.\n\n## References\n\n[1] x\n"
+    tr = [{"question": "hard Q", "subject": "__joint__", "query": "q",
+           "sources_added": 0, "short_by": 1}]
+    # reconciled-away (caller passes []) → unchanged (the live-caught contradiction fix)
+    assert rf._append_question_limitations(text, []) == text
+    # a real gap appends INTO Limitations, before References (References stays last)
+    out = rf._append_question_limitations(text, tr)
+    assert "hard Q" in out and "could not be resolved" in out
+    assert out.rindex("## References") > out.rindex("could not be resolved")
+    assert out.rindex("## References") > out.rindex("## Limitations")
+    # no Limitations section → fail-open, never fabricate one
+    assert rf._append_question_limitations("## Body\n\nx\n", tr) == "## Body\n\nx\n"
+
+
 def test_question_limitations_renders_trace_and_empty():
     t = [{"question": "hard q", "subject": "__joint__", "query": "d0 d1 hard q",
           "sources_added": 0, "short_by": 2}]

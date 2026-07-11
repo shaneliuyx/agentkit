@@ -743,6 +743,24 @@ def _question_limitations(traces: list[dict]) -> str:
     )
 
 
+def _append_question_limitations(text: str, traces: list[dict]) -> str:
+    """Insert failed-recovery question limitations into the artifact's EXISTING
+    Limitations section (never fabricate one — fail-open to unchanged text). Runs
+    post-ASSEMBLE with ``traces`` already RECONCILED against final resolution, so a
+    question the report actually resolved never also appears as a limitation (the
+    live-caught contradiction). Inserts before the next heading so References stays
+    last."""
+    note = _question_limitations(traces)
+    if not note:
+        return text
+    m = re.search(r"(?im)^#+[ \t]*(?:limitation|caveat|open question|reflection).*$", text)
+    if not m:
+        return text  # no Limitations section → don't fabricate one
+    nxt = re.search(r"(?m)^#+[ \t]", text[m.end():])
+    pos = m.end() + nxt.start() if nxt else len(text)
+    return text[:pos].rstrip() + "\n\n" + note + "\n\n" + text[pos:].lstrip()
+
+
 #: The relationship kinds the classifier may return. A model answer outside this
 #: set is not trusted → "unknown". No kind presumes a SOFTWARE relationship;
 #: "cooperates"/"extends" warrant an integration story, "competes"/"alternative"
@@ -3171,16 +3189,13 @@ def generate_research_first(
             # assumption, not a silent guess — surfaced where a reader looks
             # for scope, not buried in a dbg line.
             text = text.rstrip() + "\n\n**Assumptions:**\n" + "\n".join(f"- {a}" for a in assumptions)
-        if name == limitations_home and (not_found or q_traces):
+        if name == limitations_home and not_found:
             # P4: fail-open symmetric with Scope — no Limitations section =>
-            # limitations_home is None => this branch never fires.
-            # P2.5 Phase C: a question that FAILED recovery is disclosed here too, with
-            # its trace — the only path to a declared question-gap (codex guard).
-            _lim = "\n".join(p for p in (
-                _limitations_note(not_found, coverage) if not_found else "",
-                _question_limitations(q_traces) if q_traces else "",
-            ) if p)
-            text = text.rstrip() + "\n\n" + _lim
+            # limitations_home is None => this branch never fires. (Question-level
+            # limitations are appended post-ASSEMBLE, reconciled against the FINAL
+            # resolution — a recovery trace is provisional and must not contradict a
+            # question the assembled report actually resolved.)
+            text = text.rstrip() + "\n\n" + _limitations_note(not_found, coverage)
         # REBUILD-LESSONS §3: repair fence contamination at EVERY write boundary,
         # not only once at final assembly — a per-section defect must not survive
         # into a later section's own fence-balance reasoning.
@@ -3300,9 +3315,13 @@ def generate_research_first(
     # skips via its isinstance(dict) guard). Fail-open [] → key absent. Merged into the
     # same literal as the per-subject rows so the dict stays heterogeneous.
     q_cov = _resolve_question_contracts(contracts, text, cited)
-    # Record Phase-C failed-recovery traces alongside the resolution dimension so an
-    # honest question-gap is inspectable (not just buried in the Limitations prose).
-    q_recovery = q_traces
+    # Reconcile Phase-C recovery traces with FINAL resolution: a trace is provisional
+    # (pre-WRITE, claim-level evidence); only a question STILL unresolved in the
+    # assembled artifact is a real gap. Filtering here prevents the live-caught
+    # contradiction (a question resolved in __questions__ yet declared a limitation).
+    _unresolved_q = {q["q"] for q in q_cov if not q.get("resolved")}
+    q_recovery = [t for t in q_traces if t.get("question") in _unresolved_q]
+    text = _append_question_limitations(text, q_recovery)
     coverage = {
         **{
             s: {
