@@ -1210,7 +1210,10 @@ def _verify_joint_claim(claim: str, quote: str, subjects: list[str], judge_clien
     except Exception as exc:  # noqa: BLE001 — a bad verify must never drop a real joint claim
         dbg(f"research_first JOINT-NOISE: verify fail-open exc={exc!r}")
         return True
-    return not text.startswith("COINCIDENTAL")
+    # EXACT label only (contract: "Reply exactly RELATIONSHIP or COINCIDENTAL", trailing
+    # punctuation tolerated) — a malformed/ambiguous reply ("COINCIDENTAL? no, relationship")
+    # must KEEP the claim, not drop it (codex: fail-open toward keeping).
+    return re.sub(r"[^A-Z]+$", "", text) != "COINCIDENTAL"
 
 
 def _filter_joint_noise(
@@ -3387,9 +3390,6 @@ def generate_research_first(
 
     # 3. CLAIMS
     claims = _build_claims(ledger, subjects, client, ws_dir, all_anchors)
-    # G1-noise semantic guard: drop joint claims that are coincidental co-mentions rather than
-    # a genuine A-B relationship (the paraphrase gap the lexical collision guard can't close).
-    claims = _filter_joint_noise(claims, subjects, judge_client, ws_dir, emit=emit)
     emit("claims", {"sources": sum(len(v) for v in ledger.values()), "claims": len(claims)})
     claims = _coverage_gate(
         claims, subjects, relationship, all_anchors, evidence_dir, requirement,
@@ -3425,6 +3425,13 @@ def generate_research_first(
         if _recovered:
             claims = claims + _recovered
             _persist_claims(claims, ws_dir)
+
+    # G1-noise semantic guard — AFTER every claim-producing stage (build + coverage-gate
+    # recovery + richness boost + question recovery), BEFORE WRITE: drop joint claims that
+    # are coincidental co-mentions rather than a genuine A-B relationship (the paraphrase gap
+    # the lexical collision guard can't close). Placed here (not after _build_claims) so a
+    # noisy joint claim RECOVERED post-build can't slip into the artifact unfiltered (codex).
+    claims = _filter_joint_noise(claims, subjects, judge_client, ws_dir, emit=emit)
 
     # 4. WRITE
     emit("write", {"sections": [s for s in sections if s.lower() not in _SKIP_WRITE]})

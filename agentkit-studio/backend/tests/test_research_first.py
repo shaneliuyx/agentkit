@@ -1707,6 +1707,9 @@ def test_verify_joint_claim_relationship_vs_coincidental_and_fail_open():
     assert rf._verify_joint_claim("x", "y", ["Pi", "Craft"], None) is True   # no judge → keep
     boom = SimpleNamespace(chat=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     assert rf._verify_joint_claim("x", "y", ["Pi", "Craft"], boom) is True   # judge error → keep
+    # exact label (trailing punctuation tolerated) drops; a malformed/ambiguous reply KEEPS
+    assert rf._verify_joint_claim("c", "q", ["Pi", "Craft"], _client("COINCIDENTAL.")) is False
+    assert rf._verify_joint_claim("c", "q", ["Pi", "Craft"], _client("COINCIDENTAL? no, relationship")) is True
 
 
 def test_filter_joint_noise_drops_coincidental_keeps_rest(tmp_path):
