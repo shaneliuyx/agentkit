@@ -2505,6 +2505,136 @@ def test_resolve_contracts_fails_open_empty():
     assert rf._resolve_question_contracts([], "text", {}) == []
 
 
+#: A comparison table that NAMES both subjects (satisfies the joint-comparison artifact
+#: gate, so these tests isolate the evidence/side-coverage logic).
+_PICRAFT_TABLE = "| Pi | Craft |\n| - | - |\n| delegates | executes |\n"
+
+
+def test_comparison_resolves_by_juxtaposition_distinct_side_sources():
+    # Joint comparison, NO single both-subject page (the verified web ceiling): one grounded
+    # source PER side (Pi from u1, Craft from u2) + a table naming both → resolved.
+    comp = [{"question": "Pi vs Craft delegation?", "subject": "__joint__",
+             "answer_form": "comparison", "min_evidence": 2}]
+    cited = {"Pi": 1, "Craft": 1, "__joint__": 0}          # no both-subject page cited
+    urls = {"Pi": {"http://u1/pi"}, "Craft": {"http://u2/craft"}}
+    r = rf._resolve_question_contracts(comp, _PICRAFT_TABLE, cited, ["Pi", "Craft"], urls)[0]
+    assert r["resolved"] is True and r["evidence"] == 2     # 2 DISTINCT side sources
+
+
+def test_comparison_generic_table_does_not_resolve():
+    # Codex HIGH (symmetric to the diagram gate): a generic table naming NEITHER subject must
+    # not resolve a joint comparison, even with both sides cited.
+    comp = [{"question": "Pi vs Craft?", "subject": "__joint__",
+             "answer_form": "comparison", "min_evidence": 2}]
+    generic = "| A | B |\n| - | - |\n| x | y |\n"
+    cited = {"Pi": 1, "Craft": 1, "__joint__": 0}
+    urls = {"Pi": {"http://u1/pi"}, "Craft": {"http://u2/craft"}}
+    r = rf._resolve_question_contracts(comp, generic, cited, ["Pi", "Craft"], urls)[0]
+    assert r["resolved"] is False and r["mode"] == "no-artifact"
+    # a table naming both sides resolves
+    r2 = rf._resolve_question_contracts(comp, _PICRAFT_TABLE, cited, ["Pi", "Craft"], urls)[0]
+    assert r2["resolved"] is True
+    # codex: a lone pipe LINE naming both (no separator row → not a real table) must NOT resolve
+    fake = "Some prose.\n\n| Pi and Craft |\n\nmore prose.\n"
+    r3 = rf._resolve_question_contracts(comp, fake, cited, ["Pi", "Craft"], urls)[0]
+    assert r3["resolved"] is False and r3["mode"] == "no-artifact"
+
+
+def test_comparison_not_resolved_by_single_both_tagged_url():
+    # Codex gaming guard: ONE url tagged both subjects must NOT satisfy min_evidence=2 via
+    # tag-fanout — distinct-url count is 1 < 2, so it stays under-evidenced.
+    comp = [{"question": "Pi vs Craft?", "subject": "__joint__",
+             "answer_form": "comparison", "min_evidence": 2}]
+    cited = {"Pi": 1, "Craft": 1, "__joint__": 1}          # the both-tagged page bumps both
+    urls = {"Pi": {"http://both/x"}, "Craft": {"http://both/x"}}  # SAME single url
+    r = rf._resolve_question_contracts(comp, _PICRAFT_TABLE, cited, ["Pi", "Craft"], urls)[0]
+    assert r["resolved"] is False and r["evidence"] == 1 and r["mode"] == "under-evidenced"
+
+
+def test_comparison_needs_every_side_sourced():
+    # One side has zero citations → not a real comparison, unresolved even with 2 urls on
+    # the other side (table names both, so the failure is purely side-coverage).
+    comp = [{"question": "Pi vs Craft?", "subject": "__joint__",
+             "answer_form": "comparison", "min_evidence": 2}]
+    cited = {"Pi": 2, "Craft": 0, "__joint__": 0}
+    urls = {"Pi": {"http://u1/pi", "http://u2/pi"}}         # Craft uncited
+    r = rf._resolve_question_contracts(comp, _PICRAFT_TABLE, cited, ["Pi", "Craft"], urls)[0]
+    assert r["resolved"] is False                           # sides_ok fails (Craft has 0)
+
+
+def test_comparison_three_subject_needs_every_side_sourced():
+    # Codex HIGH: len(sides) >= len(subjects) — a 3-subject joint must NOT resolve with only
+    # 2 sides cited (the old >=2 escape hatch). Pi+Craft cited, Zed uncited → unresolved.
+    comp = [{"question": "Pi vs Craft vs Zed?", "subject": "__joint__",
+             "answer_form": "comparison", "min_evidence": 2}]
+    text = "| Pi | Craft | Zed |\n| - | - | - |\n| a | b | c |\n"  # table names all 3
+    cited = {"Pi": 1, "Craft": 1, "Zed": 0, "__joint__": 0}
+    urls = {"Pi": {"http://u1"}, "Craft": {"http://u2"}}       # Zed missing (2 of 3 sides)
+    r = rf._resolve_question_contracts(comp, text, cited, ["Pi", "Craft", "Zed"], urls)[0]
+    assert r["resolved"] is False                              # sides_ok: 2 < 3
+
+
+def test_design_joint_unrelated_diagram_does_not_resolve():
+    # Codex HIGH: joint design artifact must DEPICT both sides. Per-side citations present,
+    # but the only mermaid names one subject → not a real integration diagram → unresolved.
+    design = [{"question": "architecture for integrating Pi and Craft?", "subject": "__joint__",
+               "answer_form": "design", "min_evidence": 2}]
+    lopsided = "```mermaid\ngraph TD\nPi-->X\n```\n"           # names Pi only, no Craft
+    cited = {"Pi": 1, "Craft": 1, "__joint__": 0}
+    urls = {"Pi": {"http://u1/pi"}, "Craft": {"http://u2/craft"}}
+    r = rf._resolve_question_contracts(design, lopsided, cited, ["Pi", "Craft"], urls)[0]
+    assert r["resolved"] is False and r["mode"] == "no-artifact"  # diagram doesn't depict both
+
+
+def test_design_joint_multiword_subjects_generic_diagram_not_resolved():
+    # Codex HIGH: the diagram gate uses STRICT _subject_named (every word), not any-word.
+    # Multi-word subjects "OpenAI Agents SDK" + "Google ADK" must NOT resolve on a generic
+    # diagram "SDK Adapter --> Google Cloud" (only the shared words 'sdk'/'google' appear).
+    design = [{"question": "architecture for integrating OpenAI Agents SDK and Google ADK?",
+               "subject": "__joint__", "answer_form": "design", "min_evidence": 2}]
+    generic = "```mermaid\ngraph TD\nSDK Adapter-->Google Cloud\n```\n"   # no full product name
+    cited = {"OpenAI Agents SDK": 1, "Google ADK": 1, "__joint__": 0}
+    urls = {"OpenAI Agents SDK": {"http://u1"}, "Google ADK": {"http://u2"}}
+    subs = ["OpenAI Agents SDK", "Google ADK"]
+    r = rf._resolve_question_contracts(design, generic, cited, subs, urls)[0]
+    assert r["resolved"] is False and r["mode"] == "no-artifact"
+    # a diagram that FULLY names both products resolves
+    named = "```mermaid\ngraph TD\nOpenAI Agents SDK-->Google ADK\n```\n"
+    r2 = rf._resolve_question_contracts(design, named, cited, subs, urls)[0]
+    assert r2["resolved"] is True
+
+
+def test_design_joint_resolves_by_juxtaposition():
+    # A joint DESIGN/architecture question ("architecture for integrating Pi and Craft") has
+    # the same web ceiling as comparison — extend juxtaposition to design too: per-side
+    # source + a mermaid diagram → resolved. One both-tagged url alone would NOT (distinct=1).
+    design = [{"question": "architecture for integrating Pi and Craft?", "subject": "__joint__",
+               "answer_form": "design", "min_evidence": 2}]
+    diagram = "## Arch\n\n```mermaid\ngraph TD\nPi-->Craft\n```\n"
+    cited = {"Pi": 1, "Craft": 1, "__joint__": 0}
+    urls = {"Pi": {"http://u1/pi"}, "Craft": {"http://u2/craft"}}
+    r = rf._resolve_question_contracts(design, diagram, cited, ["Pi", "Craft"], urls)[0]
+    assert r["resolved"] is True and r["evidence"] == 2
+    # same design question, single both-tagged url → distinct 1 < 2 → unresolved (no gaming)
+    r2 = rf._resolve_question_contracts(design, diagram, {"Pi": 1, "Craft": 1, "__joint__": 1},
+                                        ["Pi", "Craft"], {"Pi": {"http://both"}, "Craft": {"http://both"}})[0]
+    assert r2["resolved"] is False and r2["evidence"] == 1
+
+
+def test_coverage_cited_urls_sets_per_subject():
+    # The URL-set backing: a both-tagged cited url appears under BOTH subjects (one url),
+    # a single-subject cited url under one. Uncited urls excluded.
+    claims = [
+        {"url": "http://both", "subjects": ["Pi", "Craft"], "claim": "c1"},
+        {"url": "http://pi", "subjects": ["Pi"], "claim": "c2"},
+        {"url": "http://uncited", "subjects": ["Craft"], "claim": "c3"},
+    ]
+    text = "See [1](http://both) and [2](http://pi)."       # http://uncited not in body
+    out = rf._coverage_cited_urls(claims, text)
+    assert out.get("Pi") == {"http://both", "http://pi"}
+    assert out.get("Craft") == {"http://both"}              # uncited Craft url excluded
+
+
 # --------------------------------------------------------------------------- #
 # P2.5 Phase C — closed-loop recovery + honest gap
 # --------------------------------------------------------------------------- #

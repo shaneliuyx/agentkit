@@ -601,8 +601,65 @@ def _subject_queries(
     return [f'"{descriptor}"', f"{descriptor} {anchor_phrase}", f"{subject} {anchor_phrase} example"][:cap]
 
 
+def _coverage_cited_urls(claims: list[dict], text: str) -> dict[str, set[str]]:
+    """Per-subject SET of body-cited URLs (the URL-level backing for ``_coverage_cited``'s
+    tag-fanout counts). Comparison resolution needs DISTINCT urls across the compared
+    sides, not per-tag counts: a single page tagged with BOTH subjects must count as ONE
+    source, never manufacture a second evidence unit (codex: tag-fanout gaming). Fail-open
+    ``{}``."""
+    try:
+        url_subjects = {c["url"]: (c.get("subjects") or []) for c in claims if c.get("url")}
+        cited = _body_cited_urls(set(url_subjects), text)
+        out: dict[str, set[str]] = {}
+        for url in cited:
+            for s in url_subjects.get(url, []):
+                out.setdefault(s, set()).add(url)
+        return out
+    except Exception as exc:  # noqa: BLE001 — a bad cited-join must never break assembly
+        dbg(f"research_first COVERAGE: cited-url-set fail-open exc={exc!r}")
+        return {}
+
+
+def _block_names_all_subjects(blocks: list[str], subjects: list[str] | None) -> bool:
+    """A JOINT answer's artifact (a diagram or a comparison table) must NAME every subject
+    in a SINGLE block — prevents a per-side-cited answer plus a generic/unrelated artifact
+    from resolving a joint question (codex, both design AND comparison). Uses the STRICT
+    ``_subject_named`` (EVERY significant word of the subject must appear), not any-one-word:
+    else a multi-word subject "OpenAI Agents SDK" is satisfied by a generic label "SDK
+    Adapter". Honesty gate → biased to false-negatives (a real block abbreviating a subject
+    may miss, safe; a generic block passing fabricates). Residual: a subject whose every word
+    is itself generic can still match an unrelated block — accepted (add anchor-distinctiveness
+    if it ever bites)."""
+    if not subjects:
+        return False
+    return any(all(_subject_named(s, b) for s in subjects) for b in blocks)
+
+
+def _joint_diagram_depicts(text: str, subjects: list[str] | None) -> bool:
+    """Some ``mermaid`` block names every subject (joint design artifact gate)."""
+    return _block_names_all_subjects(re.findall(r"```mermaid\n(.*?)```", text or "", re.S), subjects)
+
+
+#: A REAL markdown-table separator row (``| --- | --- |``, colons allowed) — distinguishes a
+#: genuine table from a lone pipe line like ``| Pi and Craft |`` (codex: a non-table pipe
+#: block naming both subjects must NOT resolve a joint comparison).
+_TABLE_SEPARATOR_RE = re.compile(r"(?m)^\s*\|[\s:|-]*-[\s:|-]*\|\s*$")
+
+
+def _joint_table_depicts(text: str, subjects: list[str] | None) -> bool:
+    """Some genuine markdown table block names every subject (joint comparison artifact gate
+    — global ``has_table`` is too weak; a generic table, or a non-table pipe line, naming no/
+    both subjects must not resolve a joint comparison). A block only counts as a table when it
+    carries a ``| --- | --- |`` separator row, not just any ``| … |`` line."""
+    tables = re.findall(r"(?:^[ \t]*\|.*\|[ \t]*\n?)+", text or "", re.M)
+    real = [t for t in tables if _TABLE_SEPARATOR_RE.search(t)]
+    return _block_names_all_subjects(real, subjects)
+
+
 def _resolve_question_contracts(
-    contracts: list[dict], text: str, cited_by_subject: dict[str, int]
+    contracts: list[dict], text: str, cited_by_subject: dict[str, int],
+    subjects: list[str] | None = None,
+    cited_urls_by_subject: dict[str, set[str]] | None = None,
 ) -> list[dict]:
     """P2.5 measurement (replaces P2's lexical join): is each question's RESOLUTION
     CONTRACT fulfilled? Deterministic — the promised ANSWER FORM's artifact must be
@@ -625,15 +682,43 @@ def _resolve_question_contracts(
         for c in contracts:
             subj, form, need = c["subject"], c["answer_form"], int(c["min_evidence"])
             evidence = int(cited_by_subject.get(subj, 0) or 0)
+            sides_ok = True  # joint side-coverage gate (True for every non-joint contract)
+            # A JOINT relationship question (comparison OR design/architecture of the pair)
+            # is answered by JUXTAPOSITION: one grounded source PER side (cite the Pi source
+            # for Pi's role, the Craft source for Craft's, and relate them) plus the form's
+            # artifact (table / diagram) — NOT a single rare page naming both subjects.
+            # Evidence = DISTINCT cited urls across the sides (a both-tagged page counts
+            # ONCE, never a tag-fanout second unit — codex), and EVERY compared side must
+            # carry >=1 citation (>= len(subjects), not a loose >=2 that a 3-subject task
+            # could pass with one side missing — codex HIGH). Scoped to the joint contract;
+            # a single-subject contract keeps the per-subject rule. (No subjects passed →
+            # strict legacy path preserved.)
+            is_joint_rel = False
+            if subj == "__joint__" and subjects and form in ("comparison", "design"):
+                is_joint_rel = True
+                assert subjects is not None  # narrowed by the guard above
+                urls = cited_urls_by_subject or {}
+                sides = [s for s in subjects if urls.get(s)]
+                distinct = set().union(*(urls[s] for s in sides)) if sides else set()
+                evidence = len(distinct)
+                sides_ok = len(sides) >= len(subjects)  # every side sourced
             if form == "code":
                 artifact_ok = has_code
             elif form == "design":
-                artifact_ok = has_diagram
+                # A joint design answer's artifact must be an integration diagram that
+                # actually DEPICTS both sides — not just any mermaid block globally (codex
+                # HIGH: per-side citations + an unrelated/single-subject diagram must NOT
+                # resolve a joint-architecture question). Non-joint design keeps the global
+                # has_diagram proxy.
+                artifact_ok = _joint_diagram_depicts(text, subjects) if is_joint_rel else has_diagram
             elif form == "comparison":
-                artifact_ok = has_table
+                # A joint comparison's table must actually NAME both sides — not just any
+                # markdown table globally (codex: a generic table naming no subject must not
+                # resolve a joint comparison). Non-joint comparison keeps the global proxy.
+                artifact_ok = _joint_table_depicts(text, subjects) if is_joint_rel else has_table
             else:  # claim / definition — a cited claim IS the artifact
                 artifact_ok = evidence >= 1
-            resolved = artifact_ok and evidence >= need
+            resolved = artifact_ok and sides_ok and evidence >= need
             mode = ("resolved" if resolved
                     else "no-artifact" if not artifact_ok else "under-evidenced")
             out.append({"q": c["question"], "subject": subj, "form": form,
@@ -3451,7 +3536,8 @@ def generate_research_first(
     # per-subject `cited` counts. Top-level "__questions__" list (a non-dict value E3
     # skips via its isinstance(dict) guard). Fail-open [] → key absent. Merged into the
     # same literal as the per-subject rows so the dict stays heterogeneous.
-    q_cov = _resolve_question_contracts(contracts, text, cited)
+    cited_urls = _coverage_cited_urls(claims, text)
+    q_cov = _resolve_question_contracts(contracts, text, cited, subjects, cited_urls)
     # Reconcile Phase-C recovery traces with FINAL resolution: a trace is provisional
     # (pre-WRITE, claim-level evidence); only a question STILL unresolved in the
     # assembled artifact is a real gap. Filtering here prevents the live-caught
