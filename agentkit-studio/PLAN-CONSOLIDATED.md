@@ -108,10 +108,10 @@ an acceptance blocker. Branch is 153 commits ahead of origin, unpushed.
 **GATE — ✅ CLEARED 2026-07-11 (`49563af`):**
 - ✅ **Codex branch audit** — exhaustive pre-push review of all 26 changed `backend/studio/*.py` (run `bitpog13x`; two prior runs hung on stdin-open + monorepo-path-prefix bugs, both fixed). Result: 24 CLEAN, 2 prior fixes re-confirmed, **2 real HIGH found + fixed** (`49563af`): (a) `_page_for_url` substring→exact match (evidence misattribution); (b) E3 coverage-fail→rejected per user ruling. +3 regression tests, suite 1170, ruff clean.
 
-**Chain — gate cleared, P2 now actionable (`start the L1 workflow, then P2, L4`):**
+**Chain (`start the L1 workflow, then P2, L4`):**
 1. ✅ **L1** editorial gate — DONE `371861f` (+ codex HIGH-1 hardening `49563af`).
-2. ⬜ **P2 — question-first planning** (deep, prompt-level, medium risk; §12 slice 12) — **NEXT, unblocked**. FRAME emits research questions + per-question search plans BEFORE section assignment; questions own the research, section placement is downstream. Sections stop being the unit of research.
-3. ⬜ **L4 — repeat-weakness escalation** (§12). Uses L1 per-row editorial evidence + S2 pass ledger to escalate a weakness that recurs across epochs. *Gated on P2.*
+2. ✅ **P2 — question-first planning** — DONE `85e7af9` (spec+approach-A) + `<this commit>` (lexical-floor caveat). FRAME `_extract_questions` decomposes the requirement into per-subject research questions → `_subject_queries` derives search from them (fail-open → subject-generic, byte-identical) → ASSEMBLE records a per-question `__questions__` coverage dimension. **Live-verified** v92 (s_3455ed3e225f, 0.646 completed): 5 questions extracted + drove the searches; run clean, E3/E4 pass. Coverage `answered` flag is a LEXICAL lower-bound (proven 1 false-negative; ~4/5 true) — embedding-cosine upgrade deferred until an E-Q editorial row gates on it (YAGNI). 6 unit tests, suite 1176.
+3. ⬜ **L4 — repeat-weakness escalation** (§12) — **NEXT, unblocked**. Uses L1 per-row editorial evidence + S2 pass ledger to escalate a weakness that recurs across epochs.
 
 **Other open workstreams (not in the active chain):**
 - ⬜ **D1 / D4 / D5** design workstreams (§12 slices 5/10/11/14) — fractal-critic only partly delivered via S2 ledger + gate logging.

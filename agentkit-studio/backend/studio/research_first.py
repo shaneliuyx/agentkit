@@ -602,7 +602,16 @@ def _question_coverage(
     answers a question when it is tagged to the question's subject (any claim for
     ``"__joint__"``) AND its text+quote shares >= half of the question's DISTINCTIVE
     stems. A question with no distinctive stems (all filler/subject-name) is marked
-    answered (unmeasurable is not a failure). Fail-open ``[]``."""
+    answered (unmeasurable is not a failure). Fail-open ``[]``.
+
+    LEXICAL LOWER-BOUND (verified live, s_3455ed3e225f): this is a stem-overlap
+    match, so ``answered=True`` is trustworthy but ``answered=False`` may be a
+    VOCABULARY mismatch, not a real gap — a Pi claim describing "Agent Loop / State
+    Management" scored 0 against a question phrasing it "agentic logic". It never
+    OVER-reports (the harmful direction). When a future E-Q editorial row GATES on
+    this flag, upgrade the match to embedding-cosine over the already-wired BGE-M3
+    embedder (bridges the synonym gap); until something gates on it, the lexical
+    floor is the proportionate signal."""
     try:
         out: list[dict] = []
         for subject, qs in (questions_by_subject or {}).items():
