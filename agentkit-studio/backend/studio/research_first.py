@@ -1183,6 +1183,66 @@ def _tag_claim(
     return list(dict.fromkeys([loop_subject, *[s for s in mentioned if s != loop_subject]]))
 
 
+def _verify_joint_claim(claim: str, quote: str, subjects: list[str], judge_client: Any) -> bool:
+    """G1-noise semantic guard: is a JOINT claim (tagged >=2 subjects) a GENUINE relationship
+    between the subjects, or a coincidental co-mention? The lexical collision guard
+    (``_subject_supported``) only catches a compound-proper-noun qualifier ("Inflection Pi");
+    a bare-name co-mention with no qualifier ("Pi is one of the many compatible models" in a
+    provider list) is lexically clean yet still a different/generic referent. Only a judge can
+    tell interaction from co-occurrence. Conservative: COINCIDENTAL only when there is NO stated
+    interaction. Fail-open ``True`` (no judge / parse miss / error) — a bad judge must NEVER
+    drop a real joint claim (the comparison/relationship coverage depends on them)."""
+    if judge_client is None:
+        return True
+    prompt = (
+        f"Subjects: {' and '.join(subjects)}\n"
+        f"Claim: {claim}\n"
+        f"Verbatim source quote: {quote}\n\n"
+        "Does this claim assert a GENUINE relationship or interaction between the subjects "
+        "(one uses / calls / extends / integrates with / compares to the other), or does it "
+        "merely mention them COINCIDENTALLY (both appear in a list of options, or the names "
+        "collide with unrelated products)? Answer COINCIDENTAL only if there is NO stated "
+        "interaction between them. Reply on ONE line, exactly: RELATIONSHIP or COINCIDENTAL."
+    )
+    try:
+        reply = judge_client.chat([{"role": "user", "content": prompt}])
+        text = str(getattr(reply, "text", "") or "").strip().upper()
+    except Exception as exc:  # noqa: BLE001 — a bad verify must never drop a real joint claim
+        dbg(f"research_first JOINT-NOISE: verify fail-open exc={exc!r}")
+        return True
+    return not text.startswith("COINCIDENTAL")
+
+
+def _filter_joint_noise(
+    claims: list[dict], subjects: list[str], judge_client: Any, ws_dir: Path, *, emit: EmitFn
+) -> list[dict]:
+    """Drop JOINT claims (>=2 subject tags) judged coincidental co-mentions (G1-noise). Only
+    joint claims are judged (one call each — they are few); single-subject claims pass
+    untouched. Fail-open (no judge / <2 subjects / any error → claims unchanged). Re-persists
+    the ledger on change so ``claims.jsonl`` matches what WRITE/coverage consume."""
+    emit = emit or (lambda *_a: None)
+    if judge_client is None or len(subjects) < 2:
+        return claims
+    try:
+        kept: list[dict] = []
+        dropped = 0
+        for c in claims:
+            if len(c.get("subjects") or []) >= 2 and not _verify_joint_claim(
+                c.get("claim", ""), c.get("quote", ""), c.get("subjects") or [], judge_client
+            ):
+                dropped += 1
+                continue
+            kept.append(c)
+        if dropped:
+            _persist_claims(kept, ws_dir)
+            emit("joint_noise", {"dropped": dropped})
+            dbg(f"research_first JOINT-NOISE: dropped {dropped} coincidental joint claim(s)")
+        return kept
+    except Exception as exc:  # noqa: BLE001 — a bad noise filter must never stall a run
+        dbg(f"research_first JOINT-NOISE: fail-open exc={exc!r}")
+        return claims
+
+
 def _research(
     subjects: list[str],
     evidence_dir: Path,
@@ -3327,6 +3387,9 @@ def generate_research_first(
 
     # 3. CLAIMS
     claims = _build_claims(ledger, subjects, client, ws_dir, all_anchors)
+    # G1-noise semantic guard: drop joint claims that are coincidental co-mentions rather than
+    # a genuine A-B relationship (the paraphrase gap the lexical collision guard can't close).
+    claims = _filter_joint_noise(claims, subjects, judge_client, ws_dir, emit=emit)
     emit("claims", {"sources": sum(len(v) for v in ledger.values()), "claims": len(claims)})
     claims = _coverage_gate(
         claims, subjects, relationship, all_anchors, evidence_dir, requirement,

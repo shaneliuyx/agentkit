@@ -1696,6 +1696,46 @@ def test_joint_research_finds_integration_evidence_via_per_side_query(monkeypatc
     assert any(len(c["subjects"]) > 1 for c in claims)
 
 
+def test_verify_joint_claim_relationship_vs_coincidental_and_fail_open():
+    # G1-noise semantic guard: a genuine relationship is kept, a coincidental co-mention
+    # (bare-name "Pi" in a provider list — lexically clean, so the collision guard passes it)
+    # is dropped. Fail-open True on no judge / judge error.
+    assert rf._verify_joint_claim("Craft uses the Pi SDK", "uses the Pi SDK",
+                                  ["Pi", "Craft"], _client("RELATIONSHIP")) is True
+    assert rf._verify_joint_claim("Pi is one of the compatible models", "Pi is one of many",
+                                  ["Pi", "Craft"], _client("COINCIDENTAL")) is False
+    assert rf._verify_joint_claim("x", "y", ["Pi", "Craft"], None) is True   # no judge → keep
+    boom = SimpleNamespace(chat=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert rf._verify_joint_claim("x", "y", ["Pi", "Craft"], boom) is True   # judge error → keep
+
+
+def test_filter_joint_noise_drops_coincidental_keeps_rest(tmp_path):
+    # A coincidental joint co-mention is dropped; a real joint claim AND every single-subject
+    # claim (never judged) survive; the ledger is re-persisted to match.
+    def chat(messages, tools=None):
+        return SimpleNamespace(
+            text="COINCIDENTAL" if "compatible models" in messages[0]["content"] else "RELATIONSHIP")
+    judge = SimpleNamespace(chat=chat)
+    claims = [
+        {"url": "u1", "subjects": ["Pi", "Craft"], "claim": "Craft calls the Pi SDK", "quote": "Craft calls the Pi SDK"},
+        {"url": "u2", "subjects": ["Pi", "Craft"], "claim": "Pi is one of the compatible models", "quote": "Pi is one of the compatible models"},
+        {"url": "u3", "subjects": ["Pi"], "claim": "Pi provides tool calling", "quote": "tool calling"},
+    ]
+    out = rf._filter_joint_noise(claims, ["Pi", "Craft"], judge, tmp_path, emit=None)
+    kept = [c["claim"] for c in out]
+    assert "Craft calls the Pi SDK" in kept and "Pi provides tool calling" in kept
+    assert "Pi is one of the compatible models" not in kept   # coincidental joint dropped
+    import json
+    persisted = [json.loads(x) for x in (tmp_path / "claims.jsonl").read_text().splitlines() if x.strip()]
+    assert len(persisted) == 2                                # ledger re-persisted post-drop
+
+
+def test_filter_joint_noise_fails_open(tmp_path):
+    claims = [{"url": "u1", "subjects": ["Pi", "Craft"], "claim": "x", "quote": "y"}]
+    assert rf._filter_joint_noise(claims, ["Pi", "Craft"], None, tmp_path, emit=None) == claims  # no judge
+    assert rf._filter_joint_noise(claims, ["Pi"], _client("COINCIDENTAL"), tmp_path, emit=None) == claims  # <2 subjects
+
+
 def test_build_claims_subject_page_names_other_via_anchors_grounds_joint(tmp_path) -> None:
     # The generic form of the Pi/Craft fix (mirrors a human researcher): a page
     # fetched under ONE subject's loop that genuinely documents ANOTHER subject —
