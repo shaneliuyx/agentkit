@@ -511,10 +511,12 @@ def test_relation_triple_grounds_direction_and_rejects_reversed_or_invented() ->
               "subjects": ["Craft", "Pi"]}]
 
     class _C:
-        def __init__(self, line): self._line = line
+        def __init__(self, line):
+            self._line = line
+
         def chat(self, _m):
-            class _R: pass
-            r = _R(); r.text = self._line; return r
+            r = SimpleNamespace(text=self._line)
+            return r
 
     subjects = ["Craft", "Pi"]
     # Good: active direction, relation grounded in the cited claim → 4-tuple w/ claim.
@@ -1355,7 +1357,7 @@ def test_summary_written_from_all_body_sections_last() -> None:
         captured["messages"] = messages
         return SimpleNamespace(text="Pi and Craft were both covered above.")
 
-    summary = rf._write_summary("study Pi and Craft", written, SimpleNamespace(chat=_capture_chat))
+    rf._write_summary("study Pi and Craft", written, SimpleNamespace(chat=_capture_chat))
     prompt = captured["messages"][0]["content"]
     # the summary prompt is built FROM the already-written sections, in order
     assert prompt.index("Key Findings") < prompt.index("Evidence and Analysis")
@@ -2429,47 +2431,75 @@ def test_subject_queries_with_questions_searches_answers_plus_fallback():
     assert all(o.startswith("the Pi SDK") for o in out)
 
 
-def test_extract_questions_validates_and_retags():
+def test_extract_question_contracts_validates_form_and_retags():
     reply = (
-        "Pi | How does Pi handle concurrency?\n"
-        "Craft | What browsers does Craft drive?\n"
-        "Nonsense | this tag is unknown so it becomes joint\n"
-        "Pi | " + " ".join(["word"] * 20) + "\n"       # >15 words → dropped
-        "no pipe here so skipped\n"
-        "JOINT | Do Pi and Craft interoperate?\n"
+        "Pi | code | How to implement an agent with Pi?\n"
+        "Craft | design | What architecture does Craft use?\n"
+        "Nonsense | claim | unknown tag becomes joint\n"
+        "Pi | bogusform | falls back to claim form\n"
+        "Pi | claim | " + " ".join(["word"] * 20) + "\n"   # >15 words → dropped
+        "only two | fields\n"                               # <3 fields → skipped
+        "JOINT | comparison | Pi versus Craft on speed?\n"
     )
-    q = rf._extract_questions(_client(reply), "study Pi and Craft", ["Pi", "Craft"])
-    assert q["Pi"] == ["How does Pi handle concurrency?"]
-    assert q["Craft"] == ["What browsers does Craft drive?"]
-    # unknown tag AND explicit JOINT both land under __joint__; overlong dropped.
-    assert q["__joint__"] == ["this tag is unknown so it becomes joint",
-                              "Do Pi and Craft interoperate?"]
+    cs = rf._extract_question_contracts(_client(reply), "study Pi and Craft", ["Pi", "Craft"])
+    by_q = {c["question"]: c for c in cs}
+    assert by_q["How to implement an agent with Pi?"]["answer_form"] == "code"
+    assert by_q["How to implement an agent with Pi?"]["min_evidence"] == 1  # code floor
+    assert by_q["What architecture does Craft use?"]["answer_form"] == "design"
+    assert by_q["What architecture does Craft use?"]["min_evidence"] == 2  # design floor
+    assert by_q["unknown tag becomes joint"]["subject"] == "__joint__"
+    assert by_q["falls back to claim form"]["answer_form"] == "claim"      # bogus → claim
+    assert by_q["Pi versus Craft on speed?"]["answer_form"] == "comparison"
+    assert "word word word" not in by_q  # overlong dropped
+    assert len(cs) == 5
 
 
-def test_extract_questions_fail_open_without_client():
-    assert rf._extract_questions(None, "req", ["Pi"]) == {}
-    assert rf._extract_questions(_client("x"), "req", []) == {}
-
-
-def test_question_coverage_answered_join():
-    claims = [
-        {"subjects": ["Pi"], "claim": "Pi uses a serial and concurrent execution model",
-         "quote": "the harness runs agents concurrently"},
-        {"subjects": ["Craft"], "claim": "Craft drives a Chromium browser", "quote": ""},
+def test_extract_question_contracts_fail_open_and_query_derivation():
+    assert rf._extract_question_contracts(None, "req", ["Pi"]) == []
+    assert rf._extract_question_contracts(_client("x"), "req", []) == []
+    # _questions_by_subject derives the P2 search map from contracts (search unchanged).
+    contracts = [
+        {"question": "q1", "subject": "Pi", "answer_form": "claim", "min_evidence": 1},
+        {"question": "q2", "subject": "Pi", "answer_form": "code", "min_evidence": 1},
+        {"question": "qj", "subject": "__joint__", "answer_form": "design", "min_evidence": 2},
     ]
-    questions = {
-        "Pi": ["How does Pi handle concurrent execution?"],   # answered by claim 1
-        "Craft": ["What are Craft security limits?"],          # no answering claim
-    }
-    cov = rf._question_coverage(claims, questions)
-    by_q = {r["q"]: r["answered"] for r in cov}
-    assert by_q["How does Pi handle concurrent execution?"] is True
-    assert by_q["What are Craft security limits?"] is False
+    assert rf._questions_by_subject(contracts) == {"Pi": ["q1", "q2"], "__joint__": ["qj"]}
 
 
-def test_question_coverage_joint_matches_any_claim_and_fails_open():
-    claims = [{"subjects": ["Pi", "Craft"], "claim": "Pi and Craft interoperate via MCP servers",
-               "quote": "they connect through MCP"}]
-    cov = rf._question_coverage(claims, {"__joint__": ["Do Pi and Craft interoperate via MCP?"]})
-    assert cov[0]["answered"] is True
-    assert rf._question_coverage(claims, {}) == []          # fail-open / empty
+def test_resolve_contracts_claim_form_needs_evidence():
+    # claim/definition form: a cited claim IS the artifact — resolved iff evidence>=need.
+    contracts = [
+        {"question": "what is Pi?", "subject": "Pi", "answer_form": "definition", "min_evidence": 1},
+        {"question": "what is Craft?", "subject": "Craft", "answer_form": "claim", "min_evidence": 1},
+    ]
+    r = {x["subject"]: x for x in rf._resolve_question_contracts(contracts, "body", {"Pi": 2, "Craft": 0})}
+    assert r["Pi"]["resolved"] is True and r["Pi"]["mode"] == "resolved"
+    assert r["Craft"]["resolved"] is False and r["Craft"]["mode"] == "no-artifact"  # 0 cites
+
+
+def test_resolve_contracts_design_needs_diagram_AND_evidence():
+    # design form (was the P2 lexical false-negative): resolved iff a mermaid diagram
+    # exists AND the subject is evidenced >= min_evidence (=2).
+    c = [{"question": "optimal architecture?", "subject": "__joint__", "answer_form": "design", "min_evidence": 2}]
+    diagram = "## X\n\n```mermaid\ngraph TD\nA-->B\n```\n"
+    # diagram present, joint evidence 2 → resolved
+    assert rf._resolve_question_contracts(c, diagram, {"__joint__": 2})[0]["resolved"] is True
+    # diagram present, joint evidence 1 (< need) → under-evidenced (the REAL gap the live run hit)
+    r = rf._resolve_question_contracts(c, diagram, {"__joint__": 1})[0]
+    assert r["resolved"] is False and r["mode"] == "under-evidenced"
+    # no diagram, evidence plenty → no-artifact
+    assert rf._resolve_question_contracts(c, "no diagram here", {"__joint__": 5})[0]["mode"] == "no-artifact"
+
+
+def test_resolve_contracts_code_and_comparison_forms():
+    text = "## Ex\n\n```python\nagent = Pi()\n```\n\n| A | B |\n| - | - |\n| x | y |\n"
+    code_c = [{"question": "code?", "subject": "Pi", "answer_form": "code", "min_evidence": 1}]
+    comp_c = [{"question": "A vs B?", "subject": "Pi", "answer_form": "comparison", "min_evidence": 2}]
+    assert rf._resolve_question_contracts(code_c, text, {"Pi": 1})[0]["resolved"] is True
+    assert rf._resolve_question_contracts(comp_c, text, {"Pi": 2})[0]["resolved"] is True
+    # a mermaid-only doc has no CODE fence → code form not satisfied
+    assert rf._resolve_question_contracts(code_c, "```mermaid\ngraph TD\n```", {"Pi": 5})[0]["mode"] == "no-artifact"
+
+
+def test_resolve_contracts_fails_open_empty():
+    assert rf._resolve_question_contracts([], "text", {}) == []
