@@ -2404,3 +2404,72 @@ def test_coverage_cited_uncited_subject_scores_zero():
     cited = rf._coverage_cited(claims, text)
     assert cited.get("Alpha") == 1
     assert cited.get("Beta", 0) == 0  # Beta only in References -> not cited
+
+
+# --------------------------------------------------------------------------- #
+# P2 — question-first planning (2026-07-11, slice 12)
+# --------------------------------------------------------------------------- #
+def test_subject_queries_without_questions_is_the_original_triple():
+    # No questions → BYTE-IDENTICAL to the pre-P2 query triple (zero regression).
+    out = rf._subject_queries("the Pi SDK", "Pi", "pi agent core", None, cap=3)
+    assert out == ['"the Pi SDK"', "the Pi SDK pi agent core", "Pi pi agent core example"]
+    assert rf._subject_queries("d", "S", "a b", [], cap=3) == ['"d"', "d a b", "S a b example"]
+
+
+def test_subject_queries_with_questions_searches_answers_plus_fallback():
+    qs = ["How does it handle concurrency?", "What are its limits?", "Extra Q", "Overflow Q"]
+    out = rf._subject_queries("the Pi SDK", "Pi", "pi agent core", qs, cap=3)
+    # cap-1 (=2) question queries, each descriptor-prefixed, + one bare-anchor fallback.
+    assert out == [
+        "the Pi SDK How does it handle concurrency?",
+        "the Pi SDK What are its limits?",
+        "the Pi SDK pi agent core",
+    ]
+    # Every query carries the descriptor → downstream anchor/name gates unaffected.
+    assert all(o.startswith("the Pi SDK") for o in out)
+
+
+def test_extract_questions_validates_and_retags():
+    reply = (
+        "Pi | How does Pi handle concurrency?\n"
+        "Craft | What browsers does Craft drive?\n"
+        "Nonsense | this tag is unknown so it becomes joint\n"
+        "Pi | " + " ".join(["word"] * 20) + "\n"       # >15 words → dropped
+        "no pipe here so skipped\n"
+        "JOINT | Do Pi and Craft interoperate?\n"
+    )
+    q = rf._extract_questions(_client(reply), "study Pi and Craft", ["Pi", "Craft"])
+    assert q["Pi"] == ["How does Pi handle concurrency?"]
+    assert q["Craft"] == ["What browsers does Craft drive?"]
+    # unknown tag AND explicit JOINT both land under __joint__; overlong dropped.
+    assert q["__joint__"] == ["this tag is unknown so it becomes joint",
+                              "Do Pi and Craft interoperate?"]
+
+
+def test_extract_questions_fail_open_without_client():
+    assert rf._extract_questions(None, "req", ["Pi"]) == {}
+    assert rf._extract_questions(_client("x"), "req", []) == {}
+
+
+def test_question_coverage_answered_join():
+    claims = [
+        {"subjects": ["Pi"], "claim": "Pi uses a serial and concurrent execution model",
+         "quote": "the harness runs agents concurrently"},
+        {"subjects": ["Craft"], "claim": "Craft drives a Chromium browser", "quote": ""},
+    ]
+    questions = {
+        "Pi": ["How does Pi handle concurrent execution?"],   # answered by claim 1
+        "Craft": ["What are Craft security limits?"],          # no answering claim
+    }
+    cov = rf._question_coverage(claims, questions)
+    by_q = {r["q"]: r["answered"] for r in cov}
+    assert by_q["How does Pi handle concurrent execution?"] is True
+    assert by_q["What are Craft security limits?"] is False
+
+
+def test_question_coverage_joint_matches_any_claim_and_fails_open():
+    claims = [{"subjects": ["Pi", "Craft"], "claim": "Pi and Craft interoperate via MCP servers",
+               "quote": "they connect through MCP"}]
+    cov = rf._question_coverage(claims, {"__joint__": ["Do Pi and Craft interoperate via MCP?"]})
+    assert cov[0]["answered"] is True
+    assert rf._question_coverage(claims, {}) == []          # fail-open / empty

@@ -504,6 +504,136 @@ def _reformulate_queries(
     return out
 
 
+#: A research question longer than this many words is likely a restated task
+#: paragraph, not a crisp question — dropped so queries stay focused (P2).
+_MAX_QUESTION_WORDS = 15
+
+
+def _extract_questions(
+    client: Any, requirement: str, subjects: list[str]
+) -> dict[str, list[str]]:
+    """P2: decompose the requirement into research QUESTIONS, each tagged to a
+    subject (or ``"__joint__"`` for a cross-subject question). RESEARCH then searches
+    for ANSWERS to these instead of gathering subject-generic material. Deterministic
+    validation: a question is kept only if non-empty and ``<= _MAX_QUESTION_WORDS``
+    words; an unknown tag is re-tagged ``"__joint__"`` (never dropped). Fail-open
+    ``{}`` (no client / parse miss / exception) → the caller falls back to the
+    subject-generic query triple, byte-identically. Question CONTENT is model-derived
+    (no domain literals)."""
+    if client is None or not subjects:
+        return {}
+    subj_list = "\n".join(f"- {s}" for s in subjects)
+    prompt = (
+        f"TASK: {requirement[:600]}\n\n"
+        f"SUBJECTS:\n{subj_list}\n\n"
+        "List the specific research QUESTIONS this task must answer. Tag each to the "
+        "ONE subject it is about, or JOINT if it spans subjects. One per line, exactly:\n"
+        "SUBJECT | question\n"
+        "Keep each question short and specific. No preamble, no numbering."
+    )
+    try:
+        reply = client.chat([{"role": "user", "content": prompt}])
+        text = str(getattr(reply, "text", "") or "")
+    except Exception as exc:  # noqa: BLE001 — a bad decomposition must never stall the run
+        dbg(f"research_first FRAME: extract_questions fail-open exc={exc!r}")
+        return {}
+    lower_subjects = {s.lower(): s for s in subjects}
+    out: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        if "|" not in line:
+            continue
+        tag, q = (p.strip() for p in line.split("|", 1))
+        q = q.lstrip("-*0123456789. ").strip()
+        if not q or len(q.split()) > _MAX_QUESTION_WORDS:
+            continue
+        subject = lower_subjects.get(tag.lower(), "__joint__")
+        out.setdefault(subject, []).append(q)
+    return out
+
+
+def _subject_queries(
+    descriptor: str,
+    subject: str,
+    anchor_phrase: str,
+    questions: list[str] | None,
+    *,
+    cap: int,
+) -> list[str]:
+    """The per-subject search queries (extracted for unit-testing). With P2 questions
+    present: one ``{descriptor} {question}`` query per question so search targets what
+    the requirement ASKS, plus a bare-anchor fallback so the subject still gathers if
+    its question queries return thin. Without questions: the original descriptor/anchor
+    triple (byte-identical). Every query carries the descriptor, so the downstream
+    anchor/name CONTENT gates are unaffected."""
+    qs = [q for q in (questions or []) if q and q.strip()]
+    if qs:
+        out = [f"{descriptor} {q}".strip() for q in qs[: max(1, cap - 1)]]
+        out.append(f"{descriptor} {anchor_phrase}".strip())  # fallback: still gather
+        return out
+    return [f'"{descriptor}"', f"{descriptor} {anchor_phrase}", f"{subject} {anchor_phrase} example"][:cap]
+
+
+#: Common 4+char question/filler words filtered before the question-vs-claim stem
+#: join — they carry no topical signal and would false-match ("what" in a claim).
+#: NOT domain terms. content_word_stems' _MIN_CONTENT_WORDS=8 floor makes it useless
+#: for a single short question, so P2 uses this floor-free stemmer instead.
+_QUESTION_STOPWORDS = frozenset({
+    "what", "when", "where", "which", "whom", "whose", "does", "will", "would",
+    "could", "should", "about", "than", "then", "these", "those", "there", "here",
+    "have", "been", "into", "from", "with", "this", "that", "they", "them", "their",
+    "your", "yours", "only", "also", "such", "each", "both", "some", "many", "much",
+})
+
+
+def _question_stems(text: str) -> set[str]:
+    """Floor-free content stems (4+char words minus filler), for the short-text
+    question/claim join where ``content_word_stems``' 8-word floor returns nothing."""
+    return {
+        w.rstrip("s")
+        for w in re.findall(r"[a-z]{4,}", (text or "").lower())
+        if w not in _QUESTION_STOPWORDS
+    }
+
+
+def _question_coverage(
+    claims: list[dict], questions_by_subject: dict[str, list[str]]
+) -> list[dict]:
+    """P2 coverage dimension: per question, whether >=1 claim ANSWERS it. A claim
+    answers a question when it is tagged to the question's subject (any claim for
+    ``"__joint__"``) AND its text+quote shares >= half of the question's DISTINCTIVE
+    stems. A question with no distinctive stems (all filler/subject-name) is marked
+    answered (unmeasurable is not a failure). Fail-open ``[]``."""
+    try:
+        out: list[dict] = []
+        for subject, qs in (questions_by_subject or {}).items():
+            relevant = [
+                c for c in claims
+                if subject == "__joint__" or subject in (c.get("subjects") or [])
+            ]
+            claim_stems = [
+                _question_stems(f"{c.get('claim', '')} {c.get('quote', '')}") for c in relevant
+            ]
+            # Strip the SUBJECT's own stems from the question: the subject name is in
+            # every claim tagged to it, so leaving it in makes any question about the
+            # subject trivially "answered" via the shared subject token. Match on the
+            # DISTINCTIVE question terms instead. (__joint__ has no single subject stem
+            # to strip — its subject-name overlap with a both-subjects claim is real
+            # signal, so it is left intact.)
+            subj_stems = _question_stems(subject) if subject != "__joint__" else set()
+            for q in qs:
+                q_stems = _question_stems(q) - subj_stems
+                if not q_stems:
+                    out.append({"q": q, "subject": subject, "answered": True})
+                    continue
+                need = max(1, len(q_stems) // 2)
+                answered = any(len(q_stems & cs) >= need for cs in claim_stems)
+                out.append({"q": q, "subject": subject, "answered": answered})
+        return out
+    except Exception as exc:  # noqa: BLE001 — a bad question-join must never break assembly
+        dbg(f"research_first COVERAGE: question-join fail-open exc={exc!r}")
+        return []
+
+
 #: The relationship kinds the classifier may return. A model answer outside this
 #: set is not trusted → "unknown". No kind presumes a SOFTWARE relationship;
 #: "cooperates"/"extends" warrant an integration story, "competes"/"alternative"
@@ -724,6 +854,7 @@ def _research(
     requirement: str,
     judge_client: Any,
     *,
+    questions: "dict[str, list[str]] | None" = None,
     emit: EmitFn,
 ) -> tuple[
     dict[str, list[dict[str, str]]],
@@ -763,8 +894,13 @@ def _research(
 
         anchor_phrase = " ".join(anchors[:3])
         # Brand-word queries rank marketing sites; a quoted descriptor + a
-        # descriptor+anchor query rank the actual product (team-lead fix 2).
-        queries = [f'"{descriptor}"', f"{descriptor} {anchor_phrase}", f"{subject} {anchor_phrase} example"]
+        # descriptor+anchor query rank the actual product (team-lead fix 2). P2: with
+        # per-subject questions, search for their ANSWERS (descriptor+question) +
+        # a bare-anchor fallback; without questions, the original triple (unchanged).
+        queries = _subject_queries(
+            descriptor, subject, anchor_phrase, (questions or {}).get(subject),
+            cap=_MAX_QUERIES_PER_SUBJECT,
+        )
         disambiguated = anchors != [subject]  # real judge output, not the fail-open sentinel
         sources: list[dict[str, str]] = []
         seen_domains: set[str] = set()
@@ -2808,16 +2944,22 @@ def generate_research_first(
     code_needed = any(_CODE_SHAPED_RE.search(b) for g in groups for b in g)
     diagram_needed = any(_DIAGRAM_SHAPED_RE.search(b) for g in groups for b in g)
     sections = _build_sections(groups)
+    # P2: decompose the requirement into per-subject research QUESTIONS so RESEARCH
+    # searches for what the task ASKS, not just subject-generic material. Prefer the
+    # judge model (planning quality, hybrid runs); fail-open {} → subject-generic.
+    questions = _extract_questions(judge_client or client, requirement, subjects)
     dbg(
         f"research_first FRAME: subjects={subjects} sections={sections} "
-        f"code_needed={code_needed} diagram_needed={diagram_needed}"
+        f"code_needed={code_needed} diagram_needed={diagram_needed} "
+        f"questions={{k: len(v) for k, v in questions.items()}}"
     )
-    emit("frame", {"subjects": subjects, "sections": sections, "code_needed": code_needed, "diagram_needed": diagram_needed})
+    emit("frame", {"subjects": subjects, "sections": sections, "code_needed": code_needed,
+                   "diagram_needed": diagram_needed, "questions": questions})
 
     # 2. RESEARCH
     emit("research", {"subjects": subjects})
     ledger, assumptions, relationship, all_anchors, coverage = _research(
-        subjects, evidence_dir, requirement, judge_client, emit=emit
+        subjects, evidence_dir, requirement, judge_client, questions=questions, emit=emit
     )
     # GENERIC RULE (user): subjects[] and the classified relationship are outputs
     # every downstream producer consumes — for N>=2 subjects that actually relate
@@ -3019,14 +3161,22 @@ def generate_research_first(
         if c.get("url"):
             for s in (c.get("subjects") or []):
                 _urls_by_subject.setdefault(s, set()).add(c["url"])
+    # P2: per-question coverage dimension — whether each requirement question got a
+    # claim that answers it. Top-level "__questions__" list (a non-dict value E3
+    # skips via its isinstance(dict) guard). Fail-open [] → key absent. Merged into
+    # the same literal as the per-subject rows so the dict stays heterogeneous.
+    q_cov = _question_coverage(claims, questions)
     coverage = {
-        s: {
-            **row,
-            "cited_in_artifact": cited.get(s, 0),
-            "sources_fetched": max(int(row.get("sources_fetched", 0) or 0),
-                                   len(_urls_by_subject.get(s, ()))),
-        }
-        for s, row in coverage.items()
+        **{
+            s: {
+                **row,
+                "cited_in_artifact": cited.get(s, 0),
+                "sources_fetched": max(int(row.get("sources_fetched", 0) or 0),
+                                       len(_urls_by_subject.get(s, ()))),
+            }
+            for s, row in coverage.items()
+        },
+        **({"__questions__": q_cov} if q_cov else {}),
     }
     _write_coverage(ws_dir, coverage)
     emit("coverage", coverage)
