@@ -996,6 +996,26 @@ def test_splice_integration_code_noop_for_single_subject() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_wants_comparison_table_fires_on_comparison_question_even_when_cooperating() -> None:
+    # A cooperating pair with a comparison-form question STILL needs a both-subject table —
+    # else the comparison question can't resolve (the one-sided relation-table gap).
+    coop = rf.Relationship("cooperates", "Integration", "", [])
+    comp_q = [{"question": "Pi vs Craft?", "subject": "__joint__",
+               "answer_form": "comparison", "min_evidence": 2}]
+    assert rf._wants_comparison_table(coop, comp_q, multi=True) is True
+    # competes fires regardless of contracts (comparison is the primary artifact)
+    assert rf._wants_comparison_table(rf.Relationship("competes", "", "", []), None, multi=True) is True
+    # cooperating with NO comparison question → no comparison table (integration story only)
+    assert rf._wants_comparison_table(coop, [{"answer_form": "design", "subject": "__joint__"}], multi=True) is False
+    # codex HIGH: a SINGLE-SUBJECT comparison contract ("compare Pi's two modes") must NOT
+    # trigger a both-subject table — the resolver gates it with the global proxy, not the
+    # strict __joint__ gate, so a Pi-vs-Craft table would falsely resolve it.
+    pi_comp = [{"question": "Pi mode A vs B?", "subject": "Pi", "answer_form": "comparison", "min_evidence": 2}]
+    assert rf._wants_comparison_table(coop, pi_comp, multi=True) is False
+    # single subject → never
+    assert rf._wants_comparison_table(rf.Relationship("competes", "", "", []), comp_q, multi=False) is False
+
+
 def test_splice_comparison_table_builds_grounded_table() -> None:
     claims = [
         {"claim": "Redis keeps data structures in memory.", "subjects": ["Redis"], "url": "u1"},

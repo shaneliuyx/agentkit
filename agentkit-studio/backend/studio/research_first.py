@@ -2699,6 +2699,27 @@ def _table_cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ").strip()
 
 
+def _wants_comparison_table(
+    relationship: "Relationship", contracts: list[dict] | None, multi: bool
+) -> bool:
+    """True when a both-subject comparison table should be spliced. Fires for competes/
+    alternative relationships (the comparison IS the primary artifact, R3) OR whenever a
+    comparison-FORM question contract exists — a COOPERATING pair is still asked "how do X
+    and Y differ in …?", and that question needs a real both-subject artifact to resolve
+    (the relation-triple fan-out table can be one-sided when a subject is claim-rich but
+    relation-poor, so it does not answer the comparison). Requires >=2 subjects."""
+    if not multi:
+        return False
+    # Only a JOINT (``__joint__``) comparison contract warrants the both-subject table — a
+    # single-subject comparison ("compare Pi's two modes") is answered by that subject's own
+    # section and the resolver gates it with the global table proxy, not the strict both-
+    # subject gate; adding a Pi-vs-Craft table there would falsely resolve it (codex).
+    return relationship.kind in ("competes", "alternative") or any(
+        c.get("answer_form") == "comparison" and c.get("subject") == "__joint__"
+        for c in (contracts or [])
+    )
+
+
 def _splice_comparison_table(
     text: str, subjects: list[str], claims: list[dict[str, Any]]
 ) -> str:
@@ -3351,7 +3372,7 @@ def generate_research_first(
     # all. Per-subject diagrams ship for every kind.
     multi = len(subjects) >= 2
     wants_integration = multi and relationship.kind in _INTEGRATION_KINDS
-    wants_comparison = multi and relationship.kind in ("competes", "alternative")
+    wants_comparison_table = _wants_comparison_table(relationship, contracts, multi)
     # The integration diagram lands in the dedicated relationship section; N=1
     # (and non-integration kinds) get per-subject diagrams only, placed below.
     diagram_home = relationship_home if (diagram_needed and wants_integration) else None
@@ -3402,9 +3423,11 @@ def generate_research_first(
             # open when no subject-grounded fan-out exists, so a thin integration is
             # unaffected.
             text = _splice_relationship_table(text, subjects, all_anchors, claims)
-        if name == relationship_home and wants_comparison:
-            # competes/alternative: a grounded comparison table replaces the
-            # integration diagram/code entirely (R3).
+        if name == relationship_home and wants_comparison_table:
+            # A grounded, both-subject comparison table (one column per subject, cells from
+            # each subject's OWN claims). For competes/alternative it is the primary artifact
+            # (R3); for a cooperating pair with a comparison question it complements the
+            # integration diagram/fan-out so the comparison question has a real artifact.
             text = _splice_comparison_table(text, subjects, claims)
         if name == scope_home and assumptions:
             # P4/D3 honesty: the resolved subject interpretation is a stated
