@@ -204,15 +204,23 @@ def _url_in_cache(url: str) -> bool:
 
 
 def _page_for_url(url: str) -> str:
-    """Cached page text for ``url`` ("" when never fetched). Same tolerant key
-    match as ``_url_in_cache``. Lets a caller judge a finding by its SOURCE —
-    the fetched page cannot self-rationalize the way finding prose can."""
-    u = (url or "").strip().rstrip("/").lower()
+    """Cached page text for ``url`` ("" when never fetched). Lets a caller judge a
+    finding by its SOURCE — the fetched page cannot self-rationalize the way finding
+    prose can.
+
+    EXACT normalized-key match (trailing-slash / fragment / case tolerant), NOT the
+    containment match ``_url_in_cache`` uses. This returns CONTENT that the caller
+    attributes to *this exact URL* (evidence file, topical verdict), so a substring
+    hit — asking ``…/topic`` while the cache holds ``…/topic-extra`` — would return a
+    different page's body and misattribute it (corrupt evidence → corrupt claims).
+    The tolerant containment is correct only for ``_url_in_cache``'s grounding bool,
+    where a near-miss merely avoids dropping a real source; here it corrupts."""
+    u = (url or "").strip().rstrip("/").split("#", 1)[0].lower()
     if not u:
         return ""
     for k, (content, _n) in _fetch_cache.items():
-        ck = k.split("|", 1)[0].strip().rstrip("/").lower()
-        if ck and (u == ck or u in ck or ck in u):
+        ck = k.split("|", 1)[0].strip().rstrip("/").split("#", 1)[0].lower()
+        if ck and ck == u:
             return str(content or "")
     return ""
 

@@ -31,6 +31,14 @@ def test_router_reject_on_e4_fail():
     assert _editorial_run_status(rows, compliance_unavailable=False) == "rejected"
 
 
+def test_router_reject_on_e3_coverage_fail():
+    # USER RULING 2026-07-11 (codex HIGH-1): a subject fetched-but-uncited (E3 fail) is
+    # a content defect → rejected + seed-excluded, NOT a completed run with a high score.
+    rows = [{"row": "E3", "verdict": "fail", "required": True},
+            {"row": "E1", "verdict": "pass", "required": False}]
+    assert _editorial_run_status(rows, compliance_unavailable=False) == "rejected"
+
+
 def test_router_unverified_on_compliance_outage():
     # A crashed/could-not-verify compliance check → unverified, NOT completed.
     rows = [{"row": "E1", "verdict": "pass", "required": False}]

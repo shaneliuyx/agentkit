@@ -153,6 +153,34 @@ def test_fetch_cache_isolated_across_sessions():
 
 
 # ---------------------------------------------------------------------------
+# Codex HIGH (2026-07-11) — _page_for_url substring match misattributes a page body
+# ---------------------------------------------------------------------------
+
+def test_page_for_url_exact_match_never_misattributes_a_superset_url():
+    # A cached SUPERSET key (…/topic-extra) inserted BEFORE the exact key must not be
+    # returned for a request for …/topic — the old `u in ck` containment returned the
+    # first (superset) page, corrupting evidence + topical verdicts.
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://example.com/topic-extra|"] = ("EXTRA_BODY", 1)
+    tools._fetch_cache["https://example.com/topic|"] = ("TOPIC_BODY", 1)
+    assert tools._page_for_url("https://example.com/topic") == "TOPIC_BODY"
+
+    # Substring-only (no exact key present) must now return "" — never a wrong body.
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://example.com/topic-extra|"] = ("EXTRA_BODY", 1)
+    assert tools._page_for_url("https://example.com/topic") == ""
+
+
+def test_page_for_url_still_tolerates_trailing_slash_fragment_case_drift():
+    # The real near-miss the tolerant match existed for is still honored via
+    # normalization (rstrip('/') + fragment strip + lower) — exact after normalize.
+    tools._fetch_cache.clear()
+    tools._fetch_cache["https://Example.com/Doc/|sel"] = ("DOC", 1)
+    assert tools._page_for_url("https://example.com/doc#frag") == "DOC"
+    assert tools._page_for_url("https://nope.com/x") == ""
+
+
+# ---------------------------------------------------------------------------
 # Finding 5 — last_run published (raw) before postrun neutralization/editing finished
 # ---------------------------------------------------------------------------
 

@@ -1279,12 +1279,19 @@ def _editorial_run_status(rows: list[dict[str, Any]], compliance_unavailable: bo
     (which would be seed-eligible and poison the lineage median)."""
     if not rows:
         return "unverified"
-    # NOTE: E4-fail→"rejected" is currently unreachable (compute_editorial_rows E4
-    # only emits pass/could_not_verify; residue-REJECT is enforced upstream at
-    # ASSEMBLE). If E4-fail is ever wired here, ensure an all-rejected lineage cannot
-    # cold-start latest_with_content past the keep/discard anti-regression gate
-    # (task_runs seed-exclusion of "rejected" must keep at least one servable ancestor).
-    if any(r.get("row") == "E4" and r.get("verdict") == "fail" for r in rows):
+    # HARD-FAIL rows → "rejected" (seed-excluded via task_runs._seed_ineligible_reason).
+    #  * E3 fail = a subject was researched (sources fetched) but never cited — the
+    #    report under-delivers on a subject it claims to cover. A content defect, not a
+    #    presentation nit (§14.7): it must not read as a servable seed. USER RULING
+    #    2026-07-11 (codex HIGH-1): reject rather than merely dock the score.
+    #  * E4 fail = grounding residue (currently emitted only pass/could_not_verify;
+    #    residue-REJECT is enforced upstream at ASSEMBLE — kept here for when it wires).
+    # SERVABLE-ANCESTOR INVARIANT: safe because `latest_with_content` carries NO status
+    # filter (task_runs.py) — the user is always served the latest content row even when
+    # rejected; only the hill-climb SEED path excludes "rejected", and research_first is
+    # cold-start (never seeds), so an all-rejected lineage degrades to cold-start, never
+    # to "nothing servable".
+    if any(r.get("row") in ("E3", "E4") and r.get("verdict") == "fail" for r in rows):
         return "rejected"
     if compliance_unavailable:
         return "unverified"
