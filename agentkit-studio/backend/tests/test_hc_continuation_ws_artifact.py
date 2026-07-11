@@ -123,3 +123,36 @@ def test_research_first_seed_carry_forward_is_skipped(tmp_path, monkeypatch) -> 
     )
     assert artifact_copied is False, "research_first session must not copy a seed"
     assert seed_len == 0 and seed_text == "", "research_first session must cold-start"
+
+
+def test_repeat_failure_machinery_not_invoked_under_research_first(tmp_path, monkeypatch) -> None:
+    # L4 MEASURED-NULL invariant (2026-07-11): 'repeat-weakness escalation' needs a hot
+    # iterative loop where the SAME weakness survives K epochs so a lever can escalate.
+    # research_first is cold-start, so its repeat-failure substrate (repeat_failures /
+    # _repeat_failed) is gated OFF — the SAME `if auto_improve and NOT use_research_first`
+    # guard that skips seed carry-forward. Building L4 on research_first would be dead
+    # code; its intent (notice the wall, try once, disclose) is met per-run by P2.5
+    # recovery→Limitation. This asserts the detector is never even called.
+    monkeypatch.setenv("STUDIO_WORKSPACE_ROOT", str(tmp_path / "ws"))
+    store = TaskRunStore(db_path=tmp_path / "task_runs.db")
+    for v in (1, 2, 3):  # a weakness recorded across enough runs to trip repeat_failures
+        store.record(TaskRun(
+            task_hash=task_hash(REQ), session_id=f"s{v}", version=v, score=0.5,
+            weaknesses=["[editorial:E3] uncited subject"], artifact_path="",
+            requirement=REQ, result_text=STALE_TEXT,
+        ))
+    calls: list[int] = []
+    orig = TaskRunStore.repeat_failures
+    monkeypatch.setattr(
+        TaskRunStore, "repeat_failures",
+        lambda self, *a, **k: (calls.append(1), orig(self, *a, **k))[1],
+    )
+    session = _make_session()
+    session.use_research_first = True
+    runner = Runner(session, lambda _e: None, client_factory=None,
+                    embedder=None, workspace_root=tmp_path / "ws")
+    runner._seed_carry_forward(
+        session=session, requirement=REQ, _base_requirement=REQ,
+        _hc_cfg={"auto_improve": True},
+    )
+    assert calls == [], "repeat_failures (L4 substrate) must NOT run on a research_first cold-start"
