@@ -685,6 +685,82 @@ def _classify_answerability(question: str, judge_client: Any) -> tuple[str, str]
     return ("unanswerable", reason) if kind.startswith("unanswer") else ("searchable", reason)
 
 
+#: Richness floors (user quality bar: reach the s_4c021146c082 reference — 141 claims
+#: / 55 joint → 5 tables / 6-6). Reference-informed, set below the reference max so a
+#: lean-web pass can retry UP to them, above the thin run (89 claims / 4 joint → 0
+#: tables) so the retry actually fires. NOT domain terms.
+_RICHNESS_MIN_CLAIMS_PER_SUBJECT = 12
+_RICHNESS_MIN_JOINT = 8
+_RICHNESS_BOOST_QUERIES = 4  # per-target enforcement cap: issue up to N gated queries until the floor is reached
+
+
+def _subject_claim_urls(claims: list[dict], subject: str) -> int:
+    """Distinct cited-URL count for a subject (richness proxy). ``__joint__`` = claims
+    tagged >=2 subjects."""
+    return _contract_evidence(claims, subject)
+
+
+def _boost_richness(
+    subjects: list[str], resolved: dict[str, str], all_anchors: dict[str, list[str]],
+    relationship: "Relationship", claims: list[dict], evidence_dir: Path,
+    requirement: str, client: Any, judge_client: Any, *, emit: EmitFn,
+) -> list[dict]:
+    """Quality-floor retry (user bar). Web search is non-deterministic — a lean-web pass
+    yields few claims/joint claims (fewer resolved, no relations table). When a subject
+    (or the joint pair) is below its richness floor, issue ADDITIONAL per-anchor queries
+    through ``_recover_claims`` — the SAME subject-identity gates as coverage recovery
+    (offtopic floor + ``_page_subjects``/``_subject_present`` anchor-confirmation + a
+    ``_tag_claim`` re-validation), so a page that merely brushes an anchor token can never
+    mint a subject/joint claim (no-gaming: identity is proven, not assumed). Per target it
+    keeps issuing queries until the floor is reached or the anchor queries run out
+    (enforcement, not a single shot), and merges only NEW-domain claims (a domain already
+    in ``claims`` is skipped, so the boost never re-counts a pass-1 source). Bounded per
+    target + fail-open; fires ONLY when thin, so a rich pass pays ZERO cost."""
+    emit = emit or (lambda *_a: None)
+    try:
+        idx = len(list(evidence_dir.glob("source-*.md")))
+        seen = {_domain(c["url"]) for c in claims if c.get("url")}
+        new_claims: list[dict] = []
+        pool = list(resolved) or subjects
+
+        def _boost(loop_subject: str | None, desc: str, anchors: list[str],
+                   floor_key: str, floor: int) -> None:
+            nonlocal idx
+            added = 0
+            for anchor in anchors[:_RICHNESS_BOOST_QUERIES]:
+                if _subject_claim_urls(claims + new_claims, floor_key) >= floor:
+                    break  # enforcement: stop as soon as the floor is met
+                idx, rows = _recover_claims(
+                    f"{desc} {anchor}".strip(), loop_subject, pool, all_anchors,
+                    evidence_dir, idx, requirement, client, judge_client,
+                )
+                for c in rows:
+                    dom = _domain(c.get("url", ""))
+                    if dom and dom in seen:
+                        continue  # NEW-domain claims only — never re-count a pass-1 source
+                    if dom:
+                        seen.add(dom)
+                    new_claims.append(c)
+                    added += 1
+            if added:
+                dbg(f"research_first RICHNESS: boosted {floor_key!r} +{added} claims")
+
+        for s in subjects:
+            if _subject_claim_urls(claims + new_claims, s) < _RICHNESS_MIN_CLAIMS_PER_SUBJECT:
+                _boost(s, resolved.get(s, s), all_anchors.get(s, []), s,
+                       _RICHNESS_MIN_CLAIMS_PER_SUBJECT)
+        if len(subjects) >= 2 and _subject_claim_urls(claims + new_claims, "__joint__") < _RICHNESS_MIN_JOINT:
+            joint_terms = (relationship.mechanism_terms or [])[:_RICHNESS_BOOST_QUERIES] \
+                or [a for v in all_anchors.values() for a in v][:_RICHNESS_BOOST_QUERIES]
+            joint_desc = " ".join(resolved.values())[:80]
+            _boost(None, joint_desc, joint_terms, "__joint__", _RICHNESS_MIN_JOINT)
+        emit("richness", {"boosted_claims": len(new_claims)})
+        return new_claims
+    except Exception as exc:  # noqa: BLE001 — a richness boost must never stall a run
+        dbg(f"research_first RICHNESS: fail-open exc={exc!r}")
+        return []
+
+
 def _recover_underevidenced(
     contracts: list[dict], claims: list[dict], resolved: dict[str, str],
     all_anchors: dict[str, list[str]], evidence_dir: Path, requirement: str,
@@ -3150,6 +3226,20 @@ def generate_research_first(
         claims, subjects, relationship, all_anchors, evidence_dir, requirement,
         client, judge_client, ws_dir, emit=emit,
     )
+
+    # Quality-floor retry (user bar: reach the s_4c021146c082 reference): a lean-web
+    # pass yields few claims/joint claims → fewer resolved, no relations table. Boost
+    # any subject/joint below its richness floor with more gated fetches BEFORE WRITE,
+    # so structure (tables) and resolution reach the reference on an unlucky web day.
+    _boosted = _boost_richness(
+        subjects, {s: r["descriptor"] for s, r in coverage.items()
+                   if isinstance(r, dict) and r.get("descriptor")},
+        all_anchors, relationship, claims, evidence_dir, requirement, client,
+        judge_client, emit=emit,
+    )
+    if _boosted:
+        claims = claims + _boosted
+        _persist_claims(claims, ws_dir)
 
     # P2.5 Phase C: close the loop — before WRITE, recover any question still short of
     # its min_evidence with ONE targeted search; a question that stays short after

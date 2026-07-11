@@ -2620,6 +2620,68 @@ def test_question_limitations_renders_unanswerable_reason():
     assert "not answerable from public sources" in out and "private billing data" in out
 
 
+def test_boost_richness_noop_when_rich(tmp_path, monkeypatch):
+    # A subject already at/above the claim floor → the gated helper is NEVER called
+    # (rich pass pays zero cost).
+    rel = rf.Relationship("cooperates", "Integration", "", [])
+    rich = [{"url": f"u{i}", "subjects": ["Pi"]} for i in range(15)]  # 15 >= floor 12
+    calls: list[tuple] = []
+    monkeypatch.setattr(rf, "_recover_claims", lambda *a, **k: (calls.append(a), (0, []))[1])
+    out = rf._boost_richness(["Pi"], {"Pi": "the Pi SDK"}, {"Pi": ["pi"]}, rel, rich,
+                             tmp_path, "req", _client("x"), _client("x"), emit=None)
+    assert calls == [] and out == []
+
+
+def test_boost_richness_delegates_to_gated_recover_and_skips_seen_domains(tmp_path, monkeypatch):
+    # A thin subject → boost DELEGATES to _recover_claims (which owns the subject-identity
+    # gates — offtopic + _page_subjects/_subject_present + _tag_claim), and merges only
+    # NEW-domain claims: a claim whose domain was already fetched in pass 1 is dropped so
+    # the boost can never re-count a pass-1 source (no gaming).
+    rel = rf.Relationship("cooperates", "Integration", "", [])
+    thin = [{"url": "http://old.example/a", "subjects": ["Pi"]}]  # old.example already seen
+    queries: list[str] = []
+
+    def fake_recover(query, loop_subject, subjects, all_anchors, ev, idx, req, cl, jc):
+        queries.append(query)
+        return idx + 1, [
+            {"url": "http://old.example/b", "subjects": ["Pi"], "claim": "dup", "quote": ""},    # seen domain → drop
+            {"url": "http://new.example/x", "subjects": ["Pi"], "claim": "fresh", "quote": ""},  # new domain → keep
+        ]
+
+    monkeypatch.setattr(rf, "_recover_claims", fake_recover)
+    out = rf._boost_richness(["Pi"], {"Pi": "the Pi SDK"}, {"Pi": ["pi", "core"]}, rel, thin,
+                             tmp_path, "req", _client("x"), _client("x"), emit=None)
+    assert queries                                              # thin → delegated to the gated helper
+    assert [o["url"] for o in out] == ["http://new.example/x"]  # seen-domain claim dropped, new one kept
+
+
+def test_boost_richness_enforces_until_floor_then_stops(tmp_path, monkeypatch):
+    # Enforcement, not single-shot: keep issuing per-anchor queries until the subject
+    # reaches its floor, THEN stop — don't burn every anchor once already rich.
+    rel = rf.Relationship("cooperates", "Integration", "", [])
+    calls = {"n": 0}
+
+    def fake_recover(query, loop_subject, subjects, all_anchors, ev, idx, req, cl, jc):
+        calls["n"] += 1
+        base = calls["n"] * 100  # distinct URLs per query so the floor actually advances
+        return idx + 1, [
+            {"url": f"http://d{base + i}.ex/x", "subjects": ["Pi"], "claim": "c", "quote": ""}
+            for i in range(6)  # 6 new claims/query; floor 12 → exactly 2 queries suffice
+        ]
+
+    monkeypatch.setattr(rf, "_recover_claims", fake_recover)
+    out = rf._boost_richness(["Pi"], {"Pi": "the Pi SDK"}, {"Pi": ["a", "b", "c", "d"]}, rel, [],
+                             tmp_path, "req", _client("x"), _client("x"), emit=None)
+    assert calls["n"] == 2 and len(out) == 12  # stopped at floor; didn't exhaust all 4 anchors
+
+
+def test_boost_richness_fails_open(tmp_path, monkeypatch):
+    rel = rf.Relationship("cooperates", "Integration", "", [])
+    monkeypatch.setattr(rf, "_recover_claims", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert rf._boost_richness(["Pi"], {"Pi": "d"}, {"Pi": ["p"]}, rel, [], tmp_path, "req",
+                              _client("x"), _client("x"), emit=None) == []
+
+
 def test_question_limitations_renders_trace_and_empty():
     t = [{"question": "hard q", "subject": "__joint__", "query": "d0 d1 hard q",
           "sources_added": 0, "short_by": 2}]
