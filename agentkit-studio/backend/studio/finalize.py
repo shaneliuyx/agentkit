@@ -1137,6 +1137,57 @@ def _row(name: str, verdict: str, evidence: str, *, required: bool = False) -> d
     return {"row": name, "verdict": verdict, "evidence": evidence, "required": required}
 
 
+#: E7 heading→required-block triggers (tight single keywords → low false-positive). A section
+#: whose heading PROMISES one of these artifact types must actually contain it in its body.
+_E7_TABLE_SEP_RE = re.compile(r"(?m)^\s*\|[\s:|-]*-[\s:|-]*\|\s*$")  # a real table separator row
+
+
+def _e7_section_shape_issues(text: str) -> list[str]:
+    """E7 (deterministic): a section that PROMISES a structural artifact by its heading must
+    contain it — a 'Code…' heading needs a real code fence, a 'Diagram…' heading a mermaid
+    block, a 'Comparison…' heading a real table. Catches the run-1531 defect (an empty 'Code
+    Implementation Examples' section) without an LLM. Tight single-keyword triggers keep the
+    false-positive rate low (an 'Architecture' prose section is NOT required to embed a diagram —
+    per-subject diagrams ship separately). Generic; no task/subject literals."""
+    from agentkit.artifacts.sections import split_sections
+
+    issues: list[str] = []
+    for heading, body in split_sections(text or ""):
+        name = heading.lstrip("# ").strip()
+        h = name.lower()
+        fences = re.findall(r"```([a-zA-Z0-9]*)", body or "")
+        has_code = any(f.lower() != "mermaid" for f in fences)
+        has_mermaid = any(f.lower() == "mermaid" for f in fences)
+        has_table = bool(_E7_TABLE_SEP_RE.search(body or ""))
+        if "code" in h and not has_code:
+            issues.append(f'"{name}" promises code but has no code fence')
+        if "diagram" in h and not has_mermaid:
+            issues.append(f'"{name}" promises a diagram but has no mermaid block')
+        if "comparison" in h and not has_table:
+            issues.append(f'"{name}" promises a comparison but has no table')
+    return issues
+
+
+#: E9 number-drift: a count (1–3 digits) + the following words (up to 3). The conflict KEY is the
+#: first 1–2 content words (each ≥3 chars) — specific enough to be low-FP ("execution modes", not
+#: bare "modes"), yet robust to trailing words so "3 execution modes here" still keys to the same
+#: "execution modes" as "4 execution modes." (a fixed multi-word span would miss it).
+_E9_COUNT_RE = re.compile(r"\b(\d{1,3})\s+((?:[a-z]{3,}[ -]?){1,3})", re.I)
+
+
+def _e9_number_conflicts(text: str) -> list[str]:
+    """E9 (deterministic): the SAME specific noun phrase carrying CONFLICTING counts across the
+    report ("4 execution modes" … "3 execution modes") — cross-section number drift that
+    claim-grounding does NOT prevent (two sections can paraphrase the same fact with different
+    numbers). Digit-only + a 1–2 word key to stay low-FP; advisory. Generic, no literals."""
+    by_key: dict[str, set[str]] = {}
+    for num, phrase in _E9_COUNT_RE.findall(text or ""):
+        words = re.findall(r"[a-z]{3,}", phrase.lower())
+        if words:
+            by_key.setdefault(" ".join(words[:2]), set()).add(num)
+    return [f'"{key}": {sorted(nums)}' for key, nums in sorted(by_key.items()) if len(nums) > 1]
+
+
 def compute_editorial_rows(
     *,
     text: str,
@@ -1256,6 +1307,28 @@ def compute_editorial_rows(
     except Exception as exc:  # noqa: BLE001
         _dbg(f"editorial[E6]: EXCEPTION {exc!r}")
         rows.append(_row("E6", "could_not_verify", f"exception: {exc!r}"))
+
+    # E7 — dynamic sections satisfy their promised shape (DETERMINISTIC, advisory: a "Code…"
+    # heading needs a real fence, etc.). LLM half of the spec skipped — the structural
+    # producers already prevent ungrounded blocks; this is the cheap regression invariant.
+    try:
+        shape = _e7_section_shape_issues(txt)
+        rows.append(_row("E7", "pass" if not shape else "fail",
+                         "sections carry their promised blocks" if not shape else f"shape: {shape}"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E7]: EXCEPTION {exc!r}")
+        rows.append(_row("E7", "could_not_verify", f"exception: {exc!r}"))
+
+    # E9 — internal number consistency (DETERMINISTIC, advisory): the same specific noun phrase
+    # must not carry conflicting counts across sections. LLM half skipped (too blunt for a gate);
+    # this catches cross-section number drift that claim-grounding does not prevent.
+    try:
+        conflicts = _e9_number_conflicts(txt)
+        rows.append(_row("E9", "pass" if not conflicts else "fail",
+                         "no cross-section number conflicts" if not conflicts else f"conflicts: {conflicts}"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E9]: EXCEPTION {exc!r}")
+        rows.append(_row("E9", "could_not_verify", f"exception: {exc!r}"))
 
     # E11 — lint clean (the full deterministic content-validity list). Same lint_ok
     # gate: no pass when the check could not run.

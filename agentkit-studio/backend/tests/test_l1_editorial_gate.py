@@ -136,6 +136,52 @@ def test_e5_fail_on_dangling_marker():
 
 
 # --------------------------------------------------------------------------- #
+# E7 — dynamic section carries its promised block (deterministic, advisory).
+# --------------------------------------------------------------------------- #
+def test_e7_fails_code_heading_without_fence():
+    doc = "## Code Examples\n\nJust prose describing code, no fence.\n"
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E7") == "fail"
+
+
+def test_e7_passes_code_heading_with_fence_and_is_advisory():
+    doc = "## Code Examples\n\n```python\nx = 1\n```\n"
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E7") == "pass"
+    # advisory: E7 is not a required/hard-reject row
+    assert next(r for r in rows if r["row"] == "E7")["required"] is False
+
+
+def test_e7_ignores_prose_heading_without_structural_promise():
+    doc = "## Implications\n\nGeneral prose with no structural promise.\n"
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E7") == "pass"   # no code/diagram/comparison keyword → nothing required
+
+
+# --------------------------------------------------------------------------- #
+# E9 — cross-section number consistency (deterministic, advisory).
+# --------------------------------------------------------------------------- #
+def test_e9_flags_conflicting_counts_across_sections():
+    doc = ("## Overview\n\nPi exposes 4 execution modes.\n\n"
+           "## Details\n\nCraft offers 3 execution modes here.\n")
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E9") == "fail"
+
+
+def test_e9_passes_consistent_counts():
+    doc = ("## Overview\n\nPi exposes 4 execution modes.\n\n"
+           "## Details\n\nIt supports 4 execution modes.\n")
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E9") == "pass"
+    assert next(r for r in rows if r["row"] == "E9")["required"] is False   # advisory
+
+
+# --------------------------------------------------------------------------- #
 # E3 — uncited subject fails unless declared not-found (Limitations).
 # --------------------------------------------------------------------------- #
 def test_e3_fail_uncited_subject_with_sources():
