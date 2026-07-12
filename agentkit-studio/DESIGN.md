@@ -9,7 +9,10 @@ backlog + decision history. (The former `ARCHITECTURE-doc-generation-pipeline.md
 is superseded — its per-stage detail lives in §3 below; recover the old mermaid deep-dive from
 git history at commit `4de0e9c` if ever needed.)
 
-Refs below are by **module::function** (durable across refactors), not line numbers.
+Refs below are by **module::function** (durable across refactors), not line numbers. Diagram
+nodes (§3, §6) use a bare function name where the module is the section's own file
+(`research_first.py` in §3, `finalize.py` in §6) and `module::function` when a node crosses into
+another module.
 
 ---
 
@@ -97,7 +100,42 @@ SSE surfaces each stage as a `phase_start` (`research_first_frame/research/claim
 plus data events (`frame`, `research`, `claims`, `write`, `coverage`), then `hill_climb`, then a
 single terminal `done`.
 
+### 3.0 The pipeline in the run shell
+
+The runner dispatches to `research_first` and reuses the shell's epoch loop, lineage recording, SSE
+`emit`, and the finalize tail (§6) — but **not** seed carry-forward (§7), the hub/spoke loop, or the
+content-mutating finalize passes.
+
+```mermaid
+flowchart TD
+    A["Runner.run(requirement)<br/>whole body one try/except"] --> B["epoch loop OR single pass<br/>(auto_improve AND max_epochs>1)"]
+    B --> C["runner::_run_inner(requirement)"]
+    C --> D["seed_carry::_seed_carry_forward"]
+    D --> D2{"_use_research_first(session)?<br/>seed-skip guard"}
+    D2 -->|yes| COLD["COLD START by design —<br/>no seed carried (§7)"]
+    D2 -->|no| LEG["legacy seed precedence<br/>(fallback, not documented here)"]
+    COLD --> E{"_use_research_first?"}
+    E -->|yes| RF["runner::_run_research_first_generation"]
+    RF --> G["research_first::generate_research_first<br/>(requirement, client, judge_client,<br/>workspace_root, session_id, emit)"]
+    G --> W["write final text → artifact.md<br/>(write-early)"]
+    W --> FIN["finalize::run_passes<br/>rebuild_generated=True (§6)"]
+    FIN --> REC["score + record TaskRun (lineage)<br/>emit terminal done"]
+    E -->|no| LEG2["legacy_loop::_run_phase_loop (fallback)"]
+```
+
 ### 3.1 FRAME — subjects, sections, relationship
+
+```mermaid
+flowchart TD
+    F0["extract_requirements(client, requirement)<br/>→ requirement groups"] --> F1["title = artifact_text::_derive_title_from_requirement"]
+    F1 --> F2["subjects = _extract_subjects(groups)<br/>OR _subjects_from_requirement (LLM fallback)<br/>OR [title]"]
+    F2 --> F3["code_needed = _CODE_SHAPED_RE over groups<br/>diagram_needed = _DIAGRAM_SHAPED_RE"]
+    F3 --> F4["sections = _build_sections(groups)"]
+    F4 --> F5["per subject: _disambiguate_subject<br/>→ (descriptor, anchors)"]
+    F5 --> F6["_classify_relationship(subjects, …)<br/>→ {kind, descriptor, mechanism, mechanism_terms}"]
+    F6 --> F7["emit('frame', {subjects, sections,<br/>code_needed, diagram_needed})"]
+```
+
 - **Subjects are the unit of research.** `_extract_subjects` pulls the real referents; the LLM
   fallback is deterministically validated (verbatim substring, ≤4 words, ≠ whole-task,
   compound-split *after* the whole-task check) so a whole-task string never becomes a subject.
@@ -112,6 +150,21 @@ single terminal `done`.
   hardcoded interface enum `api|cli|mcp|sdk` was removed — D-level MVP-8.)
 
 ### 3.2 RESEARCH — per-subject fetch loop (`_research`)
+
+```mermaid
+flowchart TD
+    R0["for subject in subjects (+ a JOINT loop)"] --> R1["queries = descriptor + anchors<br/>(joint = classified mechanism + verify terms)"]
+    R1 --> R2["_run_query: web_search → web_fetch<br/>(tools.py; SearXNG→Tavily→DDG)"]
+    R2 --> R3{"_is_offtopic(url, req_words, requirement, judge)"}
+    R3 -->|offtopic| DROP["drop source (hard band + gray-zone judge)"]
+    R3 -->|anchor-hit| KEEP["keep → ledger[subject] += source"]
+    KEEP --> R4{"subject got 0 sources?"}
+    R4 -->|yes| RQ["_reformulate_queries (≤3 model-proposed,<br/>fed descriptor/anchors) → bounded retry"]
+    R4 -->|no| R5
+    RQ --> R2
+    R5["emit('research', {subjects})"] --> R6["return ledger, assumptions,<br/>relationship, all_anchors, coverage"]
+```
+
 - **Coverage by construction.** Every subject is searched unconditionally; a joint loop searches
   the classified relationship mechanism. No subject is silently skipped.
 - **Offtopic gate** (`_is_offtopic`) = a hard keyword band + a gray-zone LLM judge (on the strong
@@ -123,6 +176,21 @@ single terminal `done`.
   Limitations line.
 
 ### 3.3 CLAIMS — extract, coverage-gate, recover (`_build_claims`)
+
+```mermaid
+flowchart TD
+    C0["for source in ledger"] --> C1["_strip_boilerplate (drop nav chrome)"]
+    C1 --> C2["_content_windows: moving window over<br/>the WHOLE file (overlapping, bounded)"]
+    C2 --> C3["_extract_claims_from_source(loop_subject=…)<br/>→ {claim, quote, url, subjects, relations}"]
+    C3 --> C4["subject-tag clamp: tags ≠ [loop_subject]<br/>→ reset to the fetch loop's own subject"]
+    C4 --> C5["_persist_claims → claims.jsonl"]
+    C5 --> CG["_coverage_gate"]
+    CG --> CR{"a subject under-covered?"}
+    CR -->|yes| REC["_recover_claims (targeted re-extract)"]
+    CR -->|no| C6
+    REC --> C6["emit('claims', {sources, claims})"]
+```
+
 - **Full-file moving window.** The old `content[:8000]` head-cut saw only nav chrome (the
   architecture sentence was at char ~93k). `_content_windows` reads the whole boilerplate-stripped
   file in overlapping bounded windows — this is what made the real Pi↔Craft joint claim
@@ -140,6 +208,26 @@ single terminal `done`.
   reasoned Limitations instead of burning searches.
 
 ### 3.4 WRITE — one section per heading (`_write_section`)
+
+```mermaid
+flowchart TD
+    W0["for seq, name in enumerate(sections)<br/>skip _SKIP_WRITE (References/Limitations)"] --> W1["claims = _claims_for_section(claims, name, seq)<br/>round-robin by subject, cap"]
+    W1 --> W2["_write_section(name, requirement, claims, client)"]
+    W2 --> W3["_needs_blockquote / neutralize embedded quotes"]
+    W3 --> W4["_drop_ungrounded_sentences (fence-aware,<br/>DOMAIN-level match vs claims)"]
+    W4 --> CODE{"code_needed?"}
+    CODE -->|yes| CC["_splice_code / _splice_subject_code /<br/>_splice_integration_code (compile-gated,<br/>interface words grounded in claims)"]
+    W4 --> DIA{"diagram_needed?"}
+    DIA -->|yes| D1["_splice_diagram + _splice_subject_diagram<br/>(≥4 grounded nodes, no-fabricate)"]
+    W4 --> REL{"relationship.kind<br/>(wants_integration + _pick_relationship_home)"}
+    REL -->|cooperates/extends| T1["_splice_relationship_table<br/>(subject-grounded, fan-out-ranked)"]
+    REL -->|competes/alternative| T2["_splice_comparison_table"]
+    REL -->|independent| T3["no relationship artifact"]
+    T1 --> SUM["_write_summary(mechanism=…)"]
+    T2 --> SUM
+    T3 --> SUM
+```
+
 - **Sections are written once, from their own claims.** `_claims_for_section` round-robins subjects
   into the per-section cap so subject-2 is never starved.
 - **Grounding is enforced at write time.** `_drop_ungrounded_sentences` (fence-aware) keeps a
@@ -152,6 +240,22 @@ single terminal `done`.
   summary class is prevented by construction (E8 remains as the detector).
 
 ### 3.5 ASSEMBLE — stitch + References-from-claims + coverage (`_assemble`)
+
+The integration-home decision (`_pick_relationship_home` + `wants_integration`) happens in WRITE
+(§3.4), not here; ASSEMBLE only stitches, cites, rebuilds References, and writes the coverage sink.
+
+```mermaid
+flowchart TD
+    A1["_assemble(title, summary, sections, written)"] --> A2["_order_claims_primary_first<br/>(LLM authority classify → primary repos/docs first)"]
+    A2 --> A3["_apply_citation_markers: inline URL → [N]"]
+    A3 --> A4["_rebuild_references_from_claims:<br/>References body = deduped claims[].url,<br/>first-appearance order, References LAST"]
+    A4 --> A5["_drop_ungrounded_sentences_artifact_wide<br/>(whole doc incl. Exec Summary; References exempt)"]
+    A5 --> A6["not_found = subjects with no claims<br/>→ _limitations_note"]
+    A6 --> A7["coverage = _coverage_cited (url→subjects join)<br/>_body_cited_urls"]
+    A7 --> A8["_write_coverage → coverage.json<br/>emit('coverage', …)"]
+    A8 --> A9["return final markdown"]
+```
+
 - **References are BUILT from claims, never scraped from body** (`_rebuild_references_from_claims`):
   References = the deduped `claims[].url` set, both directions, always last. A real repo lands in
   References once it is a claim; LaTeX/SVG link-texts from a rendered page never do.
@@ -228,6 +332,16 @@ E2E emits zero editor gate events, by design — regression-locked in `test_fina
 generate returns; `_pass_materialize_artifact` then OVERWRITES `artifact.md` on rebuild so a stale
 seed can never win the post-gen preference. Verified byte-exact (recorded `result_text` ==
 workspace `artifact.md`).
+
+```mermaid
+flowchart TD
+    P0["run_passes(state)<br/>rebuild_generated=True"] --> P1{"pass in _CONTENT_MUTATING_PASSES?"}
+    P1 -->|yes → SKIP| SK["normalize_dedupe, synthesize_readability,<br/>repair_lints, neutralize_urls,<br/>structural_producer_l0, rebuild_references,<br/>expand_underdeveloped, publish_gate, editor<br/>(ASSEMBLE already owns these)"]
+    P1 -->|no → RUN| RUN["materialize_artifact, score_and_mine_weaknesses,<br/>epoch_gate, post_gate_finalize,<br/>prune_resolved_weaknesses, requirement_compliance,<br/>evidence_export, editorial_gate,<br/>score_scorecard_and_record"]
+    RUN --> M["_pass_materialize_artifact:<br/>OVERWRITE artifact.md when rebuild_generated"]
+    RUN --> EG["_pass_editorial_gate → compute_editorial_rows<br/>E1–E11; _editorial_run_status"]
+    RUN --> SC["_pass_score_scorecard_and_record<br/>→ TaskRun (lineage)"]
+```
 
 ### 6.1 The editorial gate — E1–E11 (`compute_editorial_rows`)
 
