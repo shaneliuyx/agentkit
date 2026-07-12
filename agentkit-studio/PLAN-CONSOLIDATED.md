@@ -115,7 +115,7 @@ an acceptance blocker. Branch is 153 commits ahead of origin, unpushed.
 3. ✅ **L4 — repeat-weakness escalation** — **MEASURED-NULL for research_first** (2026-07-11, codex-concurred). DECISION RECORD: L4's mechanism needs a hot iterative loop where the SAME weakness survives K epochs so a lever can escalate. research_first has none of the four prerequisites — evidence: (a) the repeat-failure detector is gated OFF (`runner.py:2811` `if auto_improve and NOT use_research_first`); (b) the structural-editor lever is in `_CONTENT_MUTATING_PASSES` → skipped for `rebuild_generated`; (c) no execute-contract cap exists in research_first; (d) cold-start-by-design → no lever retried across epochs. L4's INTENT ("notice your own walls, don't spin") is already met per-run by P2.5 recovery→honest-Limitation. Building L4 here would be dead code or secretly re-legacy-fy research_first. **Non-goal:** no cross-run coupling in the default cold-start pipeline (codex: only justified as opt-in "campaign memory"). Regression-locked: `test_repeat_failure_machinery_not_invoked_under_research_first` (repeat_failures never called under research_first). L4 applies to the legacy fallback only (which already has the `_repeat_failed`+`_unresolved_block` substrate). **SUCCESSOR (native, building next):** codex's **Answerability Gate** — per-run wall classification (answerable/recoverable/structurally-unanswerable/out-of-scope); skip recovery churn on the unanswerable, reasoned Limitations. Motivated by the gap-run's 5 recovery searches, ~4 on structurally-unanswerable asks (benchmark/cost). Native to cold-start-linear (evidence topology, not epoch history).
 
 **Other open workstreams (not in the active chain):**
-- ◐ **D5** is the only genuinely-open design workstream (§12 slices 10/11/14) — belief/uncertainty state; half is cold-start-N/A (epoch confidence-budget), half is low-value-now (per-claim confidence + failed-producer→research-signal). **D1 ✅ ~90% + D4 ✅ realized-by-construction** in the research_first rebuild (the earlier "genuinely unbuilt" was stale, pre-rebuild). D2/D3 ✅ `0f72b1d`.
+- ✅ **D5 CLOSED** (2026-07-12, code-verified) — belief/uncertainty state resolves into three parts, none genuinely-open-and-buildable: **(1+2) epoch confidence-budget = DEAD-BY-COLD-START** — `grep confidence|epoch|belief|uncertain research_first.py` → 0 matches; "per-subject confidence in the ledger" + "next-epoch budget to lowest confidence" have no consumer (no next epoch — same MEASURED-NULL class as L4/advisory-weaknesses); building them = speculative dead code (YAGNI). **(3) failed-producer→research-signal (D5-F) = ✅ REALIZED-BY-CONSTRUCTION** (earlier "low-value-now/pending" was wrong): `_recover_underevidenced` is a closed-loop in-run recovery — an under-evidenced contract triggers a targeted recovery search NOW, and a STILL-short contract emits a failed-recovery TRACE → declared question-limitation (never empty content), with `_classify_answerability` routing structurally-unanswerable asks to reasoned Limitations. Inline-recovery is the cold-start-correct shape of "defer the question to a next epoch." **Residual per-claim `confidence` field left unbuilt** — its only live consumer would be claim-ranking, already solved by subject-grounded fan-out ranking. **D1 ✅ ~90% + D4 ✅ realized-by-construction**; D2/D3 ✅ `0f72b1d`.
 - ◐ **L5 remainder** — acceptance economics (per-run verdict cost); memoization half already ✅.
 - ✅ **G1-noise** (semantic joint-claim guard) — DONE: `_verify_joint_claim` + `_filter_joint_noise` judge each JOINT claim (>=2 subjects) "genuine relationship vs coincidental co-mention?" and drop the coincidental ones (fail-open, re-persists). Option (b) — verbatim-quote compound-noun check — was ALREADY live in `_subject_supported`; this closes the residual bare-name co-mention case (option (a)). Verified: keeps all 4 real joint claims of the canonical 6/6 run.
 - **quarantined, do NOT reopen unless old pipeline outlives it:** buggy `dedupe_sections` fence-masking at `artifact_text.py:662` (reachable only from old-pipeline `normalize_artifact`; research_first is dedupe-free by construction).
@@ -1013,6 +1013,13 @@ overclaiming-summary class by construction; E8 remains as the detector. ✅ REAL
 per-question confidence in the ledger; next-epoch budget allocated to lowest
 confidence; a failed structural producer RAISES a research question instead of only
 inserting content. Hardest; do last; D1–D4 are its prerequisites.
+✅ **CLOSED 2026-07-12 (code-verified)** — the confidence-ledger + next-epoch-budget
+core is DEAD-BY-COLD-START (0 `confidence|epoch|belief` refs in `research_first.py`;
+no next epoch to consume a confidence signal — MEASURED-NULL, same class as L4). The
+one live part — a failed structural producer raising a research signal not empty
+content — is REALIZED-BY-CONSTRUCTION as `_recover_underevidenced`'s closed-loop
+in-run recovery → declared question-limitation (+ `_classify_answerability` for
+structurally-unanswerable asks). No confidence/budget build (speculative, consumer-less).
 
 #### 5.3.4 Relation to §9/§10
 
@@ -1272,7 +1279,7 @@ Order (each step: suite green → reviewer pass → commit; cold E2E where marke
 | 11 | D4 + E8/E9 | write-order DAG (summary-last) + consistency judges | D4 prevents, E8 detects |
 | 12 | P2 | question-first planning | after L1 changes what verify checks |
 | 13 | L5+S5 | economics: verdict memoization (done); rubric memo + cache index MEASURED NULL 2026-07-10 (S5 ✅ no code); per-run cost line still open (L5) | S5 done; L5 cost-line pending |
-| 14 | D5 | belief/uncertainty state | north star, last |
+| 14 | D5 | belief/uncertainty state | ✅ CLOSED 2026-07-12: confidence-ledger/next-epoch-budget DEAD-BY-COLD-START; D5-F realized-by-construction (`_recover_underevidenced`) |
 
 Standing rules unchanged: no hardcoding (test-enforced), no behavior change inside
 refactor slices, subagent build + separate reviewer, codex adversarial review before
