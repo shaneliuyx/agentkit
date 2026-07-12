@@ -4,9 +4,10 @@
 retired hub/spoke "Section-Ownership" architecture).
 **Last rewritten:** 2026-07-12, against the code as it stands after the `research_first`
 rebuild + the `runner.py` decomposition.
-**Companion:** `ARCHITECTURE-doc-generation-pipeline.md` is a code-traced process map of the
-`research_first` pipeline; this doc is the design + rationale over it. `SPEC.md` owns
-milestone/route contracts; `PLAN-CONSOLIDATED.md` owns the backlog + decision history.
+**Companion:** `SPEC.md` owns milestone/route contracts; `PLAN-CONSOLIDATED.md` owns the
+backlog + decision history. (The former `ARCHITECTURE-doc-generation-pipeline.md` process map
+is superseded — its per-stage detail lives in §3 below; recover the old mermaid deep-dive from
+git history at commit `4de0e9c` if ever needed.)
 
 Refs below are by **module::function** (durable across refactors), not line numbers.
 

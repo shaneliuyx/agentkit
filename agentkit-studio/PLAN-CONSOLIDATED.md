@@ -1407,7 +1407,8 @@ contract · goal-blind spokes · two fan-out levers distinct). Added tonight:
 | PLAN-CONSOLIDATED.md | **THIS FILE — the single source of truth** (absorbed the simplification plan + recovery addendum 2026-07-08) | — |
 | PLAN-codebase-simplification.md | nothing — RETIRED stub pointing here (its full Parts 0–7 are this file's body) | everything |
 | PLAN-research-first-recovery-addendum.md | nothing — RETIRED stub, folded into Part 8 below | everything |
-| ARCHITECTURE-doc-generation-pipeline.md | pipeline mechanics, line index §10 | pre-07-03 line cites |
+| ~~ARCHITECTURE-doc-generation-pipeline.md~~ | DELETED 2026-07-12 — superseded by DESIGN.md §3 (all ~40 line cites rotted after runner.py decomposition; deep-dive recoverable at git `4de0e9c`) | — |
+| DESIGN.md | current design authority — objective, module map, research_first pipeline (§3), invariants, editorial gate, scheduler, rationale | — |
 | SPEC.md / DESIGN-v2.md | contracts + invariants/rationale | milestone/backlog status |
 | WORKLOG | what landed ≤ entry 178 (07-03) | 07-04/05 wave (git log + §13 here, now Part 3.1) |
 | REBUILD-LESSONS.md | binding constraints for §16 rebuild work (now Part 2.2) | — |
