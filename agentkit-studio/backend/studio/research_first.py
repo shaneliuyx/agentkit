@@ -785,10 +785,18 @@ def _subject_claim_urls(claims: list[dict], subject: str) -> int:
     return _contract_evidence(claims, subject)
 
 
+def _joint_or_subject_evidence(claims: list[dict], key: str, judge_client: Any, cache: dict) -> int:
+    """A count-gate's evidence for *key*: VERIFIED distinct-joint URLs when ``key == "__joint__"``
+    (so a coincidental co-mention that the pre-WRITE filter will drop can't satisfy the gate —
+    codex), else the plain per-subject cited-URL count. Shared cache → one judge call per joint."""
+    return (_verified_joint_urls(claims, judge_client, cache) if key == "__joint__"
+            else _subject_claim_urls(claims, key))
+
+
 def _boost_richness(
     subjects: list[str], resolved: dict[str, str], all_anchors: dict[str, list[str]],
     relationship: "Relationship", claims: list[dict], evidence_dir: Path,
-    requirement: str, client: Any, judge_client: Any, *, emit: EmitFn,
+    requirement: str, client: Any, judge_client: Any, *, emit: EmitFn, cache: dict | None = None,
 ) -> list[dict]:
     """Quality-floor retry (user bar). Web search is non-deterministic — a lean-web pass
     yields few claims/joint claims (fewer resolved, no relations table). When a subject
@@ -802,6 +810,7 @@ def _boost_richness(
     in ``claims`` is skipped, so the boost never re-counts a pass-1 source). Bounded per
     target + fail-open; fires ONLY when thin, so a rich pass pays ZERO cost."""
     emit = emit or (lambda *_a: None)
+    memo = cache if cache is not None else {}
     try:
         idx = len(list(evidence_dir.glob("source-*.md")))
         seen = {_domain(c["url"]) for c in claims if c.get("url")}
@@ -813,8 +822,8 @@ def _boost_richness(
             nonlocal idx
             added = 0
             for anchor in anchors[:_RICHNESS_BOOST_QUERIES]:
-                if _subject_claim_urls(claims + new_claims, floor_key) >= floor:
-                    break  # enforcement: stop as soon as the floor is met
+                if _joint_or_subject_evidence(claims + new_claims, floor_key, judge_client, memo) >= floor:
+                    break  # enforcement: stop as soon as the floor is met (VERIFIED joints for __joint__)
                 idx, rows = _recover_claims(
                     f"{desc} {anchor}".strip(), loop_subject, pool, all_anchors,
                     evidence_dir, idx, requirement, client, judge_client,
@@ -834,7 +843,7 @@ def _boost_richness(
             if _subject_claim_urls(claims + new_claims, s) < _RICHNESS_MIN_CLAIMS_PER_SUBJECT:
                 _boost(s, resolved.get(s, s), all_anchors.get(s, []), s,
                        _RICHNESS_MIN_CLAIMS_PER_SUBJECT)
-        if len(subjects) >= 2 and _subject_claim_urls(claims + new_claims, "__joint__") < _RICHNESS_MIN_JOINT:
+        if len(subjects) >= 2 and _verified_joint_urls(claims + new_claims, judge_client, memo) < _RICHNESS_MIN_JOINT:
             joint_terms = (relationship.mechanism_terms or [])[:_RICHNESS_BOOST_QUERIES] \
                 or [a for v in all_anchors.values() for a in v][:_RICHNESS_BOOST_QUERIES]
             joint_desc = " ".join(resolved.values())[:80]
@@ -849,7 +858,7 @@ def _boost_richness(
 def _recover_underevidenced(
     contracts: list[dict], claims: list[dict], resolved: dict[str, str],
     all_anchors: dict[str, list[str]], evidence_dir: Path, requirement: str,
-    client: Any, judge_client: Any, *, emit: EmitFn,
+    client: Any, judge_client: Any, *, emit: EmitFn, cache: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """P2.5 Phase C — closed-loop recovery. For each contract still short of its
     ``min_evidence`` (claim-level), ONE targeted recovery search (subject descriptor +
@@ -863,6 +872,7 @@ def _recover_underevidenced(
     from studio.textutil import content_word_stems
 
     emit = emit or (lambda *_a: None)
+    memo = cache if cache is not None else {}
     try:
         domain_words = content_word_stems(_base_task_text(requirement))
         idx = len(list(evidence_dir.glob("source-*.md")))
@@ -870,14 +880,14 @@ def _recover_underevidenced(
         traces: list[dict] = []
         for c in contracts:
             subj, need = c["subject"], int(c["min_evidence"])
-            if _contract_evidence(claims + new_claims, subj) >= need:
+            if _joint_or_subject_evidence(claims + new_claims, subj, judge_client, memo) >= need:
                 continue  # already satisfied → no recovery search
             # Answerability Gate (codex): don't burn a search on a STRUCTURALLY
             # unanswerable question — classify first; unanswerable → skip the search
             # churn and record a REASONED trace (feeds a reasoned Limitation).
             kind, reason = _classify_answerability(c["question"], judge_client)
             if kind == "unanswerable":
-                short = need - _contract_evidence(claims + new_claims, subj)
+                short = need - _joint_or_subject_evidence(claims + new_claims, subj, judge_client, memo)
                 traces.append({"question": c["question"], "subject": subj,
                                "query": "", "sources_added": 0, "short_by": short,
                                "kind": "unanswerable", "reason": reason})
@@ -918,7 +928,7 @@ def _recover_underevidenced(
                     new_claims.extend(got)
                     seen.add(dom)
                     added += len(got)
-            short_by = need - _contract_evidence(claims + new_claims, subj)
+            short_by = need - _joint_or_subject_evidence(claims + new_claims, subj, judge_client, memo)
             if short_by > 0:
                 traces.append({"question": c["question"], "subject": subj,
                                "query": query, "sources_added": added, "short_by": short_by})
@@ -1216,6 +1226,34 @@ def _verify_joint_claim(claim: str, quote: str, subjects: list[str], judge_clien
     return re.sub(r"[^A-Z]+$", "", text) != "COINCIDENTAL"
 
 
+def _joint_verdict(c: dict, judge_client: Any, cache: dict) -> bool:
+    """Memoized ``_verify_joint_claim`` for a claim dict, keyed on (claim, quote, subject-set).
+    No judge → True (the noise filter is a no-op without a judge)."""
+    subs = c.get("subjects") or []
+    if judge_client is None:
+        return True
+    key = (c.get("claim", ""), c.get("quote", ""), tuple(sorted(subs)))
+    if key not in cache:
+        cache[key] = _verify_joint_claim(c.get("claim", ""), c.get("quote", ""), subs, judge_client)
+    return cache[key]
+
+
+def _verified_joints(claims: list[dict], judge_client: Any, cache: dict) -> list[dict]:
+    """The joint claims (>=2 subjects) that are NOT coincidental co-mentions (per the memoized
+    ``_joint_verdict``). The SINGLE joint authority for every count-gate (coverage recovery /
+    richness boost / Phase-C question recovery) so no gate can be satisfied by a joint claim that
+    the pre-WRITE ``_filter_joint_noise`` will drop (codex construction fix). Shares the run's
+    ``cache`` with the filter → one judge call per DISTINCT joint claim across all gates + filter."""
+    return [c for c in claims if len(c.get("subjects") or []) >= 2 and _joint_verdict(c, judge_client, cache)]
+
+
+def _verified_joint_urls(claims: list[dict], judge_client: Any, cache: dict) -> int:
+    """Distinct cited-URL count among VERIFIED joint claims — the noise-aware replacement for
+    ``_contract_evidence(claims, "__joint__")`` / ``_subject_claim_urls(claims, "__joint__")`` in
+    the count-gates."""
+    return len({c["url"] for c in _verified_joints(claims, judge_client, cache) if c.get("url")})
+
+
 def _filter_joint_noise(
     claims: list[dict], subjects: list[str], judge_client: Any, ws_dir: Path, *, emit: EmitFn,
     cache: dict | None = None,
@@ -1223,10 +1261,10 @@ def _filter_joint_noise(
     """Drop JOINT claims (>=2 subject tags) judged coincidental co-mentions (G1-noise). Only
     joint claims are judged (single-subject claims pass untouched). Fail-open (no judge / <2
     subjects / any error → claims unchanged). Re-persists the ledger on change so ``claims.jsonl``
-    matches what WRITE/coverage consume. Runs at EACH joint-count-gate boundary (before
-    ``_coverage_gate`` and ``_boost_richness``, then before WRITE) so those gates never count a
-    joint claim that will later be dropped (codex): the shared ``cache`` (keyed on claim+quote)
-    memoizes each verdict, so N call-sites cost one judge call per DISTINCT joint claim."""
+    matches what WRITE consumes. Runs ONCE before WRITE to clean the artifact — the count-gates
+    (coverage / richness / Phase-C) no longer need a pre-filtered list because they count VERIFIED
+    joints directly via ``_verified_joints`` over the SAME ``cache``, so a joint judged here (or
+    there) costs one judge call per DISTINCT claim across the whole run (keyed via ``_joint_verdict``)."""
     emit = emit or (lambda *_a: None)
     if judge_client is None or len(subjects) < 2:
         return claims
@@ -1235,15 +1273,9 @@ def _filter_joint_noise(
         kept: list[dict] = []
         dropped = 0
         for c in claims:
-            key = (c.get("claim", ""), c.get("quote", ""))
-            if len(c.get("subjects") or []) >= 2:
-                if key not in memo:
-                    memo[key] = _verify_joint_claim(
-                        c.get("claim", ""), c.get("quote", ""), c.get("subjects") or [], judge_client
-                    )
-                if not memo[key]:
-                    dropped += 1
-                    continue
+            if len(c.get("subjects") or []) >= 2 and not _joint_verdict(c, judge_client, memo):
+                dropped += 1
+                continue
             kept.append(c)
         if dropped:
             _persist_claims(kept, ws_dir)
@@ -1967,6 +1999,7 @@ def _coverage_gate(
     ws_dir: Path,
     *,
     emit: EmitFn = None,
+    cache: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Fail-visible floor between CLAIMS and WRITE: if any subject is thin or a
     needed joint claim is missing, fire ONE grounded recovery fetch and re-persist
@@ -1974,6 +2007,7 @@ def _coverage_gate(
     co-occurrence) and never drops a diagram — downstream keeps its no-fabricate
     self-refusal. Fail-open: any error returns *claims* unchanged."""
     emit = emit or (lambda *_a: None)
+    memo = cache if cache is not None else {}
     try:
         multi = len(subjects) >= 2
         # Joint recovery fires only for integration-shaped relationships. These are
@@ -1986,7 +2020,9 @@ def _coverage_gate(
             return sum(1 for c in claims if s in (c.get("subjects") or []))
 
         def _joint_n(cl: list[dict[str, Any]]) -> int:
-            return sum(1 for c in cl if len(c.get("subjects") or []) >= 2)
+            # VERIFIED joints only — a coincidental co-mention the pre-WRITE filter will drop
+            # must not make the gate think a joint is present and skip recovery (codex).
+            return len(_verified_joints(cl, judge_client, memo))
 
         thin = [s for s in subjects if _subj_n(s) < _MIN_CLAIMS_PER_SUBJECT]
         joint_missing = needs_joint and _joint_n(claims) < 1
@@ -3400,16 +3436,16 @@ def generate_research_first(
     # 3. CLAIMS
     claims = _build_claims(ledger, subjects, client, ws_dir, all_anchors)
     emit("claims", {"sources": sum(len(v) for v in ledger.values()), "claims": len(claims)})
-    # G1-noise semantic guard runs at EACH joint-count-gate boundary so coverage/richness never
-    # count a joint claim that will later be dropped as a coincidental co-mention (codex): a
-    # shared verdict cache makes the extra call-sites cost one judge call per DISTINCT joint claim.
+    # G1-noise construction fix (codex): every joint-COUNT gate (coverage recovery / richness
+    # boost / Phase-C question recovery) counts VERIFIED joints via ``_verified_joints`` over a
+    # shared cache, so no gate is satisfied by a joint claim the pre-WRITE ``_filter_joint_noise``
+    # will drop. The filter runs ONCE before WRITE to clean the artifact; the shared cache means
+    # the gates + filter together cost one judge call per DISTINCT joint claim.
     _jn_cache: dict = {}
-    claims = _filter_joint_noise(claims, subjects, judge_client, ws_dir, emit=emit, cache=_jn_cache)
     claims = _coverage_gate(
         claims, subjects, relationship, all_anchors, evidence_dir, requirement,
-        client, judge_client, ws_dir, emit=emit,
+        client, judge_client, ws_dir, emit=emit, cache=_jn_cache,
     )
-    claims = _filter_joint_noise(claims, subjects, judge_client, ws_dir, emit=emit, cache=_jn_cache)
 
     # Quality-floor retry (user bar: reach the s_4c021146c082 reference): a lean-web
     # pass yields few claims/joint claims → fewer resolved, no relations table. Boost
@@ -3419,7 +3455,7 @@ def generate_research_first(
         subjects, {s: r["descriptor"] for s, r in coverage.items()
                    if isinstance(r, dict) and r.get("descriptor")},
         all_anchors, relationship, claims, evidence_dir, requirement, client,
-        judge_client, emit=emit,
+        judge_client, emit=emit, cache=_jn_cache,
     )
     if _boosted:
         claims = claims + _boosted
@@ -3435,7 +3471,7 @@ def generate_research_first(
                      if isinstance(r, dict) and r.get("descriptor")}
         _recovered, q_traces = _recover_underevidenced(
             contracts, claims, _resolved, all_anchors, evidence_dir, requirement,
-            client, judge_client, emit=emit,
+            client, judge_client, emit=emit, cache=_jn_cache,
         )
         if _recovered:
             claims = claims + _recovered

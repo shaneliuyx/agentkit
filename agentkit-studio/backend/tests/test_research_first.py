@@ -1733,6 +1733,24 @@ def test_filter_joint_noise_drops_coincidental_keeps_rest(tmp_path):
     assert len(persisted) == 2                                # ledger re-persisted post-drop
 
 
+def test_verified_joints_count_excludes_coincidental_shared_cache():
+    # Construction fix: the count-gate authority counts only VERIFIED joints (coincidental
+    # co-mentions excluded), and shares the filter's cache so a joint is judged once.
+    def chat(messages, tools=None):
+        return SimpleNamespace(text="COINCIDENTAL" if "compatible" in messages[0]["content"] else "RELATIONSHIP")
+    judge = SimpleNamespace(chat=chat)
+    claims = [
+        {"url": "u1", "subjects": ["Pi", "Craft"], "claim": "Craft calls the Pi SDK", "quote": "q1"},
+        {"url": "u2", "subjects": ["Pi", "Craft"], "claim": "Pi is one of the compatible models", "quote": "q2"},
+        {"url": "u3", "subjects": ["Pi"], "claim": "single subject", "quote": "q3"},
+    ]
+    cache: dict = {}
+    assert rf._verified_joint_urls(claims, judge, cache) == 1     # only the real joint's url
+    assert len(rf._verified_joints(claims, judge, cache)) == 1    # coincidental excluded, single-subj ignored
+    # no judge → counts all joints (filter is a no-op without a judge)
+    assert rf._verified_joint_urls(claims, None, {}) == 2
+
+
 def test_filter_joint_noise_shared_cache_judges_each_claim_once(tmp_path):
     # Codex HIGH: the filter runs at every joint-count-gate boundary so coverage/richness never
     # count a joint that will be dropped. A shared cache means N call-sites cost ONE judge call
