@@ -1085,7 +1085,7 @@ gate kills the routed retry, informing how much of the old path L0 replaces).
 
 (old §6, in full; LOOP-HEALTH WORKSTREAMS combine with S1–S5; L2 = S2)
 
-### L1 — Verify hardening (RC1) [after S1/S2 land] — ⬜ PENDING (spec now = §10.2 editorial checklist + crashed-status rule)
+### L1 — Verify hardening (RC1) [after S1/S2 land] — ✅ DONE 371861f (spec now = §10.2 editorial checklist + crashed-status rule) (editorial gate E1-E7/E9/E11 + verdict router live in finalize.py; the ⬜ was stale)
 - Deterministic gates FIRST, LLM judgment second: every requirement-shaped check gets
   a hard oracle where one exists (fences, mermaid, citations — landed 2026-07-05;
   extend to tables/word-counts when asked for).

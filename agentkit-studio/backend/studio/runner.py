@@ -2687,7 +2687,11 @@ class Runner:
         except Exception:  # noqa: BLE001 - review state is advisory
             self._last_review = None
         try:
-            from studio.run_metrics import build_run_metrics, build_stop_report
+            from studio.run_metrics import (
+                build_pass_economics,
+                build_run_metrics,
+                build_stop_report,
+            )
 
             if cancelled and self._last_stop_reason == "validation_passed":
                 self._last_stop_reason = "cancel_requested"
@@ -2727,6 +2731,10 @@ class Runner:
                 tool_failures=self._tool_failures,
                 review=self._last_review,
                 scorecard=self._last_scorecard_100,
+                pass_economics=build_pass_economics(
+                    pass_ledger=getattr(self, "_finalize_pass_ledger", None),
+                    token_cost=self._acc.total_tokens,
+                ),
             )
             self._checkpoints.append({
                 "id": f"cp_final_{len(self._checkpoints) + 1}",

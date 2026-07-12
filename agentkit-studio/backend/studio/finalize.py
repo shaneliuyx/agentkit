@@ -1665,6 +1665,10 @@ def run_passes(state: FinalizeState) -> FinalizeState:
     if streaks is None:
         streaks = {}
         runner._finalize_noop_streak = streaks
+    ledger: dict[str, dict[str, int]] | None = getattr(runner, "_finalize_pass_ledger", None)
+    if ledger is None:
+        ledger = {}
+        runner._finalize_pass_ledger = ledger
     for name, fn in PASSES:
         if state.rebuild_generated and name in _CONTENT_MUTATING_PASSES:
             _dbg(f"finalize[{name}]: SKIP (rebuild_generated)")
@@ -1685,9 +1689,14 @@ def run_passes(state: FinalizeState) -> FinalizeState:
                 f"fences={(state.scored_text or '').count('```')}"
             )
             streaks[name] = 0 if changed else streaks.get(name, 0) + 1
+            _e = ledger.setdefault(name, {"ran": 0, "accepted": 0})
+            _e["ran"] += 1
+            if changed:
+                _e["accepted"] += 1
         except Exception as exc:  # noqa: BLE001 — a pass must never abort the pipeline
             _dbg(f"finalize[{name}]: EXCEPTION {exc!r}")
             streaks[name] = streaks.get(name, 0) + 1
+            ledger.setdefault(name, {"ran": 0, "accepted": 0})["ran"] += 1
         if streaks.get(name, 0) >= 3:
             _dbg(f"finalize[{name}]: inert {streaks[name]} consecutive epochs")
     return state
