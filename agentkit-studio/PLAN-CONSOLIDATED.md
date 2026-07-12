@@ -86,11 +86,11 @@ or memory files written before this restructure.
 | 6.4 | Verification protocol | ✅ in force — suite 836→890, reviewer pass per slice, live E2E per behavior change |
 | 6.6 | Sequencing (old) | superseded by §12 (now Part 6.5) |
 | 4.1 | Loop-health diagnosis RC1–5 | ✅ complete — every RC now has live evidence + a workstream |
-| 5.5 | L-workstreams | L1 ✅ `371861f` (editorial gate E1–E11 unifier + verdict router + never-record-unverified) · L2 ✅ · L3 ✅ · L4 ✅ MEASURED-NULL `69bdcf8` (repeat-weakness escalation needs a hot iterative loop; research_first is cold-start by design → nothing to escalate over; codex-concurred) · L5 ◐ (verdict/offtopic memo ✅; economics remainder open) · L6 ✅ adopted |
+| 5.5 | L-workstreams | L1 ✅ `371861f` (editorial gate E1–E11 unifier + verdict router + never-record-unverified) · L2 ✅ · L3 ✅ · L4 ✅ MEASURED-NULL `69bdcf8` (repeat-weakness escalation needs a hot iterative loop; research_first is cold-start by design → nothing to escalate over; codex-concurred) · L5 ✅ DONE `1589a03` (verdict/offtopic memo + `build_pass_economics` per-run cost line: per-pass attempted/accepted + tokens-per-accepted) · L6 ✅ adopted |
 | 5.4 | L0 structural producer | ✅ committed — code path verified live (v3 0.657); diagram veto attributed, prose fix in review round |
 | 5.1 | Writer reference process P1–P4 | P1 ✅ `0f72b1d` (coverage ledger; codex HIGH×2 body-cited fix `e8e3da7`) · P2 ✅ DONE-in-research_first `0b4fc47` (question-first planning realized as answer-contracts: `_extract_question_contracts` in FRAME emits per-question `{question,subject,answer_form,min_evidence}` BEFORE research; resolution is per-question via `_resolve_question_contracts`; the ⬜ spec below is stale hub/spoke framing) · P3 ✅ REUSE `0f72b1d` · P4 ✅ `0f72b1d` |
 | 5.2 | Editorial gate E1–E11 | ✅ **11/11 rows compute (E1–E11)**; fail-open never records a pass; verdict router + seed-eligibility gated. E7 (section promises code/diagram/comparison → must carry the block) + E9 (same noun phrase, conflicting counts across sections) added as ADVISORY deterministic rows; **E8 + E10 added 2026-07-12** the SAME way (E8: summary cites a reference the body never uses — summary-only marker = overclaim, distinct axis from E5; E10: a recorded coverage gap (zero-source/uncited subject) must be NAMED in Limitations, not boilerplate). Codex-scoped doctrine held for all four: the SPEC's LLM half stays SKIPPED (over-specced for cold-start — advisory weakness never consumed; a weak-model judge would false-reject prevention-hardened output AND re-judge a prevention path: E8←D4 summary-from-body, E10←P4 `_limitations_note`). Only the cheap deterministic *regression invariant* was built — proves the prevention held at zero judge cost. All four fail → stays "completed" (advisory, not E3/E4 hard-reject); E8/E10 verified PASS on 12 real artifacts incl. the reference bar `s_4c021146c082` (zero false-positive) + 9 new fail-on-bad tests. |
-| 5.3 | Design workstreams D1–D5 | D2 ✅ `0f72b1d` · D3 ✅ `0f72b1d` · D1 ✅ ~90% realized-in-research_first (claims.jsonl grow-only substrate + synthesis-from-claims + coverage-as-query all live; residual = per-claim confidence + claim-IDs, both D5 feeders) · D4 ✅ realized-by-construction (`_write_summary` runs LAST from the final body, `research_first.py:3556` after the section loop — kills overclaiming-summary as specced) · D5 ◐ ONLY open D-item: (a) next-epoch confidence-budget = MEASURED-NULL (cold-start, no epochs, same class as L4) · (b) per-claim confidence + failed-producer-raises-a-research-question = buildable, low-value now (belief-state north-star, "hardest, do last") |
+| 5.3 | Design workstreams D1–D5 | D2 ✅ `0f72b1d` · D3 ✅ `0f72b1d` · D1 ✅ ~90% realized-in-research_first (claims.jsonl grow-only substrate + synthesis-from-claims + coverage-as-query all live; residual = per-claim confidence + claim-IDs, both D5 feeders) · D4 ✅ realized-by-construction (`_write_summary` runs LAST from the final body, `research_first.py:3556` after the section loop — kills overclaiming-summary as specced) · D5 ✅ CLOSED 2026-07-12 (code-verified): confidence-budget = DEAD-BY-COLD-START (0 `confidence|epoch|belief` refs; no next-epoch consumer, same class as L4); failed-producer→research-signal (D5-F) = realized-by-construction via `_recover_underevidenced` closed-loop recovery → declared question-limitation; residual per-claim `confidence` field left unbuilt (consumer already solved by subject-grounded fan-out ranking) |
 | 6.5 | Unified execution order | ACTIVE tracker — slices 1–4 committed; current work = §14 slate (now Part 2.3) |
 | 3.1 | Execution log | living log — one row per committed fix with measured result |
 | 2.3 (slate) / 4.2–4.3 (narrative) | Attempt-8 results + attempt-9 slate | items 1–4 ✅ committed (item 1 = BOTH erasers: A `27beff6` synth fence guard, B `d4e84a9` duplicate-section birth fix + fold-merges; 925 passed) · items 5–8 queued behind §15 re-prioritization (now Part 2.1) |
@@ -99,11 +99,12 @@ or memory files written before this restructure.
 | 1.4-GS4 | Gold-parity axis tracker | ✅ COMPLETE — all 5 axes (Code/Diagram/References/Sections/Detail) live-verified per artifact (not score); see §Part 1.4-GS4 table. G3 aggregator/mirror de-rank also ✅ `0d034d4`. **Zero open gold-parity items.** |
 | 1.2 (backlog) / 7.1–7.4 (matrix/negatives/disposition) | Master ledger (merged PLAN-CONSOLIDATED) | ✅ merged 2026-07-05 night — §17.3 (now Part 1.2) = THE unified backlog · matrix delta §17.1 (now Part 7.1) · +4 settled negatives (Part 7.3) · CONSOLIDATED now a stub |
 
-### 1.1b PENDING TASKS (open, as of 2026-07-10)
+### 1.1b PENDING TASKS (open, as of 2026-07-12)
 
 Acceptance (Part 1.3 a–e) already MET live on `492bae60177b` (0.92–1.0); all
 gold-parity axes CLOSED. Everything below is *durability / depth hardening*, not
-an acceptance blocker. Branch is 153 commits ahead of origin, unpushed.
+an acceptance blocker. Branch is PUSHED to origin (rolling pushes through
+2026-07-12; D5 close, E8/E10 build, ruff clean, Part 6/7/8 doc-truth all landed).
 
 **GATE — ✅ CLEARED 2026-07-11 (`49563af`):**
 - ✅ **Codex branch audit** — exhaustive pre-push review of all 26 changed `backend/studio/*.py` (run `bitpog13x`; two prior runs hung on stdin-open + monorepo-path-prefix bugs, both fixed). Result: 24 CLEAN, 2 prior fixes re-confirmed, **2 real HIGH found + fixed** (`49563af`): (a) `_page_for_url` substring→exact match (evidence misattribution); (b) E3 coverage-fail→rejected per user ruling. +3 regression tests, suite 1170, ruff clean.
@@ -120,7 +121,7 @@ an acceptance blocker. Branch is 153 commits ahead of origin, unpushed.
 - ✅ **G1-noise** (semantic joint-claim guard) — DONE: `_verify_joint_claim` + `_filter_joint_noise` judge each JOINT claim (>=2 subjects) "genuine relationship vs coincidental co-mention?" and drop the coincidental ones (fail-open, re-persists). Option (b) — verbatim-quote compound-noun check — was ALREADY live in `_subject_supported`; this closes the residual bare-name co-mention case (option (a)). Verified: keeps all 4 real joint claims of the canonical 6/6 run.
 - **quarantined, do NOT reopen unless old pipeline outlives it:** buggy `dedupe_sections` fence-masking at `artifact_text.py:662` (reachable only from old-pipeline `normalize_artifact`; research_first is dedupe-free by construction).
 
-**Decision owed to user (not a task):** whether to PUSH the 153-commit branch, and if so squashed/split or as-is. Codex audit is the pre-push gate; push only on explicit word.
+**Decision owed to user (not a task):** whether to eventually squash/split the branch or merge as-is (branch is already pushed to origin — rolling pushes on explicit word each time; codex audit remains the pre-push gate).
 
 ### 1.2 Unified backlog
 
@@ -152,10 +153,11 @@ an acceptance blocker. Branch is 153 commits ahead of origin, unpushed.
    · G4 cap ✅ `3807144` · G6 heading-leak ✅ `5009d8a` · H3 ✅ `bf32bbe` · detail residue (relations table +
    pi-tui roster) ✅ `728e524`/`353a95e`/`f807903` · diagram_render hygiene ✅ `1575cc2` · G3 aggregator/mirror de-rank ✅ `0d034d4`. **ALL gold-parity axes CLOSED — zero open items.**
 
-**FROZEN until the report visibly changes** (internal-quality, from §14/§12):
-verdict memoization per text-hash · AST swallowed-content lint (markdown-it-py) ·
-L1 editorial pass + crashed/unscored status rule · S3 guard consolidation ·
-S5 remainder · echoed-H1 + em-dash rf residuals (§16).
+**Internal-quality (from §14/§12) — mostly LANDED** (the report visibly changed: 6/6 acceptance
+0.92–1.0): verdict memoization ✅ · L1 editorial pass + crashed/unscored status rule ✅ `371861f`
+· S3 guard consolidation ✅ `<2026-07-10>` · S5 remainder ✅ MEASURED-NULL · editorial rows 11/11 ✅
+(E7/E9 `cb5897a`, E8/E10 `4003d3e`). Still open: AST swallowed-content lint (markdown-it-py) ·
+echoed-H1 + em-dash rf residuals (§16) — low-priority durability, no acceptance impact.
 
 **CARRY-OVER from CONSOLIDATED (priorities unchanged, deleted items removed):**
 - P1 presentation ladder: wire `presentation_classifier.py` · table/list
@@ -827,8 +829,9 @@ is the prerequisite for P1 and is already in flight in the current fix batch.
 
 ### 5.2 Editorial gate (E1–E11) + verdict router
 
-(old §10, in full — ◐ ~5/11 E-rows covered by existing+today's machinery (E1/E4/E6/E11
-✅, E3/E5 partial); unifying editorial pass = L1, §12 slice 6, not started)
+(old §10, in full — ✅ 11/11 E-rows compute (E1–E11) in `finalize.py::compute_editorial_rows`;
+unifying editorial pass = L1 `371861f` + verdict router; E7/E9 `cb5897a`, E8/E10 `4003d3e`
+(all deterministic advisory, LLM half skipped per doctrine — see Part 5.2 status))
 
 §9 described the WRITER's reference process for one task. This section (a) generalizes
 it into the unified pipeline every research-report task should run, and (b) adds the
@@ -927,8 +930,9 @@ present-but-unsatisfying → MAJOR revision opportunity naming the branch.
 
 ### 5.3 First-principles reasoning trace (D-A–D-G, D1–D5)
 
-(old §11, in full — ⬜ D1–D5 pending (§12 slices 5/10/11/14); D-B's fractal-critic
-principle already delivered at finalize level via S2 ledger + verdict/gate logging)
+(old §11, in full — ✅ D1–D5 all RESOLVED: D1 ~90% + D2/D3 `0f72b1d` + D4 realized-by-construction
++ D5 CLOSED 2026-07-12 (see Part 1.1b); D-B's fractal-critic principle delivered at finalize level
+via S2 ledger + verdict/gate logging)
 
 §9/§10 mapped the pipeline at STAGE level. This section traces the reasoning INSIDE
 each stage as a competent human actually performs it, then names the design-level
@@ -1092,7 +1096,7 @@ gate kills the routed retry, informing how much of the old path L0 replaces).
 
 (old §6, in full; LOOP-HEALTH WORKSTREAMS combine with S1–S5; L2 = S2)
 
-### L1 — Verify hardening (RC1) [after S1/S2 land] — ✅ DONE 371861f (spec now = §10.2 editorial checklist + crashed-status rule) (editorial gate E1-E7/E9/E11 + verdict router live in finalize.py; the ⬜ was stale)
+### L1 — Verify hardening (RC1) [after S1/S2 land] — ✅ DONE 371861f (spec now = §10.2 editorial checklist + crashed-status rule) (editorial gate E1–E11 (11/11) + verdict router live in finalize.py; the ⬜ was stale)
 - Deterministic gates FIRST, LLM judgment second: every requirement-shaped check gets
   a hard oracle where one exists (fences, mermaid, citations — landed 2026-07-05;
   extend to tables/word-counts when asked for).
@@ -1126,7 +1130,7 @@ epoch (e.g. allow multi-sentence weave from under-used sources), (3) if still st
 mark "app-limit reached" in the run report and STOP burning epochs on that row. The
 loop learns to notice its own walls instead of spinning at them.
 
-### L5 — Acceptance economics (RC5) — ◐ PARTIAL (verdict memoization done; per-run cost line pending)
+### L5 — Acceptance economics (RC5) — ✅ DONE `1589a03` (verdict memoization + per-run cost line: `build_pass_economics` → `build_run_metrics`)
 Per-run postrun block: per-pass attempted/accepted counts + tokens spent per accepted
 change (data already flows through timing_sink/_dbg; aggregate it). Feeds S5: passes
 with chronic ~0% acceptance are candidates for removal or redesign — measured, not
