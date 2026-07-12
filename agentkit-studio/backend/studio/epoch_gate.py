@@ -42,25 +42,6 @@ def accept_epoch(new_text: str, prior_text: str, prefer: PreferFn) -> bool:
     return prefer(new_text, prior_text) > 0
 
 
-def make_preference(base_client: Any, requirement: str) -> PreferFn:
-    """Build a label-free preference fn from ``agentkit.evolve.self_preference``.
-
-    Judges new-vs-prior against the task with no ground-truth label. Fails OPEN
-    (returns +1 = accept) when the judge errors or the lib is absent, so the gate is
-    never *worse* than the old ungated behavior — a judge outage cannot strand a real
-    epoch's work.
-    """
-    def _prefer(new: str, prior: str) -> int:
-        try:
-            from agentkit.evolve.core import self_preference
-            return self_preference(
-                base_client, new, prior, judge_inputs=[requirement[:2000]]
-            )
-        except Exception:  # noqa: BLE001 — fail open: never strand a real epoch
-            return 1
-    return _prefer
-
-
 def make_rubric_preference(
     verified_urls: Any = None,
     *,

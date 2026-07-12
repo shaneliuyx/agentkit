@@ -22,8 +22,6 @@ from studio.artifact_text import (
 )
 from studio.planning import (
     build_section_assignment_rows,
-    build_section_assignment_queue,
-    build_section_worker_foci,
     verify_assignment_coverage,
 )
 from studio.rubric import DEFAULT_TEMPLATE, mask_fenced_code, sections_present
@@ -173,91 +171,6 @@ def test_n3_section_ends_cleanly():
     assert _section_ends_cleanly(doc, "Nonexistent") is None
 
 
-def test_worker_foci_include_assigned_sections_weaknesses_and_create_guidance():
-    foci = build_section_worker_foci(
-        ["Executive Summary", "Limitations"],
-        ["[## Executive Summary] missing concrete findings", "[document] missing citations"],
-        max_sections_per_agent=1,
-    )
-    assert len(foci) == 2
-    assert "ASSIGNED SECTIONS" in foci[0]
-    assert "## Executive Summary" in foci[0]
-    assert "missing concrete findings" in foci[0]
-    assert "missing citations" in foci[0]
-    assert "create and populate" in foci[0]
-    assert "Do not patch or write content for sections assigned to other agents" in foci[0]
-
-
-def test_multi_section_worker_focus_keeps_distinct_file_targets():
-    foci = build_section_worker_foci(
-        ["Executive Summary", "References"],
-        ["[document] missing citations"],
-        max_sections_per_agent=2,
-        section_files={
-            "Executive Summary": "sections/001-executive-summary.md",
-            "References": "sections/002-references.md",
-        },
-    )
-
-    assert len(foci) == 1
-    assert "## Executive Summary -> sections/001-executive-summary.md" in foci[0]
-    assert "## References -> sections/002-references.md" in foci[0]
-    assert "do not combine multiple assigned sections into one file" in foci[0]
-
-
-def test_one_section_file_per_worker_focus_assigns_all_files():
-    foci = build_section_assignment_queue(
-        ["Executive Summary", "References", "Risks"],
-        [],
-        section_files={
-            "Executive Summary": "sections/001-executive-summary.md",
-            "References": "sections/002-references.md",
-            "Risks": "sections/003-risks.md",
-        },
-        agent_slots=2,
-    )
-
-    assert len(foci) == 3
-    assert "AGENT ID: agent-001" in foci[0]
-    assert "sections/001-executive-summary.md" in foci[0]
-    assert "sections/002-references.md" not in foci[0]
-    assert "sections/003-risks.md" not in foci[0]
-    assert "AGENT ID: agent-002" in foci[1]
-    assert "sections/002-references.md" in foci[1]
-    assert "sections/001-executive-summary.md" not in foci[1]
-    assert "sections/003-risks.md" not in foci[1]
-    assert "AGENT ID: agent-001" in foci[2]
-    assert "sections/003-risks.md" in foci[2]
-    assert "sections/001-executive-summary.md" not in foci[2]
-    assert "sections/002-references.md" not in foci[2]
-
-
-def test_section_worker_focus_requires_grounded_reducer_inputs():
-    foci = build_section_assignment_queue(
-        ["References"],
-        ["[## References] missing grounded source URLs"],
-        section_files={"References": "sections/008-references.md"},
-        scoring_matrix=[
-            {"category": "Citation integrity", "points": 20, "signal": "verification"},
-        ],
-    )
-
-    assert len(foci) == 1
-    prompt = foci[0]
-    assert "WORKER OUTPUT CONTRACT:" in prompt
-    assert "RESEARCH_FINDING" in prompt
-    assert "ARTICLE_TITLE" in prompt
-    assert "URL" in prompt
-    assert "PATCH_TARGET" in prompt
-    assert "QUOTE" in prompt
-    assert "WHY" in prompt
-    assert '{"op":"insert_after","anchor":"## Exact Assigned Heading","content":' in prompt
-    assert "op/anchor/content only" in prompt
-    assert "do not use legacy PATCH_TARGET/CONTENT patch objects" in prompt
-    assert "must not contain markdown headings or full-section prose" in prompt
-    assert "never invent bibliography entries" in prompt
-    assert "Do not return plain markdown section prose" in prompt
-    assert "References section" in prompt
 
 
 def test_section_assignment_rows_are_atomic_agent_file_pairs():

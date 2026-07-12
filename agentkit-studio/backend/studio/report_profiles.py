@@ -5,9 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from agentkit.planner.core import Plan, PlanStep
-from agentkit.topology.core import SINGLE
-
 
 ReportType = Literal[
     "general",
@@ -265,92 +262,4 @@ def build_methodology_report_prompt(
         "- Keep the report concise and publishable; no TODOs, no 'source references pending'.\n"
         f"- {code_policy}\n"
         "- Output Markdown only. Do not include EPIC_PLAN, TASK_LIST, ASSIGNED, JSON, or tool notes.\n"
-    )
-
-
-def build_methodology_report_plan(
-    requirement: str,
-    profile: ReportProfile | None = None,
-) -> Plan:
-    """Return the fixed methodology-derived report loop.
-
-    Based on ``ref/.../02_methodology/agent_loop.md``: intake/profile, source
-    plan, retrieval, verification/evidence matrix, deterministic-style assembly,
-    section rewrite, lint, and publish. Use this when a user or catalog seed
-    explicitly chooses the research-report methodology.
-    """
-    profile = profile or GENERIC_RESEARCH_PROFILE
-    sections = "\n".join(f"- {section}" for section in profile.sections)
-    section_list = ", ".join(profile.sections)
-    return Plan(
-        task=requirement,
-        steps=(
-            PlanStep(
-                id="intake-profile",
-                description=(
-                    "Stage: Intake + Select Report Profile.\n"
-                    "Output ONLY compact JSON named ResearchConfig with keys: topic, audience, "
-                    "purpose, report_type, required_sections, source_policy, output_policy, "
-                    "constraints.\n"
-                    f"User request: {requirement.strip()}\n"
-                    f"Use report profile: {profile.title}. Required sections: {section_list}.\n"
-                    "Hard gate: do not force technical/code sections onto non-technical reports."
-                ),
-                depends_on=(),
-                topology=SINGLE,
-            ),
-            PlanStep(
-                id="source-plan",
-                description=(
-                    "Stage: Section + Source Plan.\n"
-                    "Use the upstream ResearchConfig. Produce a section-to-query plan as a "
-                    "Markdown table with columns: section, search_query, required_source_type, "
-                    "success_criteria.\n"
-                    "Max one high-signal query per section for weak-model mode. Keep queries "
-                    "anchored to the user's exact topic."
-                ),
-                depends_on=("intake-profile",),
-                topology=SINGLE,
-            ),
-            PlanStep(
-                id="retrieve-verify",
-                description=(
-                    "Stage: Retrieve Sources + Validate Evidence.\n"
-                    "Run at most one web_search and fetch 1-2 relevant URLs. Produce SourceNotes "
-                    "as bullet lines with: title, URL, date if available, claim, relevance, "
-                    "section. Then produce an Evidence Matrix table: section, claim, URL, "
-                    "source_status, confidence, conflict_or_limit.\n"
-                    "Hard gate: no invented URLs; weak or irrelevant sources must be flagged."
-                ),
-                depends_on=("source-plan",),
-                topology=SINGLE,
-            ),
-            PlanStep(
-                id="assemble-rewrite",
-                description=(
-                    "Stage: Deterministic Section Assembly + Section Rewrite.\n"
-                    "Use the Evidence Matrix. Build the report using exactly these sections, in "
-                    f"order:\n{sections}\n"
-                    "Do not concatenate worker prose or append evidence walls. Rewrite one section "
-                    "at a time in concise publishable prose. Preserve every URL next to the claim "
-                    "it supports. If evidence is missing, say so in Limitations rather than using "
-                    "placeholders."
-                ),
-                depends_on=("retrieve-verify",),
-                topology=SINGLE,
-            ),
-            PlanStep(
-                id="lint-publish",
-                description=(
-                    "Stage: Report Lints + Publish Gate + Packaging.\n"
-                    f"{build_methodology_report_prompt(requirement, profile)}\n"
-                    "Before final output, check: no duplicate headings, no placeholders, no "
-                    "unverified/broken links, no citation walls, no orphaned code, and citations "
-                    "preserved after rewrite. If a hard gate fails, include a short 'Publish gate' "
-                    "section listing the blocker instead of pretending the report is complete."
-                ),
-                depends_on=("assemble-rewrite",),
-                topology=SINGLE,
-            ),
-        ),
     )

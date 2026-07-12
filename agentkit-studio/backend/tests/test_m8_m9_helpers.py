@@ -4,7 +4,6 @@ All four helpers are pure functions — no LLM, no network, no filesystem.
 Tests cover:
   - _parse_epic_plan   : happy path, missing block, bad JSON, wrong shape
   - _build_planner_cot_prompt  : required structural markers present
-  - _build_hub_cot_prompt      : deliverable-exists vs first-run branches
   - _parse_patches_from_output : happy path, missing block, bad JSON, multi-patch
 """
 
@@ -13,15 +12,12 @@ from __future__ import annotations
 import json
 
 from studio.runner import (
-    _build_hub_cot_prompt,
     _build_planner_cot_prompt,
     _build_reducer_refine_prompt,
-    _build_worker_cot_prompt,
     _dedupe_assignment,
     _parse_assigned,
     _parse_epic_plan,
     _parse_patches_from_output,
-    _build_skeleton,
     _detect_gaps,
     _gap_sections,
     _unresolved_block,
@@ -29,28 +25,6 @@ from studio.runner import (
     _plan_from_epics,
     _research_findings_to_patches,
 )
-
-
-def test_build_skeleton_is_generic_and_topic_agnostic() -> None:
-    # The skeleton is now a FIXED high-level ToC (DEFAULT_TEMPLATE) — NOT derived from the
-    # goal and NOT the goal as a title — so the report's topic comes from its CONTENT, not
-    # the template (removes the loop-eng template-reuse drift). The LLM is not consulted.
-    from studio.rubric import DEFAULT_TEMPLATE
-    client = _FakeClient("# Loop Report\n## Intro\n_(pending — needs sourced content)_\n")
-    skel = _build_skeleton("research loop engineering", client)
-    for section in DEFAULT_TEMPLATE:
-        assert f"## {section}" in skel          # every generic section present
-    assert "loop engineering" not in skel.lower()  # goal/topic never named in the skeleton
-    assert "GOAL:" not in (client.seen or "")      # deterministic — no LLM call
-    assert "_(pending — needs sourced content)_" in skel
-
-
-def test_build_skeleton_falls_back_on_bad_llm() -> None:
-    # LLM returns no headings → deterministic skeleton (search/LLM-robust, §11.5).
-    skel = _build_skeleton("my goal", _FakeClient("sorry, I cannot."))
-    assert skel.count("##") >= 4
-    assert "_(pending — needs sourced content)_" in skel
-    assert _detect_gaps(skel)  # a fresh skeleton is all gaps → drives the fill loop
 
 
 def test_detect_gaps_flags_placeholder_only() -> None:
@@ -163,15 +137,6 @@ def test_findings_to_patches_dedupes_repeated_blocks() -> None:
 # ---------------------------------------------------------------------------
 # §11 — worker contract + all-error halt
 # ---------------------------------------------------------------------------
-
-def test_worker_prompt_patch_or_silent_contract() -> None:
-    p = _build_worker_cot_prompt("task", "doc")
-    low = p.lower()
-    assert "patch-or-silent" in low
-    assert "found nothing" in low and "no patch" in low
-    assert "search: ok" in low and "search: error" in low
-    assert "never rewrites" in low and "shortens" in low  # additive reducer promise
-
 
 def test_phase_search_failed_all_error_no_findings() -> None:
     outs = ["I searched.\nPATCHES:\n```json\n[]\n```\nSEARCH: error"]
@@ -361,91 +326,6 @@ def test_build_planner_cot_prompt_guides_report_plan_depth() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _build_hub_cot_prompt
-# ---------------------------------------------------------------------------
-
-def test_build_hub_cot_prompt_with_artifact_uses_read_step() -> None:
-    prompt = _build_hub_cot_prompt(
-        goal="Research loop engineering",
-        artifact_path="/ws/artifact.md",
-        ledger_block="COMPLETED TASKS FROM PRIOR PHASES:\n(none)",
-        weaknesses_block="",
-        artifact_text="# Report\n## Section 1\n...",
-        max_tasks_per_agent=5,
-    )
-    assert "existing deliverable" in prompt.lower()
-    assert "DELIVERABLE_PATH" in prompt
-
-
-def test_build_hub_cot_prompt_no_artifact_uses_first_run_step() -> None:
-    prompt = _build_hub_cot_prompt(
-        goal="Research loop engineering",
-        artifact_path="/ws/artifact.md",
-        ledger_block="",
-        weaknesses_block="",
-        artifact_text="",
-        max_tasks_per_agent=5,
-    )
-    assert "No existing deliverable" in prompt
-
-
-def test_build_hub_cot_prompt_injects_ledger_block() -> None:
-    ledger = "COMPLETED TASKS FROM PRIOR PHASES:\n- [epic-1] Gather phase"
-    prompt = _build_hub_cot_prompt("goal", "path", ledger, "", "", 3)
-    assert "epic-1" in prompt
-
-
-def test_build_hub_cot_prompt_max_tasks_per_agent() -> None:
-    prompt = _build_hub_cot_prompt("goal", "path", "", "", "", max_tasks_per_agent=7)
-    assert "7" in prompt
-
-
-def test_build_hub_cot_prompt_contains_patches_instruction() -> None:
-    prompt = _build_hub_cot_prompt("goal", "path", "", "", "", 5)
-    assert "PATCHES" in prompt
-
-
-def test_build_hub_cot_prompt_step5_is_section_based() -> None:
-    """DESIGN §5.1 Step 5: assignment by document section, not by topic."""
-    prompt = _build_hub_cot_prompt("goal", "path", "", "", "", 5)
-    low = prompt.lower()
-    assert "by document section" in low or "document section" in low
-    assert "non-overlapping" in low
-    assert "verbatim" in low
-    assert "not by topic" in low
-
-
-# ---------------------------------------------------------------------------
-# _build_worker_cot_prompt (DESIGN §5.3)
-# ---------------------------------------------------------------------------
-
-def test_build_worker_cot_prompt_has_verbatim_anchor_rule() -> None:
-    prompt = _build_worker_cot_prompt(
-        task_list_for_agent="- improve ## Results",
-        artifact_current_text="# Report\n## Results\n...",
-    )
-    low = prompt.lower()
-    assert "verbatim" in low
-    assert "anchor" in low
-    assert "do not paraphrase" in low
-    assert "PATCHES" in prompt
-
-
-def test_build_worker_cot_prompt_injects_assignment_and_content() -> None:
-    prompt = _build_worker_cot_prompt(
-        task_list_for_agent="MYTASK-XYZ",
-        artifact_current_text="MYDOC-ABC",
-    )
-    assert "MYTASK-XYZ" in prompt
-    assert "MYDOC-ABC" in prompt
-
-
-def test_build_worker_cot_prompt_forbids_file_writes() -> None:
-    prompt = _build_worker_cot_prompt("t", "c")
-    assert "Do NOT write to any file" in prompt
-
-
-# ---------------------------------------------------------------------------
 # _build_reducer_refine_prompt (DESIGN §2.2 Step 5)
 # ---------------------------------------------------------------------------
 
@@ -473,18 +353,6 @@ def test_build_reducer_refine_prompt_uses_numbered_step_cot() -> None:
     # Sequential numbered steps, not a flat bullet list.
     for marker in ("Step 1", "Step 2", "Step 3", "Step 4", "Step 8"):
         assert marker in prompt, f"reducer prompt missing {marker} (not CoT form)"
-
-
-def test_all_agent_prompts_are_numbered_step_cot() -> None:
-    """R7 (universal): every prompt builder uses numbered-step CoT."""
-    builders = [
-        _build_planner_cot_prompt("g", "p", "", ""),
-        _build_hub_cot_prompt("g", "p", "", "", "", 5),
-        _build_worker_cot_prompt("t", "c"),
-        _build_reducer_refine_prompt("g", "p"),
-    ]
-    for prompt in builders:
-        assert "Step 1" in prompt and "Step 2" in prompt
 
 
 # ---------------------------------------------------------------------------

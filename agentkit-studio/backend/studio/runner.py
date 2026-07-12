@@ -232,11 +232,8 @@ def _prune_resolved_weaknesses(weaknesses: list[str], text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 from studio.prompts import (  # noqa: E402,F401
     _build_executor_prompt,
-    _build_hub_cot_prompt,
     _build_planner_cot_prompt,
     _build_reducer_refine_prompt,
-    _build_skeleton,
-    _build_worker_cot_prompt,
     _today_note,
 )
 from studio.findings import (  # noqa: E402,F401
@@ -262,8 +259,6 @@ from studio.planning import (  # noqa: E402,F401
     _render_graph,
     _with_upstream,
     build_section_assignment_rows,
-    build_section_assignment_queue,
-    build_section_worker_foci,
     select_topologies_by_llm,
     verify_assignment_coverage,
 )

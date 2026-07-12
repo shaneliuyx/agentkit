@@ -365,49 +365,6 @@ def verify_assignment_coverage(
     return unmet
 
 
-def build_section_worker_foci(
-    sections: list[str] | tuple[str, ...],
-    weaknesses: list[str] | tuple[str, ...],
-    *,
-    max_sections_per_agent: int = 1,
-    section_files: dict[str, str] | None = None,
-    scoring_matrix: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
-) -> tuple[str, ...]:
-    """Build explicit section-scoped worker assignments for fan-out phases.
-
-    Each focus is a small contract: these exact sections are the worker's scope,
-    relevant weaknesses are guidance, and absent/pending sections are create jobs.
-    """
-    clean_sections = [_normalize_section_heading(s) for s in sections if str(s).strip()]
-    if not clean_sections:
-        return ()
-    group_size = max(1, int(max_sections_per_agent or 1))
-    groups = [
-        clean_sections[i:i + group_size]
-        for i in range(0, len(clean_sections), group_size)
-    ]
-    return tuple(_section_focus_text(g, weaknesses, section_files or {}, scoring_matrix=scoring_matrix) for g in groups)
-
-
-def build_section_assignment_queue(
-    sections: list[str] | tuple[str, ...],
-    weaknesses: list[str] | tuple[str, ...],
-    *,
-    section_files: dict[str, str] | None = None,
-    agent_slots: int | None = None,
-    scoring_matrix: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
-) -> tuple[str, ...]:
-    """Build one-file worker foci for the section assignment queue."""
-    rows = build_section_assignment_rows(
-        sections,
-        weaknesses,
-        section_files=section_files,
-        agent_slots=agent_slots,
-        scoring_matrix=scoring_matrix,
-    )
-    return tuple(row["assignment"] for row in rows)
-
-
 def build_section_assignment_rows(
     sections: list[str] | tuple[str, ...],
     weaknesses: list[str] | tuple[str, ...] = (),

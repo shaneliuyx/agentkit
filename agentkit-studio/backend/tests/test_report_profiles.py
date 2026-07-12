@@ -1,7 +1,5 @@
 from studio.report_profiles import (
-    build_methodology_report_plan,
     build_methodology_report_prompt,
-    is_report_request,
     profile_template_presets,
     resolve_report_profile,
 )
@@ -62,24 +60,3 @@ def test_methodology_report_prompt_is_evidence_first() -> None:
     assert "References" in prompt
     assert "Do not include EPIC_PLAN" in prompt
     assert "Do not include code blocks" in prompt
-
-
-def test_methodology_report_plan_follows_reference_stages() -> None:
-    plan = build_methodology_report_plan(
-        "Write a generic research report about remote catalog management."
-    )
-
-    assert is_report_request(plan.task)
-    assert [step.id for step in plan.steps] == [
-        "intake-profile",
-        "source-plan",
-        "retrieve-verify",
-        "assemble-rewrite",
-        "lint-publish",
-    ]
-    assert all(step.topology == "single" for step in plan.steps)
-    assert "ResearchConfig" in plan.steps[0].description
-    assert "section-to-query plan" in plan.steps[1].description
-    assert "Evidence Matrix" in plan.steps[2].description
-    assert "Deterministic Section Assembly" in plan.steps[3].description
-    assert "Publish Gate" in plan.steps[4].description
