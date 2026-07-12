@@ -1188,8 +1188,9 @@ def _e9_number_conflicts(text: str) -> list[str]:
     return [f'"{key}": {sorted(nums)}' for key, nums in sorted(by_key.items()) if len(nums) > 1]
 
 
-#: E8 / E10 section matchers — generic heading words, NOT task literals.
-_E8_SUMMARY_HEADING_RE = re.compile(r"summary", re.I)
+#: E8 / E10 section matchers — generic heading words, NOT task literals. E8 is an EXACT match
+#: (fullmatch) so a body section like "Dataset Summary" is not mistaken for the executive summary.
+_E8_SUMMARY_HEADING_RE = re.compile(r"(?:executive\s+summary|summary)", re.I)
 _E10_LIMITATIONS_HEADING_RE = re.compile(r"limitation", re.I)
 
 
@@ -1201,16 +1202,18 @@ def _e8_summary_overclaim(text: str) -> list[str] | None:
     [] when consistent, or None when there is no summary section to check. Generic; no literals."""
     from agentkit.artifacts.sections import split_sections
     from studio.artifact_text import _REFERENCES_HEADING_RE
+    from studio.textutil import mask_fenced_code
 
-    # Scope to pre-References text so a marker's References entry doesn't count as body support.
+    # Scope to pre-References text so a marker's References entry doesn't count as body support,
+    # and mask fenced code so `arr[2]` inside a block is not read as citation [2] (E5's rule).
     m = _REFERENCES_HEADING_RE.search(text or "")
-    scoped = (text or "")[: m.start()] if m else (text or "")
+    scoped = mask_fenced_code((text or "")[: m.start()] if m else (text or ""))
     summary_markers: set[int] = set()
     body_markers: set[int] = set()
     found_summary = False
     for heading, body in split_sections(scoped):
         markers = {int(n) for n in _CITE_MARKER_RE.findall(body or "")}
-        if _E8_SUMMARY_HEADING_RE.search(heading.lstrip("# ")):
+        if _E8_SUMMARY_HEADING_RE.fullmatch(heading.lstrip("# ").strip()):
             found_summary = True
             summary_markers |= markers
         else:
@@ -1242,14 +1245,14 @@ def _e10_undisclosed_gaps(text: str, coverage: dict | None) -> list[str] | None:
         (body or "") for heading, body in split_sections(text or "")
         if _E10_LIMITATIONS_HEADING_RE.search(heading.lstrip("# "))
     ).lower()
-    # A gap is disclosed if its full name — or every significant word of it (≥3 chars) — appears in
-    # the Limitations prose (word-level so "Craft agents" discloses a "Craft" gap). No Limitations
-    # section ⇒ empty prose ⇒ every gap undisclosed (the boilerplate/missing-honesty signal).
+    # A gap is disclosed if every significant word of it (≥3 chars; else the raw name) appears as a
+    # WHOLE WORD in the Limitations prose — word-boundary, not substring, so a short subject like
+    # "US" is NOT falsely disclosed by "usual". No Limitations section ⇒ empty prose ⇒ every gap
+    # undisclosed (the boilerplate/missing-honesty signal).
     undisclosed = []
     for s in gaps:
-        s_low = s.lower()
-        words = [w for w in re.findall(r"[a-z0-9]+", s_low) if len(w) >= 3]
-        if not ((s_low in lim) or (words and all(w in lim for w in words))):
+        words = [w for w in re.findall(r"[a-z0-9]+", s.lower()) if len(w) >= 3] or [s.lower()]
+        if not all(re.search(rf"\b{re.escape(w)}\b", lim) for w in words):
             undisclosed.append(s)
     return sorted(undisclosed)
 

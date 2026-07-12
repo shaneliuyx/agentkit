@@ -368,3 +368,37 @@ def test_e10_could_not_verify_without_coverage():
     rows = compute_editorial_rows(text=doc, required_sections=None, coverage=None,
                                   rebuild_generated=True)
     assert _verdict(rows, "E10") == "could_not_verify"
+
+
+# --------------------------------------------------------------------------- #
+# E8/E10 precision regressions (codex review 2026-07-12).
+# --------------------------------------------------------------------------- #
+def test_e8_masks_body_code_fence_markers():
+    # [2] appears in the body ONLY inside a code fence (arr[2]) — indexing, not a
+    # citation. It must NOT count as body support, so a summary [2] is an overclaim.
+    doc = ("## Executive Summary\n\nBold claim [2].\n\n"
+           "## Findings\n\n```python\nx = arr[2]\n```\n\n"
+           "## References\n\n[2] http://b\n")
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E8") == "fail"
+
+
+def test_e8_body_x_summary_section_not_treated_as_exec_summary():
+    # "## Dataset Summary" is a BODY section, not the executive summary — its [1]
+    # must count as body support, so the real exec summary does not false-fail.
+    doc = ("## Executive Summary\n\nOverview [1].\n\n"
+           "## Dataset Summary\n\nMore detail [1].\n\n"
+           "## References\n\n[1] http://a\n")
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E8") == "pass"
+
+
+def test_e10_short_subject_not_disclosed_by_substring():
+    # Gap subject "US" must not be considered disclosed by the substring in "usual".
+    cov = {"US": {"sources_fetched": 0, "cited_in_artifact": 0}}
+    doc = "## Limitations\n\nThis report has the usual scope constraints.\n"
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage=cov,
+                                  rebuild_generated=True)
+    assert _verdict(rows, "E10") == "fail"
