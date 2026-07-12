@@ -22,6 +22,7 @@ from studio.runner import (
     _prune_resolved_weaknesses,
 )
 from studio.session import SessionRegistry
+import studio.editor_pass as _editor_pass_mod
 
 
 def _make_session(mode: str = "auto", budget: float | None = None):
@@ -3144,7 +3145,7 @@ def _run_editor(tmp_path, session, client, scores, monkeypatch):
     from studio import runner as _runner_mod
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     seq = iter(scores)
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
     events: list = []
     final, weaknesses = _runner_mod._run_editor_pass(
         session=session,
@@ -3164,15 +3165,19 @@ def _run_editor(tmp_path, session, client, scores, monkeypatch):
 def test_editor_offers_six_file_tools(tmp_path, monkeypatch) -> None:
     """The editor pass must offer exactly the 6-tool set: the original 4 plus the
     two file primitives wired in this session (edit_file, glob)."""
-    from studio import runner as _runner_mod
     captured: dict = {}
-    real_cls = _runner_mod.ToolAugmentedClient
+    real_cls = _editor_pass_mod.ToolAugmentedClient
 
     def _spy(*args, **kwargs):
         captured["offer_tools"] = kwargs.get("offer_tools")
         return real_cls(*args, **kwargs)
 
-    monkeypatch.setattr(_runner_mod, "ToolAugmentedClient", _spy)
+    # NOTE (extraction seam, not in the original spec's enumerated list): _run_editor_pass
+    # now lives in studio.editor_pass and resolves ToolAugmentedClient as ITS OWN module
+    # global, so the patch target must be editor_pass — patching studio.runner's copy
+    # (used elsewhere in runner.py, e.g. the scorer's tool-augmented client) has no effect
+    # on the editor pass anymore. Same class of seam as the _editor_scored_issues repoint.
+    monkeypatch.setattr(_editor_pass_mod, "ToolAugmentedClient", _spy)
     session = _editor_session()
     # Empty issue list on the first score → loop breaks before any LLM turn, but
     # the editor_client (and thus offer_tools) is still constructed.
@@ -3250,7 +3255,7 @@ def test_editor_round1_reverts_feeds_forward_to_round2_then_hard_stops(tmp_path,
         (0.5, ["w1", "w2"]),         # round2 new: regression again
         (0.6, ["w1"]),               # round2 fresh post-revert recompute → hard stop
     ])
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
     events: list = []
     final, weaknesses = _runner_mod._run_editor_pass(
         session=session,
@@ -3332,7 +3337,7 @@ def test_editor_skipped_without_scoring_matrix(tmp_path, monkeypatch) -> None:
     from studio import runner as _runner_mod
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     # If it ran, this would raise (empty iterator) — proves the gate short-circuits.
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")))
     final, weaknesses = _runner_mod._run_editor_pass(
         session=session,
         base_client=client,
@@ -3396,7 +3401,7 @@ def test_editor_pass_threads_relevance_extra_issues_into_every_round_call(
         calls.append(a)
         return next(seq)
 
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", _spy)
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", _spy)
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     my_extra = [
         "section 'Executive Summary' appears unrelated to the current task (relevance check: NO)"
@@ -3441,7 +3446,7 @@ def test_editor_soft_opportunity_accept_keeps_flat_round_that_added_the_alternat
         (0.5, ["w1"]),  # round1 new: flat score, flat weaknesses → normal REVERT trigger
         (0.9, []),      # round2 cur: nothing left → break
     ])
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
     # Opportunity present pre-round (count 1); the edit adds the alternative, so the
     # patched text (which contains _EDITOR_REPLACEMENT) recounts to 0.
     recount = lambda t: 0 if _EDITOR_REPLACEMENT in t else 1
@@ -3486,7 +3491,7 @@ def test_editor_flat_round_still_reverts_when_no_opportunity_reduced(
         (0.5, ["w1"]),  # round1 fresh post-revert recompute
         (0.6, []),      # round2 cur: nothing left → break
     ])
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
     recount = lambda t: 1  # opportunity count never drops → no soft accept
     events: list = []
     final, weaknesses = _runner_mod._run_editor_pass(
@@ -3551,7 +3556,7 @@ def test_editor_soft_accept_does_not_fire_when_recount_fail_opens(
         (0.5, ["w1"]),  # round1 fresh post-revert recompute
         (0.6, []),      # round2 cur: nothing left → break
     ])
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
     recount = lambda t: None  # compliance re-check unavailable → UNKNOWN for every text
     events: list = []
     final, weaknesses = _runner_mod._run_editor_pass(
@@ -3616,7 +3621,7 @@ def test_editor_soft_accept_does_not_fire_on_partial_parse_recount(
         (0.5, ["w1"]),  # round1 fresh post-revert recompute
         (0.6, []),      # round2 cur: nothing left → break
     ])
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
     events: list = []
     final, weaknesses = _runner_mod._run_editor_pass(
         session=session,
@@ -3659,7 +3664,7 @@ def test_editor_soft_accept_rejects_weakness_swap_at_equal_count(
         (0.5, ["w1"]),  # round1 fresh post-revert recompute
         (0.6, []),      # round2 cur: nothing left → break
     ])
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: next(seq))
     # The patched text (containing _EDITOR_REPLACEMENT) recounts to 0 < baseline 1 —
     # so ONLY the weakness-identity check stands between this round and a false accept.
     recount = lambda t: 0 if _EDITOR_REPLACEMENT in t else 1
@@ -3807,7 +3812,7 @@ def test_editor_structural_retry_accepts_first_qualifying_attempt(tmp_path, monk
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
     client = _StructuralRetryClient(patch_on_call=5)  # fix+toc+selfeval=1..3, retry attempt2=5
     recount = lambda t: 0 if "mermaid" in t else 1
     events: list = []
@@ -3851,7 +3856,7 @@ def test_editor_structural_retry_restores_when_no_attempt_qualifies(tmp_path, mo
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
     client = _StructuralRetryClient(patch_on_call=9999)  # never patches
     events: list = []
     final, weaknesses = _runner_mod._run_editor_pass(
@@ -3943,11 +3948,10 @@ def test_a2_diagram_lands_and_is_accepted(tmp_path, monkeypatch) -> None:
     report's own entities) via direct file write, it survives the section-split
     round-trip, and the accept gate keeps it because the structural-opportunity
     count strictly drops. This is the production-path analog of the live check."""
-    from studio import runner as _runner_mod
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
     recount = lambda t: 0 if "mermaid" in t else 1  # diagram present ⇒ opportunity resolved
     client = _A2Client(_A2_GROUNDED_LINES)
     events: list = []
@@ -3968,11 +3972,10 @@ def test_a2_grounding_guard_adds_nothing_for_ungrounded_components(tmp_path, mon
     """When the model names only invented components, the grounding guard yields no
     diagram → A2 adds nothing (no file write, no accept) and the fallback loop (inert
     client) leaves the artifact byte-for-byte unchanged."""
-    from studio import runner as _runner_mod
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
     ungrounded = "\n".join(f"COMPONENT: Zorptron{i} | invented" for i in range(6))
     client = _A2Client(ungrounded)
     # Literal-token grounding: no >=4-char token of any invented "Zorptron" label
@@ -3994,14 +3997,13 @@ def test_a2_accept_gate_restores_on_score_regression(tmp_path, monkeypatch) -> N
     """The gate is NOT weakened for A2: a grounded, opportunity-reducing diagram is
     still REJECTED and the snapshot restored if it regresses the rubric score —
     proving A2 reuses the same non-regression bounds as the tool-augmented loop."""
-    from studio import runner as _runner_mod
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     before_art = art_file.read_text(encoding="utf-8")
     # Candidate (contains mermaid) scores LOWER than the baseline → regression.
     def _scored(session_, text, *a, **k):
         return (0.3, ["w1"]) if "mermaid" in text else (0.5, ["w1"])
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", _scored)
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", _scored)
     recount = lambda t: 0 if "mermaid" in t else 1  # opp WOULD drop, but score blocks accept
     client = _A2Client(_A2_GROUNDED_LINES)
     events: list = []
@@ -4081,11 +4083,10 @@ def test_section_presentation_adds_diagram_to_clean_report(tmp_path, monkeypatch
     """A report with NO weaknesses (the round loop breaks immediately on empty
     cur_issues) still gets a diagram in the warranting section via the post-loop
     presentation pass — the exact M2 case the old opportunity-gated path skipped."""
-    from studio import runner as _runner_mod
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _PS_ARTIFACT)
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
     client = _PSClient("Key Findings")
     events: list = []
     final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
@@ -4104,14 +4105,13 @@ def test_section_presentation_adds_diagram_to_clean_report(tmp_path, monkeypatch
 def test_section_presentation_reverts_on_score_regression(tmp_path, monkeypatch) -> None:
     """The presentation pass reuses the non-regression gate: a diagram that drops the
     score is reverted, artifact byte-identical, a reject event emitted."""
-    from studio import runner as _runner_mod
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _PS_ARTIFACT)
     before_art = art_file.read_text(encoding="utf-8")
 
     def _scored(session_, text, *a, **k):
         return (0.3, []) if "mermaid" in text else (0.5, [])
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", _scored)
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", _scored)
     client = _PSClient("Key Findings")
     events: list = []
     final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
@@ -4124,11 +4124,10 @@ def test_section_presentation_reverts_on_score_regression(tmp_path, monkeypatch)
 
 def test_section_presentation_noop_when_nothing_warrants(tmp_path, monkeypatch) -> None:
     """Detector says PROSE for every section → no diagram, no events, artifact untouched."""
-    from studio import runner as _runner_mod
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _PS_ARTIFACT)
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
     client = _PSClient("__none__")  # no heading matches → all PROSE
     events: list = []
     final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
@@ -4144,7 +4143,7 @@ def test_section_presentation_rolls_back_disk_on_midsync_failure(tmp_path, monke
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _PS_ARTIFACT)
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
 
     def _boom(*a, **k):  # the write-through step fails mid-sync (IO / workspace error)
         raise RuntimeError("section sync blew up")
@@ -4215,11 +4214,10 @@ _CP_COMPARE_ARTIFACT = (
 def test_content_presentation_adds_table_to_comparison_section(tmp_path, monkeypatch) -> None:
     """A comparison section (prose that should be a table) gets a grounded markdown table
     via the post-loop content pass, kept on score/weakness non-regression + realized form."""
-    from studio import runner as _runner_mod
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _CP_COMPARE_ARTIFACT)
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
     client = _CPClient("Key Findings")
     events: list = []
     final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
@@ -4235,14 +4233,13 @@ def test_content_presentation_adds_table_to_comparison_section(tmp_path, monkeyp
 
 def test_content_presentation_reverts_on_score_regression(tmp_path, monkeypatch) -> None:
     """A table that drops the score is reverted; artifact byte-identical; reject emitted."""
-    from studio import runner as _runner_mod
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _CP_COMPARE_ARTIFACT)
     before_art = art_file.read_text(encoding="utf-8")
 
     def _scored(session_, text, *a, **k):
         return (0.3, []) if "| Redis | Postgres |" in text else (0.5, [])
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", _scored)
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", _scored)
     client = _CPClient("Key Findings")
     events: list = []
     final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
@@ -4256,7 +4253,6 @@ def test_content_presentation_reverts_on_score_regression(tmp_path, monkeypatch)
 def test_content_presentation_repairs_format_defect(tmp_path, monkeypatch) -> None:
     """An unclosed code fence (no form change) is repaired deterministically and kept via
     the same gate — a format-only accept (heading None)."""
-    from studio import runner as _runner_mod
     session = _editor_session()
     broken = (
         "# R\n\n## Executive Summary\n\nOverview.\n\n"
@@ -4266,7 +4262,7 @@ def test_content_presentation_repairs_format_defect(tmp_path, monkeypatch) -> No
     root, art_file = _build_editor_ws(tmp_path, session, broken)
     before_art = art_file.read_text(encoding="utf-8")
     assert before_art.count("```") == 1  # genuinely unclosed
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
     client = _CPClient("__none__")  # adjudicator says PARAGRAPH everywhere → no form change
     events: list = []
     final, _ = _run_ps(tmp_path, session, art_file, before_art, client, events)
@@ -4286,7 +4282,7 @@ def test_content_presentation_rolls_back_disk_on_midsync_failure(tmp_path, monke
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _CP_COMPARE_ARTIFACT)
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, []))
     _orig = _runner_mod._write_artifact_through_sections
     calls = {"n": 0}
 
@@ -4314,7 +4310,7 @@ def test_editor_structural_retry_skips_when_baseline_recount_unavailable_or_zero
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
     for recount_fn in (lambda t: None, lambda t: 0):
         client = _StructuralRetryClient(patch_on_call=9999)
         events: list = []
@@ -4350,7 +4346,7 @@ def test_editor_structural_retry_survives_raising_recount_after_mutation(
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
     client = _StructuralRetryClient(patch_on_call=4)  # fix+toc+selfeval=1..3, retry attempt1=4
     _recount_calls = {"n": 0}
 
@@ -4399,14 +4395,14 @@ def test_editor_structural_retry_not_invoked_for_plain_only_opportunities(
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
     called = {"n": 0}
 
     def _spy(*a, **k):
         called["n"] += 1
         return a[4] if len(a) > 4 else k.get("scored_text"), []  # unused: gate should skip entirely
 
-    monkeypatch.setattr(_runner_mod, "_editor_structural_retry", _spy)
+    monkeypatch.setattr(_editor_pass_mod, "_editor_structural_retry", _spy)
     client = _StructuralRetryClient(patch_on_call=9999)
     _runner_mod._run_editor_pass(
         session=session,
@@ -4540,14 +4536,14 @@ def test_editor_structural_retry_fires_for_non_keyword_opportunity_via_llm_class
     session = _editor_session()
     root, art_file = _build_editor_ws(tmp_path, session, _editor_artifact_text())
     before_art = art_file.read_text(encoding="utf-8")
-    monkeypatch.setattr(_runner_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
+    monkeypatch.setattr(_editor_pass_mod, "_editor_scored_issues", lambda *a, **k: (0.5, ["w1"]))
     captured: dict = {}
 
     def _spy(*, structural_opportunities, scored_text, **_k):
         captured["structural_opportunities"] = structural_opportunities
         return scored_text, ["w1"]
 
-    monkeypatch.setattr(_runner_mod, "_editor_structural_retry", _spy)
+    monkeypatch.setattr(_editor_pass_mod, "_editor_structural_retry", _spy)
 
     class _ClassifyThenNoopClient:
         """First call (the classification probe) says STRUCTURAL; every call
