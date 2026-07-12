@@ -1,5 +1,13 @@
 # AgentKit Studio — Hill-Climb / Section-Ownership Research-Report Architecture (DESIGN-v2)
 
+> **⚠️ SUPERSEDED (2026-07-12) by [`DESIGN.md`](DESIGN.md).** This document describes the
+> **legacy hub/spoke "Section-Ownership" phase-loop** architecture, which was retired as the
+> live generation path (2026-07-05 ruling) and replaced by the linear `research_first` pipeline.
+> The phase-loop still exists in code as the `STUDIO_DISABLE_RESEARCH_FIRST` rollback fallback
+> (`studio/legacy_loop.py`) but is no longer the design authority. Kept as the legacy
+> architecture-of-record; some architecture-neutral parts (persistence schema, SSE gotcha,
+> agentkit boundary, rubric/UI) were carried into `DESIGN.md`.
+
 **Purpose.** One coherent design authority for Studio's self-improving research-report
 engine: how a goal becomes a multi-phase plan, how parallel agents own document
 sections, how their work is assembled deterministically, how the deliverable is
