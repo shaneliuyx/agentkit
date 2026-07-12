@@ -1151,8 +1151,21 @@ both found the assumption wrong before it shipped deeper.
 - **Objective:** behavior-preserving structural cleanup. Every existing feature, guard,
   and event keeps working; the code that implements them gets fewer copies, fewer
   nesting layers, and one home per concept.
+- ✅ **DECOMPOSITION CAMPAIGN DONE (2026-07-12)** — metric 1 MET. runner.py 4,443 → **2,187** (−51%,
+  under the <2,500 target) via 4 behavior-preserving slices, each AST-identical bodies + suite-green
+  (1208) + codex-APPROVE + pushed: **A** dead hub/spoke code (−532, 7 funcs + their symbol-only tests);
+  **B** legacy `_run_phase_loop` → `studio/legacy_loop.py` (LegacyLoopMixin, −981); **C**
+  `_seed_carry_forward` → `studio/seed_carry.py` (−262); **D** editor subsystem (16 funcs + 7 consts) →
+  `studio/editor_pass.py` (−1012, re-export seam + 30 monkeypatch repoints). Mechanism: verbatim move +
+  call-time late import to break cycles + re-export for external consumers. CONCLUDED here on measured
+  evidence: no cohesive cluster remains (the rest is the `_run_inner` orchestration spine, 90 `self` refs
+  — splitting it would scatter one control-flow; and independent helpers with wide fan-in that would form
+  a low-cohesion grab-bag). Enforcement policy going forward: hard-gate NEW code (<50 func / <300 class /
+  <500 file), refactor-on-touch for edited hotspots; no repo-wide sweep (poor ROI, high regression surface).
+  ADVISORY: slice D touches the active finalize path — a live research_first acceptance run is still owed
+  to confirm editor gate events end-to-end (suite proves structure, not behavior).
 - **Metrics (measured before/after):**
-  1. `runner.py` line count 5,098 → target < 2,500 (extractions, not deletions).
+  1. `runner.py` line count 5,098 → target < 2,500 (extractions, not deletions). ✅ MET: **2,187** (2026-07-12).
   2. Bare `except Exception` sites in runner.py 83 → < 20 (one structured pass-wrapper
      replaces the ad-hoc ones; fail-open SEMANTICS preserved, every swallow logged).
   3. URL-handling variants 31 (across 10 files) → 1 shared module.
