@@ -13,7 +13,6 @@ a notice, never crashing the run.
 
 from __future__ import annotations
 
-from typing import Any
 
 from agentkit.memory.store import MemoryEntry, MemoryStore
 from agentkit.types import Embedder

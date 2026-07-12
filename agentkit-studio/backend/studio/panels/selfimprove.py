@@ -14,7 +14,7 @@ full crash-resumable on-disk run for a single GUI session.
 
 from __future__ import annotations
 
-from agentkit.orchestrator.stall import ESCALATE, assess
+from agentkit.orchestrator.stall import assess
 
 from studio.events import SelfImproveEvent
 

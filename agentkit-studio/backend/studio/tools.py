@@ -547,7 +547,7 @@ GLOB_TOOL: dict[str, Any] = {
 #: ``section`` arg -> that one section. Per-section hashes let an agent re-read a
 #: section only when it actually changed (a patch to one section never busts the
 #: others' cache the way a whole-doc hash would).
-import copy as _copy
+import copy as _copy  # noqa: E402  (late: placed next to the schema it deep-copies)
 
 READ_ARTIFACT_TOOL = _copy.deepcopy(ARTIFACT_TOOL_SCHEMAS[0])
 _raf = READ_ARTIFACT_TOOL["function"]

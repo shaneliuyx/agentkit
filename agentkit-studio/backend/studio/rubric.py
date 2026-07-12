@@ -726,6 +726,6 @@ DEFAULT_WEIGHTS = dict(_WEIGHTS)
 # Mirrors standard research/technical-report structure (exec summary → background →
 # findings → analysis → methodology → limitations → conclusion → references) and covers
 # every rubric criterion (summary, findings, evidence, sourcing, methodology, conclusion).
-from studio.report_profiles import GENERIC_RESEARCH_PROFILE
+from studio.report_profiles import GENERIC_RESEARCH_PROFILE  # noqa: E402  (late: follows the TOC-rationale comment it documents)
 
 DEFAULT_TEMPLATE = list(GENERIC_RESEARCH_PROFILE.sections)

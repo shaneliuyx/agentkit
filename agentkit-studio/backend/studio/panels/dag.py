@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Any
 
 from agentkit.planner.core import Plan, plan_to_graph_config
 from agentkit.runtime.graph_store import GraphStore

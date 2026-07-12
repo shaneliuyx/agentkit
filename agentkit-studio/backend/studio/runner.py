@@ -24,7 +24,7 @@ import json as _json
 import os
 import re as _re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,30 +34,26 @@ from agentkit.orchestrator.fanout import BudgetExceeded, FanoutBudget
 # NameError on TaskRecord (silently, behind fail-open guards) — same disease as
 # the dropped judge_client parameter.
 from agentkit.orchestrator.ledger import TaskLedger, TaskRecord
-from agentkit.planner.core import Plan, PlanStep, plan
+from agentkit.planner.core import Plan, plan
 from agentkit.topology.core import (
     DURABLE_BOARD,
     GATEWAY,
     MAP,
     MESH,
-    PIPELINE,
     SINGLE,
     STAR,
     TREE,
 )
-from agentkit.topology.dynamic import assign_topologies, run_plan
+from agentkit.topology.dynamic import run_plan
 from agentkit.types import LLMClient
 
-from studio.backends import build_chat_client, build_embedder, resolve_backend
+from studio.backends import build_chat_client, resolve_backend
 from studio.events import (
     BudgetEvent,
     DoneEvent,
     ErrorEvent,
-    EvidenceEvent,
     GateEvent,
     GoalMetEvent,
-    GraphEvent,
-    HillClimbEvent,
     LoopSeedEvent,
     MetricsEvent,
     PhaseDoneEvent,
@@ -756,8 +752,8 @@ def _pick_scored_source(
 # S1: moved to studio.textutil.dbg (was copy-pasted into artifact_text.py and
 # structural_producer.py to dodge a circular import back to this module — kept as
 # a thin alias so every existing `from studio.runner import _dbg` keeps working.
-from studio.textutil import dbg as _dbg
-from studio.guards import length_ratio_ok as _length_ratio_ok
+from studio.textutil import dbg as _dbg  # noqa: E402  (late alias: dodges circular import back to this module)
+from studio.guards import length_ratio_ok as _length_ratio_ok  # noqa: E402  (late alias: same reason)
 
 
 def _build_template_skeleton(
@@ -3236,13 +3232,13 @@ class Runner:
                     _cross_task_seed_notice = ""
                     if _seed_cross_task:
                         _cross_task_seed_notice = (
-                            f"  - CROSS-TASK SEED: this document was seeded from a "
-                            f"DIFFERENT but related prior task. For ANY section containing "
-                            f"content that actually belongs to that PRIOR task's topic "
-                            f"rather than the CURRENT task — even if not specifically "
-                            f"flagged above — DROP that content entirely (delete it, do "
-                            f"not keep or reword it) and WRITE NEW content addressing the "
-                            f"CURRENT task in its place.\n"
+                            "  - CROSS-TASK SEED: this document was seeded from a "
+                            "DIFFERENT but related prior task. For ANY section containing "
+                            "content that actually belongs to that PRIOR task's topic "
+                            "rather than the CURRENT task — even if not specifically "
+                            "flagged above — DROP that content entirely (delete it, do "
+                            "not keep or reword it) and WRITE NEW content addressing the "
+                            "CURRENT task in its place.\n"
                         )
                     # Requirement-compliance repair clause (studio.requirement_compliance).
                     # The prior epoch's verification flagged EXPLICIT task requirements the
