@@ -1188,6 +1188,72 @@ def _e9_number_conflicts(text: str) -> list[str]:
     return [f'"{key}": {sorted(nums)}' for key, nums in sorted(by_key.items()) if len(nums) > 1]
 
 
+#: E8 / E10 section matchers — generic heading words, NOT task literals.
+_E8_SUMMARY_HEADING_RE = re.compile(r"summary", re.I)
+_E10_LIMITATIONS_HEADING_RE = re.compile(r"limitation", re.I)
+
+
+def _e8_summary_overclaim(text: str) -> list[str] | None:
+    """E8 (deterministic): the executive summary must not cite a reference the BODY never uses.
+    Because the summary is written LAST from the final body (D4), a marker appearing ONLY in the
+    summary is an overclaim — a source the summary leans on but no body section supports. Distinct
+    from E5 (marker↔References list): this is summary↔body. Returns the summary-only markers,
+    [] when consistent, or None when there is no summary section to check. Generic; no literals."""
+    from agentkit.artifacts.sections import split_sections
+    from studio.artifact_text import _REFERENCES_HEADING_RE
+
+    # Scope to pre-References text so a marker's References entry doesn't count as body support.
+    m = _REFERENCES_HEADING_RE.search(text or "")
+    scoped = (text or "")[: m.start()] if m else (text or "")
+    summary_markers: set[int] = set()
+    body_markers: set[int] = set()
+    found_summary = False
+    for heading, body in split_sections(scoped):
+        markers = {int(n) for n in _CITE_MARKER_RE.findall(body or "")}
+        if _E8_SUMMARY_HEADING_RE.search(heading.lstrip("# ")):
+            found_summary = True
+            summary_markers |= markers
+        else:
+            body_markers |= markers
+    if not found_summary:
+        return None
+    return [str(n) for n in sorted(summary_markers - body_markers)]
+
+
+def _e10_undisclosed_gaps(text: str, coverage: dict | None) -> list[str] | None:
+    """E10 (deterministic): honest limitations. Any RECORDED research gap — a subject with zero
+    fetched sources, or fetched-but-uncited — must be NAMED in the Limitations section, not papered
+    over with boilerplate (or omitted entirely). Reads the P1 coverage ledger for the actual gaps
+    (runtime data, no task literals). Returns undisclosed gap subjects, [] when all disclosed (or
+    none exist), or None when coverage is absent (cannot verify). Generic."""
+    if not coverage:
+        return None
+    gaps = [
+        s for s, r in coverage.items()
+        if s != "__joint__" and isinstance(r, dict)
+        and (int(r.get("sources_fetched", 0) or 0) <= 0
+             or int(r.get("cited_in_artifact", 0) or 0) <= 0)
+    ]
+    if not gaps:
+        return []
+    from agentkit.artifacts.sections import split_sections
+
+    lim = " ".join(
+        (body or "") for heading, body in split_sections(text or "")
+        if _E10_LIMITATIONS_HEADING_RE.search(heading.lstrip("# "))
+    ).lower()
+    # A gap is disclosed if its full name — or every significant word of it (≥3 chars) — appears in
+    # the Limitations prose (word-level so "Craft agents" discloses a "Craft" gap). No Limitations
+    # section ⇒ empty prose ⇒ every gap undisclosed (the boilerplate/missing-honesty signal).
+    undisclosed = []
+    for s in gaps:
+        s_low = s.lower()
+        words = [w for w in re.findall(r"[a-z0-9]+", s_low) if len(w) >= 3]
+        if not ((s_low in lim) or (words and all(w in lim for w in words))):
+            undisclosed.append(s)
+    return sorted(undisclosed)
+
+
 def compute_editorial_rows(
     *,
     text: str,
@@ -1319,6 +1385,22 @@ def compute_editorial_rows(
         _dbg(f"editorial[E7]: EXCEPTION {exc!r}")
         rows.append(_row("E7", "could_not_verify", f"exception: {exc!r}"))
 
+    # E8 — executive-summary consistency (DETERMINISTIC, advisory): the summary must not cite a
+    # reference the body never uses (summary written last from the body ⇒ a summary-only marker is
+    # an overclaim). LLM half skipped — D4 (summary-from-body) PREVENTS the overclaim class; this is
+    # the cheap regression invariant, not a judge re-judging a prevention path.
+    try:
+        overclaim = _e8_summary_overclaim(txt)
+        if overclaim is None:
+            rows.append(_row("E8", "could_not_verify", "no executive-summary section"))
+        else:
+            rows.append(_row("E8", "pass" if not overclaim else "fail",
+                             "summary cites only body-supported references" if not overclaim
+                             else f"summary-only citations (unsupported by body): {overclaim}"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E8]: EXCEPTION {exc!r}")
+        rows.append(_row("E8", "could_not_verify", f"exception: {exc!r}"))
+
     # E9 — internal number consistency (DETERMINISTIC, advisory): the same specific noun phrase
     # must not carry conflicting counts across sections. LLM half skipped (too blunt for a gate);
     # this catches cross-section number drift that claim-grounding does not prevent.
@@ -1329,6 +1411,22 @@ def compute_editorial_rows(
     except Exception as exc:  # noqa: BLE001
         _dbg(f"editorial[E9]: EXCEPTION {exc!r}")
         rows.append(_row("E9", "could_not_verify", f"exception: {exc!r}"))
+
+    # E10 — honest limitations (DETERMINISTIC, advisory): a recorded research gap (zero-source or
+    # uncited subject in the coverage ledger) must be NAMED in Limitations, not boilerplate/omitted.
+    # LLM half skipped — P4 `_limitations_note` already WRITES the gaps; this verifies they survived
+    # to the artifact. Reads coverage (runtime data); generic, no task literals.
+    try:
+        undisclosed = _e10_undisclosed_gaps(txt, coverage)
+        if undisclosed is None:
+            rows.append(_row("E10", "could_not_verify", "coverage.json missing/empty"))
+        else:
+            rows.append(_row("E10", "pass" if not undisclosed else "fail",
+                             "limitations disclose all recorded gaps (or none exist)"
+                             if not undisclosed else f"undisclosed gaps: {undisclosed}"))
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"editorial[E10]: EXCEPTION {exc!r}")
+        rows.append(_row("E10", "could_not_verify", f"exception: {exc!r}"))
 
     # E11 — lint clean (the full deterministic content-validity list). Same lint_ok
     # gate: no pass when the check could not run.

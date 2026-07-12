@@ -286,3 +286,85 @@ def test_e5_ignores_code_indexing_in_fences():
         text=text, required_sections=None, coverage=None, rebuild_generated=True,
     )
     assert _verdict(rows, "E5") == "pass"
+
+
+# --------------------------------------------------------------------------- #
+# E8 — executive-summary consistency (deterministic, advisory): the summary must
+# not cite a reference the body never uses.
+# --------------------------------------------------------------------------- #
+def _e8_doc(summary_markers: str, body_markers: str, refs: str) -> str:
+    return (f"## Executive Summary\n\n{summary_markers}\n\n"
+            f"## Findings\n\n{body_markers}\n\n## References\n\n{refs}\n")
+
+
+def test_e8_pass_when_summary_cites_only_body_sources():
+    doc = _e8_doc("Key result [1].", "Detailed result [1].", "[1] http://a")
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E8") == "pass"
+
+
+def test_e8_fails_on_summary_only_citation():
+    # [2] appears ONLY in the summary — an overclaim the body doesn't support.
+    doc = _e8_doc("Bold claim [2].", "Detailed result [1].",
+                  "[1] http://a\n[2] http://b")
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E8") == "fail"
+    # advisory: E8 fail records "completed", never "rejected".
+    assert _editorial_run_status(rows, compliance_unavailable=False) == "completed"
+    assert next(r for r in rows if r["row"] == "E8")["required"] is False
+
+
+def test_e8_could_not_verify_without_summary_section():
+    doc = "## Intro\n\nText [1].\n\n## References\n\n[1] http://a\n"
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage={},
+                                  rebuild_generated=False)
+    assert _verdict(rows, "E8") == "could_not_verify"
+
+
+# --------------------------------------------------------------------------- #
+# E10 — honest limitations (deterministic, advisory): a recorded research gap
+# must be NAMED in the Limitations section, not boilerplate/omitted.
+# --------------------------------------------------------------------------- #
+def test_e10_pass_when_gap_disclosed():
+    cov = {"Craft": {"sources_fetched": 0, "cited_in_artifact": 0}}
+    doc = ("## Findings\n\nStuff.\n\n"
+           "## Limitations\n\nWe could not find sources on Craft; it stays an open gap.\n")
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage=cov,
+                                  rebuild_generated=True)
+    assert _verdict(rows, "E10") == "pass"
+
+
+def test_e10_fails_when_gap_undisclosed_boilerplate():
+    cov = {"Craft": {"sources_fetched": 0, "cited_in_artifact": 0}}
+    doc = ("## Findings\n\nStuff.\n\n"
+           "## Limitations\n\nThis report has the usual scope constraints.\n")
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage=cov,
+                                  rebuild_generated=True)
+    assert _verdict(rows, "E10") == "fail"
+    # advisory: E10 fail records "completed", never "rejected".
+    assert _editorial_run_status(rows, compliance_unavailable=False) == "completed"
+
+
+def test_e10_fails_when_no_limitations_section_but_gap_exists():
+    cov = {"Craft": {"sources_fetched": 0, "cited_in_artifact": 0}}
+    doc = "## Findings\n\nStuff.\n"
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage=cov,
+                                  rebuild_generated=True)
+    assert _verdict(rows, "E10") == "fail"
+
+
+def test_e10_pass_when_no_recorded_gaps():
+    cov = {"Craft": {"sources_fetched": 3, "cited_in_artifact": 2}}
+    doc = "## Findings\n\nStuff.\n"
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage=cov,
+                                  rebuild_generated=True)
+    assert _verdict(rows, "E10") == "pass"
+
+
+def test_e10_could_not_verify_without_coverage():
+    doc = "## Findings\n\nStuff.\n\n## Limitations\n\nScope constraints.\n"
+    rows = compute_editorial_rows(text=doc, required_sections=None, coverage=None,
+                                  rebuild_generated=True)
+    assert _verdict(rows, "E10") == "could_not_verify"
