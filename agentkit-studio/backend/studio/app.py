@@ -515,16 +515,96 @@ def clear_goal(session_id: str) -> dict[str, Any]:
 
 @app.get("/scheduler")
 def get_scheduler() -> dict[str, Any]:
-    """Return current scheduler trigger list (stub — wire via agentkit.runtime.scheduler)."""
-    return {
-        "triggers": [],
-        "note": "Wire cron/webhook triggers via agentkit.runtime.scheduler.Scheduler",
-    }
+    """Return the registered cron triggers (real — was a stub). Each trigger fires
+    its saved chain on a timer once armed via POST /scheduler/cron."""
+    from studio import triggers
+    return {"triggers": triggers.list_triggers()}
+
+
+@app.post("/scheduler/cron")
+def register_cron_trigger(body: dict[str, Any]) -> dict[str, Any]:
+    """Register a cron trigger that fires a saved chain on a period. Body:
+    ``{"spec": "<cron/period>", "chain_id": "<id>", "interval_s": <float?>}``.
+    The chain of ``chain_id`` must have been run once via /chain/run (with that
+    chain_id) to be fireable; registration + listing work regardless."""
+    from studio import triggers
+
+    spec = str(body.get("spec") or "").strip()
+    chain_id = str(body.get("chain_id") or "").strip()
+    if not spec:
+        raise HTTPException(status_code=422, detail="spec (cron expression) required")
+    if not chain_id:
+        raise HTTPException(status_code=422, detail="chain_id required")
+    interval_s = body.get("interval_s")
+    try:
+        rec = triggers.register_cron(chain_id, spec, float(interval_s) if interval_s else None)
+        triggers.arm(chain_id, _execute_chain)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"trigger": rec, "armed": True}
+
+
+@app.delete("/scheduler/cron/{chain_id}")
+def delete_cron_trigger(chain_id: str) -> dict[str, Any]:
+    """Delete a cron trigger and cancel its timer."""
+    from studio import triggers
+    existed = triggers.delete_trigger(chain_id)
+    return {"deleted": existed, "chain_id": chain_id}
 
 
 # ---------------------------------------------------------------------------
 # /chain/run — synchronous LoopChain execution
 # ---------------------------------------------------------------------------
+
+def _default_llm_spec(explicit: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The LLM spec to use when a caller does not pass one: the first configured
+    profile (the GUI dropdown's default). Returns None only when no profile exists."""
+    if explicit:
+        return explicit
+    from studio.backends import list_profiles
+    profiles = list_profiles()
+    return {"profile": profiles[0]["name"]} if profiles else None
+
+
+def _build_chain_runner_factory(llm_spec: dict[str, Any] | None = None):  # type: ignore[no-untyped-def]
+    """Resolve a chat client once and return a factory that builds a REAL per-step
+    runner: each chain step is executed as a bounded LLM task (max 1024 tokens),
+    fed the step description plus any upstream step outputs from the merged ctx.
+    Falls back to an honest ``no LLM backend configured`` output when none is
+    available — never a silent stub (the old runner returned a placeholder)."""
+    from studio.backends import build_chat_client, resolve_backend
+
+    spec = _default_llm_spec(llm_spec)
+    client = None
+    if spec:
+        try:
+            backend = resolve_backend(spec)
+            client = build_chat_client(backend, on_usage=lambda _u: None, temperature=0.3)
+        except Exception:  # noqa: BLE001 — resolution failure → honest no-backend runner
+            client = None
+
+    def _factory(step_name: str, desc: str):  # type: ignore[no-untyped-def]
+        def _run(ctx: dict[str, Any]) -> dict[str, Any]:
+            if client is None:
+                return {"step": step_name, "output": "",
+                        "error": "no LLM backend configured"}
+            upstream = {k[1:-7]: v for k, v in ctx.items()
+                        if k.startswith("_") and k.endswith("_output")}
+            note = ""
+            if upstream:
+                note = "\n\nUpstream step outputs:\n" + "\n".join(
+                    f"- {u}: {str(v.get('output', v))[:800]}" for u, v in upstream.items())
+            messages = [
+                {"role": "system", "content": "You are one step in a multi-step agent "
+                 "chain. Do this step's work concisely and return only its result."},
+                {"role": "user", "content": f"Step: {step_name}\nTask: {desc}{note}"},
+            ]
+            result = client.chat(messages, max_tokens=1024)
+            return {"step": step_name, "output": (result.text or "").strip()}
+        return _run
+
+    return _factory
+
 
 @app.post("/chain/run")
 def run_chain(body: dict[str, Any]) -> dict[str, Any]:
@@ -538,17 +618,30 @@ def run_chain(body: dict[str, Any]) -> dict[str, Any]:
       "initial_ctx": {"task": "..."}
     }
     """
-    try:
-        from agentkit.loop.chain import LoopChain, LoopSpec
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail=f"agentkit.loop not installed: {exc}") from exc
-
     specs_raw: list[dict[str, Any]] = body.get("specs", [])
     initial_ctx: dict[str, Any] = body.get("initial_ctx", {})
 
     if not specs_raw:
         raise HTTPException(status_code=400, detail="specs must be non-empty")
 
+    # Save the chain by id (if given) so a scheduler cron trigger can fire it later,
+    # with the SAME llm spec so a scheduled run matches the interactive one.
+    chain_id = str(body.get("chain_id") or "").strip()
+    if chain_id:
+        from studio import triggers
+        triggers.save_chain(chain_id, specs_raw, initial_ctx, body.get("llm"))
+
+    return _execute_chain(specs_raw, initial_ctx, body.get("llm"))
+
+
+def _execute_chain(specs_raw: list[dict[str, Any]], initial_ctx: dict[str, Any],
+                   llm_spec: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build + run a LoopChain from raw specs and return the serialized result.
+    Shared by ``/chain/run`` and scheduler cron firing so both execute identically.
+    Each step runs as a real bounded LLM task (see ``_build_chain_runner_factory``)."""
+    from agentkit.loop.chain import LoopChain, LoopSpec
+
+    runner_factory = _build_chain_runner_factory(llm_spec)
     chain = LoopChain()
     for s in specs_raw:
         name = s.get("name", "")
@@ -556,14 +649,12 @@ def run_chain(body: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail="each spec must have a name")
         description = s.get("description", name)
         depends_on = tuple(s.get("depends_on") or [])
-
-        def _make_runner(desc: str):  # type: ignore[no-untyped-def]
-            def _run(ctx: dict) -> dict:
-                return {"description": desc, "status": "stub — wire a real runner"}
-            return _run
-
         try:
-            chain.add(LoopSpec(name=name, runner=_make_runner(description), depends_on=depends_on))
+            chain.add(LoopSpec(
+                name=name,
+                runner=runner_factory(name, description),
+                depends_on=depends_on,
+            ))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -595,23 +686,19 @@ def suggest_chain(body: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="task required")
 
     from agentkit.loop.suggest import suggest_chain_spec
-    from studio.backends import resolve_backend, build_chat_client
+    from studio.backends import build_chat_client, resolve_backend
 
-    # Use the first available LLM backend to generate the suggestion.
-    try:
-        from studio.catalog import _catalog  # type: ignore[attr-defined]
-        backends = list(_catalog.values())
-    except Exception:
-        backends = []
-
-    if not backends:
-        # Fallback: single-step spec
+    # Resolve the first configured profile (the old `studio.catalog` import never
+    # existed → this path always fell through to the single-step fallback).
+    spec = _default_llm_spec(body.get("llm"))
+    if not spec:
+        # No backend configured: honest single-step fallback.
         return {
             "specs": [{"name": "run", "description": task, "depends_on": []}],
             "initial_ctx": {"task": task},
         }
 
-    backend = resolve_backend(backends[0].get("spec") or backends[0])
+    backend = resolve_backend(spec)
     client = build_chat_client(backend, on_usage=lambda _: None, temperature=0.3)
     suggestion = suggest_chain_spec(task, client)
     return {
