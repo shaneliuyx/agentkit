@@ -1217,24 +1217,33 @@ def _verify_joint_claim(claim: str, quote: str, subjects: list[str], judge_clien
 
 
 def _filter_joint_noise(
-    claims: list[dict], subjects: list[str], judge_client: Any, ws_dir: Path, *, emit: EmitFn
+    claims: list[dict], subjects: list[str], judge_client: Any, ws_dir: Path, *, emit: EmitFn,
+    cache: dict | None = None,
 ) -> list[dict]:
     """Drop JOINT claims (>=2 subject tags) judged coincidental co-mentions (G1-noise). Only
-    joint claims are judged (one call each — they are few); single-subject claims pass
-    untouched. Fail-open (no judge / <2 subjects / any error → claims unchanged). Re-persists
-    the ledger on change so ``claims.jsonl`` matches what WRITE/coverage consume."""
+    joint claims are judged (single-subject claims pass untouched). Fail-open (no judge / <2
+    subjects / any error → claims unchanged). Re-persists the ledger on change so ``claims.jsonl``
+    matches what WRITE/coverage consume. Runs at EACH joint-count-gate boundary (before
+    ``_coverage_gate`` and ``_boost_richness``, then before WRITE) so those gates never count a
+    joint claim that will later be dropped (codex): the shared ``cache`` (keyed on claim+quote)
+    memoizes each verdict, so N call-sites cost one judge call per DISTINCT joint claim."""
     emit = emit or (lambda *_a: None)
     if judge_client is None or len(subjects) < 2:
         return claims
+    memo = cache if cache is not None else {}
     try:
         kept: list[dict] = []
         dropped = 0
         for c in claims:
-            if len(c.get("subjects") or []) >= 2 and not _verify_joint_claim(
-                c.get("claim", ""), c.get("quote", ""), c.get("subjects") or [], judge_client
-            ):
-                dropped += 1
-                continue
+            key = (c.get("claim", ""), c.get("quote", ""))
+            if len(c.get("subjects") or []) >= 2:
+                if key not in memo:
+                    memo[key] = _verify_joint_claim(
+                        c.get("claim", ""), c.get("quote", ""), c.get("subjects") or [], judge_client
+                    )
+                if not memo[key]:
+                    dropped += 1
+                    continue
             kept.append(c)
         if dropped:
             _persist_claims(kept, ws_dir)
@@ -3391,10 +3400,16 @@ def generate_research_first(
     # 3. CLAIMS
     claims = _build_claims(ledger, subjects, client, ws_dir, all_anchors)
     emit("claims", {"sources": sum(len(v) for v in ledger.values()), "claims": len(claims)})
+    # G1-noise semantic guard runs at EACH joint-count-gate boundary so coverage/richness never
+    # count a joint claim that will later be dropped as a coincidental co-mention (codex): a
+    # shared verdict cache makes the extra call-sites cost one judge call per DISTINCT joint claim.
+    _jn_cache: dict = {}
+    claims = _filter_joint_noise(claims, subjects, judge_client, ws_dir, emit=emit, cache=_jn_cache)
     claims = _coverage_gate(
         claims, subjects, relationship, all_anchors, evidence_dir, requirement,
         client, judge_client, ws_dir, emit=emit,
     )
+    claims = _filter_joint_noise(claims, subjects, judge_client, ws_dir, emit=emit, cache=_jn_cache)
 
     # Quality-floor retry (user bar: reach the s_4c021146c082 reference): a lean-web
     # pass yields few claims/joint claims → fewer resolved, no relations table. Boost
@@ -3431,7 +3446,7 @@ def generate_research_first(
     # are coincidental co-mentions rather than a genuine A-B relationship (the paraphrase gap
     # the lexical collision guard can't close). Placed here (not after _build_claims) so a
     # noisy joint claim RECOVERED post-build can't slip into the artifact unfiltered (codex).
-    claims = _filter_joint_noise(claims, subjects, judge_client, ws_dir, emit=emit)
+    claims = _filter_joint_noise(claims, subjects, judge_client, ws_dir, emit=emit, cache=_jn_cache)
 
     # 4. WRITE
     emit("write", {"sections": [s for s in sections if s.lower() not in _SKIP_WRITE]})

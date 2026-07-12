@@ -1733,6 +1733,27 @@ def test_filter_joint_noise_drops_coincidental_keeps_rest(tmp_path):
     assert len(persisted) == 2                                # ledger re-persisted post-drop
 
 
+def test_filter_joint_noise_shared_cache_judges_each_claim_once(tmp_path):
+    # Codex HIGH: the filter runs at every joint-count-gate boundary so coverage/richness never
+    # count a joint that will be dropped. A shared cache means N call-sites cost ONE judge call
+    # per DISTINCT joint claim (not N).
+    calls = {"n": 0}
+    def chat(messages, tools=None):
+        calls["n"] += 1
+        return SimpleNamespace(text="COINCIDENTAL" if "compatible" in messages[0]["content"] else "RELATIONSHIP")
+    judge = SimpleNamespace(chat=chat)
+    claims = [
+        {"url": "u1", "subjects": ["Pi", "Craft"], "claim": "Craft calls the Pi SDK", "quote": "q1"},
+        {"url": "u2", "subjects": ["Pi", "Craft"], "claim": "Pi is one of the compatible models", "quote": "q2"},
+    ]
+    cache: dict = {}
+    out = claims
+    for _ in range(3):   # 3 gate boundaries, shared cache
+        out = rf._filter_joint_noise(out, ["Pi", "Craft"], judge, tmp_path, emit=None, cache=cache)
+    assert calls["n"] == 2                                  # one judge call per distinct joint, not 6
+    assert [c["claim"] for c in out] == ["Craft calls the Pi SDK"]   # coincidental dropped, real kept
+
+
 def test_filter_joint_noise_fails_open(tmp_path):
     claims = [{"url": "u1", "subjects": ["Pi", "Craft"], "claim": "x", "quote": "y"}]
     assert rf._filter_joint_noise(claims, ["Pi", "Craft"], None, tmp_path, emit=None) == claims  # no judge
